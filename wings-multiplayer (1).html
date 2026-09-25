@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wings Prototype - Multijoueur réseau</title>
+<style>
+  :root{
+    --sky-top:#1b2a4a;
+    --sky-bottom:#3a5a8c;
+    --hud-bg:rgba(10,14,25,0.6);
+    --accent:#ffcb3d;
+  }
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:#000;
+    overflow:hidden;
+    font-family:'Segoe UI', Arial, sans-serif;
+    color:#f2f2f2;
+  }
+  #game-wrap{
+    position:relative;
+    width:960px;
+    height:600px;
+    margin:20px auto;
+    box-shadow:0 0 0 2px rgba(255,255,255,0.08), 0 20px 60px rgba(0,0,0,0.6);
+    border-radius:6px;
+    overflow:hidden;
+  }
+  canvas{
+    display:block;
+    background:linear-gradient(to bottom, var(--sky-top), var(--sky-bottom));
+  }
+  /* ---------- HUD ---------- */
+  #hud{
+    position:absolute;
+    top:10px; left:10px;
+    background:var(--hud-bg);
+    padding:8px 14px;
+    border-radius:6px;
+    font-size:13px;
+    line-height:1.5;
+    pointer-events:none;
+    backdrop-filter: blur(2px);
+    min-width:150px;
+  }
+  #hud .row{ display:flex; gap:8px; align-items:center; margin:2px 0; }
+  #hud .dot{ width:9px; height:9px; border-radius:50%; display:inline-block; }
+  #help{
+    position:absolute;
+    bottom:10px; left:10px;
+    background:var(--hud-bg);
+    padding:8px 14px;
+    border-radius:6px;
+    font-size:12px;
+    color:#cfd6e4;
+    pointer-events:none;
+  }
+  #title{
+    position:absolute;
+    top:10px; right:14px;
+    font-size:12px;
+    letter-spacing:0.5px;
+    color:#9fb0cc;
+    pointer-events:none;
+  }
+  /* ---------- Écran de connexion (lobby) ---------- */
+  #lobby{
+    position:absolute;
+    inset:0;
+    background:rgba(8,10,18,0.92);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    z-index:10;
+  }
+  #lobby.hidden{ display:none; }
+  #lobby-box{
+    background:#111826;
+    border:1px solid #263349;
+    border-radius:10px;
+    padding:28px 32px;
+    width:320px;
+    text-align:center;
+  }
+  #lobby-box h1{ font-size:18px; margin:0 0 4px; }
+  #lobby-box p{ font-size:12px; color:#9fb0cc; margin:0 0 18px; }
+  #lobby-box label{ display:block; text-align:left; font-size:12px; color:#cfd6e4; margin:10px 0 4px; }
+  #lobby-box input{
+    width:100%; box-sizing:border-box;
+    padding:8px 10px; border-radius:6px;
+    border:1px solid #2c3a54; background:#0c1220; color:#f2f2f2;
+    font-size:14px;
+  }
+  #lobby-box button{
+    margin-top:18px; width:100%;
+    padding:10px; border:none; border-radius:6px;
+    background:var(--accent); color:#1b1400; font-weight:600;
+    font-size:14px; cursor:pointer;
+  }
+  #lobby-box button:hover{ filter:brightness(1.05); }
+  #lobby-status{ margin-top:10px; font-size:12px; color:#8fa0c0; min-height:16px; }
+  #config-warning{
+    font-size:11px; color:#ffb454; margin-top:14px; text-align:left; line-height:1.4;
+  }
+</style>
+</head>
+<body>
+
+<div id="game-wrap">
+  <canvas id="game" width="960" height="600"></canvas>
+
+  <div id="hud">
+    <div class="row"><span class="dot" style="background:#ffcb3d"></span> Salle : <span id="hud-room">-</span></div>
+    <div class="row">Score : <span id="hud-score">0</span></div>
+    <div class="row">Vies : <span id="hud-lives">3</span></div>
+    <div class="row">Joueurs connectés : <span id="hud-count">0</span></div>
+  </div>
+
+  <div id="help">
+    Flèches ⬅➡ : tourner &nbsp;|&nbsp; ⬆⬇ : vitesse &nbsp;|&nbsp; Espace : tirer &nbsp;|&nbsp; Attention aux collisions avec les autres avions !
+  </div>
+
+  <div id="title">Wings Prototype — Multijoueur réseau (Firebase)</div>
+
+  <!-- Écran de connexion / lobby -->
+  <div id="lobby">
+    <div id="lobby-box">
+      <h1>Rejoindre une partie</h1>
+      <p>Jusqu'à 6 joueurs, même salle = même partie</p>
+
+      <label for="input-name">Pseudo</label>
+      <input id="input-name" type="text" maxlength="12" placeholder="Pilote1">
+
+      <label for="input-room">Code de salle</label>
+      <input id="input-room" type="text" maxlength="12" placeholder="arene1">
+
+      <button id="btn-join">Rejoindre / Créer la salle</button>
+      <div id="lobby-status"></div>
+      <div id="config-warning">
+        ⚠️ Pense à remplacer <code>firebaseConfig</code> en haut du fichier par
+        la config de TON propre projet Firebase avant de déployer (voir instructions).
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SDK Firebase (version "compat", la plus simple à utiliser dans un fichier unique) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+
+<script>
+/* =========================================================
+   WINGS PROTOTYPE — MULTIJOUEUR RÉSEAU (Firebase Realtime DB)
+   Un seul fichier HTML/CSS/JS, à héberger tel quel sur GitHub
+   Pages. Chaque joueur ouvre la même page (le même lien GitHub
+   Pages) dans son propre navigateur, entre le même code de
+   salle, et le jeu se synchronise via Firebase.
+
+   Nouveauté de cette version : collisions avion-vs-avion.
+   Percuter un autre avion fait perdre une vie AUX DEUX pilotes
+   (chaque client détecte sa propre collision et s'applique les
+   dégâts à lui-même, donc pas besoin de coordination réseau
+   particulière : c'est naturellement symétrique).
+   ========================================================= */
+
+// -----------------------------------------------------------
+// 1) CONFIGURATION FIREBASE
+// -----------------------------------------------------------
+const firebaseConfig = {
+  apiKey: "AIzaSyDV106_Qy0G3EeyPzaH58qgacNNyI6oYL8",
+  authDomain: "wingman-62d99.firebaseapp.com",
+  databaseURL: "https://wingman-62d99-default-rtdb.firebaseio.com",
+  projectId: "wingman-62d99",
+  storageBucket: "wingman-62d99.firebasestorage.app",
+  messagingSenderId: "189194720904",
+  appId: "1:189194720904:web:6b4127755118f38f55313d"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// -----------------------------------------------------------
+// CANVAS / HUD
+// -----------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+const hudRoom  = document.getElementById('hud-room');
+const hudScore = document.getElementById('hud-score');
+const hudLives = document.getElementById('hud-lives');
+const hudCount = document.getElementById('hud-count');
+
+const lobby      = document.getElementById('lobby');
+const inputName  = document.getElementById('input-name');
+const inputRoom  = document.getElementById('input-room');
+const btnJoin     = document.getElementById('btn-join');
+const lobbyStatus = document.getElementById('lobby-status');
+
+// -----------------------------------------------------------
+// CONFIGURATION DE LA PHYSIQUE DE VOL
+// -----------------------------------------------------------
+const CONFIG = {
+  turnSpeed: 0.045,
+  baseSpeed: 3.2,
+  minSpeed: 1.8,
+  maxSpeed: 6.5,
+  acceleration: 0.08,
+  drag: 0.02,
+  bulletSpeed: 9,          // px / frame (référence 60fps)
+  fireCooldown: 14,        // frames entre deux tirs
+  respawnInvuln: 90,
+  maxPlayers: 6,
+  planeCollisionRadius: 13, // distance en dessous de laquelle deux avions se percutent
+};
+
+// Palette de couleurs attribuée aux joueurs selon leur ordre d'arrivée
+const PALETTE = ['#ff5757', '#57b6ff', '#7bff57', '#ffcb3d', '#c76bff', '#ff8fd1'];
+
+// -----------------------------------------------------------
+// ÉTAT RÉSEAU
+// -----------------------------------------------------------
+let roomId = null;
+let playerId = null;      // identifiant unique généré côté client
+let myColor = '#ff5757';
+let playersRef = null;    // référence Firebase vers rooms/{room}/players
+let bulletsRef = null;    // référence Firebase vers rooms/{room}/bullets
+
+// Cache local de l'état de TOUS les joueurs (moi compris), rempli par Firebase
+const remotePlayers = {}; // { playerId: {x,y,angle,color,alive,lives,score,name, trail:[...]} }
+
+// Cache local des projectiles actifs (reconstruits depuis Firebase)
+const bulletsCache = {}; // { bulletId: {ownerId,x0,y0,angle,ts,color,hit} }
+
+// Mon propre avion (simulation physique locale, autoritaire sur MOI-même)
+let me = null; // instance de Plane, créée à la connexion
+
+// -----------------------------------------------------------
+// CLASSE PLANE — logique de vol
+// -----------------------------------------------------------
+class Plane {
+  constructor(x, y, angle, color) {
+    this.x = x; this.y = y; this.angle = angle;
+    this.speed = CONFIG.baseSpeed;
+    this.color = color;
+    this.cooldown = 0;
+    this.alive = true;
+    this.invuln = CONFIG.respawnInvuln;
+    this.score = 0;
+    this.lives = 3;
+  }
+
+  update(input) {
+    if (!this.alive) return;
+    if (input.left)  this.angle -= CONFIG.turnSpeed;
+    if (input.right) this.angle += CONFIG.turnSpeed;
+    if (input.up)   this.speed += CONFIG.acceleration;
+    if (input.down) this.speed -= CONFIG.acceleration;
+    this.speed += (CONFIG.baseSpeed - this.speed) * CONFIG.drag;
+    this.speed = Math.max(CONFIG.minSpeed, Math.min(CONFIG.maxSpeed, this.speed));
+
+    this.x += Math.cos(this.angle) * this.speed;
+    this.y += Math.sin(this.angle) * this.speed;
+
+    const margin = 14;
+    if (this.x < margin)     { this.x = margin;     this.angle = Math.PI - this.angle; }
+    if (this.x > W - margin) { this.x = W - margin;  this.angle = Math.PI - this.angle; }
+    if (this.y < margin)     { this.y = margin;     this.angle = -this.angle; }
+    if (this.y > H - margin) { this.y = H - margin;  this.angle = -this.angle; }
+
+    if (this.cooldown > 0) this.cooldown--;
+    if (this.invuln > 0) this.invuln--;
+
+    if (input.fire && this.cooldown === 0) {
+      this.shoot();
+      this.cooldown = CONFIG.fireCooldown;
+    }
+  }
+
+  shoot() {
+    const bx = this.x + Math.cos(this.angle) * 22;
+    const by = this.y + Math.sin(this.angle) * 22;
+    // On pousse le projectile dans Firebase : les autres clients le verront apparaître
+    bulletsRef.push({
+      ownerId: playerId,
+      x0: bx, y0: by, angle: this.angle,
+      color: this.color,
+      ts: firebase.database.ServerValue.TIMESTAMP,
+      hit: false
+    });
+  }
+
+  hit() {
+    if (this.invuln > 0 || !this.alive) return;
+    this.lives--;
+    if (this.lives <= 0) {
+      this.alive = false;
+      setTimeout(() => this.respawn(), 1200);
+    } else {
+      this.respawn();
+    }
+    pushMyState(); // on prévient immédiatement les autres joueurs
+  }
+
+  respawn() {
+    this.x = W / 2 + (Math.random() * 120 - 60);
+    this.y = H / 2 + (Math.random() * 120 - 60);
+    this.angle = -Math.PI / 2;
+    this.speed = CONFIG.baseSpeed;
+    this.alive = true;
+    this.invuln = CONFIG.respawnInvuln;
+    if (this.lives <= 0) this.lives = 3; // relance pour pouvoir tester en boucle
+  }
+}
+
+// -----------------------------------------------------------
+// CONNEXION À UNE SALLE
+// -----------------------------------------------------------
+btnJoin.addEventListener('click', joinRoom);
+
+function joinRoom() {
+  const name = (inputName.value || 'Pilote').trim().slice(0, 12);
+  const room = (inputRoom.value || 'arene1').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+
+  if (!room) {
+    lobbyStatus.textContent = "Entre un code de salle valide.";
+    return;
+  }
+
+  roomId = room;
+  playerId = 'p_' + Math.random().toString(36).slice(2, 10);
+  playersRef = db.ref(`rooms/${roomId}/players`);
+  bulletsRef = db.ref(`rooms/${roomId}/bullets`);
+
+  lobbyStatus.textContent = "Connexion en cours...";
+
+  // On vérifie combien de joueurs sont déjà présents pour attribuer une couleur
+  // et refuser la connexion si la salle est pleine (6 max).
+  playersRef.once('value').then(snapshot => {
+    const existing = snapshot.val() || {};
+    const count = Object.keys(existing).length;
+
+    if (count >= CONFIG.maxPlayers) {
+      lobbyStatus.textContent = `Salle pleine (${CONFIG.maxPlayers} joueurs max).`;
+      return;
+    }
+
+    myColor = PALETTE[count % PALETTE.length];
+    me = new Plane(W / 2, H / 2, -Math.PI / 2, myColor);
+
+    const myRef = playersRef.child(playerId);
+
+    // Écrit mon état initial
+    myRef.set(buildStatePayload(name));
+
+    // Si je perds la connexion (fermeture d'onglet, crash...), Firebase supprime
+    // automatiquement mon entrée pour ne pas laisser un avion fantôme.
+    myRef.onDisconnect().remove();
+
+    hudRoom.textContent = roomId;
+    lobby.classList.add('hidden');
+
+    listenToPlayers();
+    listenToBullets();
+    requestAnimationFrame(gameLoop);
+  }).catch(err => {
+    console.error(err);
+    lobbyStatus.textContent = "Erreur de connexion. Vérifie ta config Firebase (voir avertissement ci-dessous).";
+  });
+}
+
+function buildStatePayload(name) {
+  return {
+    name: name,
+    color: myColor,
+    x: me.x, y: me.y, angle: me.angle,
+    alive: me.alive, lives: me.lives, score: me.score,
+    ts: firebase.database.ServerValue.TIMESTAMP
+  };
+}
+
+// Envoie mon état actuel à Firebase (throttlé, voir gameLoop)
+function pushMyState() {
+  if (!playersRef || !playerId) return;
+  playersRef.child(playerId).update({
+    x: me.x, y: me.y, angle: me.angle,
+    alive: me.alive, lives: me.lives, score: me.score,
+    ts: firebase.database.ServerValue.TIMESTAMP
+  });
+}
+
+// -----------------------------------------------------------
+// ÉCOUTE DES AUTRES JOUEURS
+// -----------------------------------------------------------
+function listenToPlayers() {
+  playersRef.on('value', snapshot => {
+    const data = snapshot.val() || {};
+    // Met à jour le cache local de tous les joueurs (moi inclus, pour affichage cohérent)
+    for (const id in data) {
+      if (!remotePlayers[id]) remotePlayers[id] = { trail: [] };
+      Object.assign(remotePlayers[id], data[id]);
+      remotePlayers[id].trail.push({ x: data[id].x, y: data[id].y });
+      if (remotePlayers[id].trail.length > 12) remotePlayers[id].trail.shift();
+    }
+    // Nettoie les joueurs qui sont partis
+    for (const id in remotePlayers) {
+      if (!data[id]) delete remotePlayers[id];
+    }
+    hudCount.textContent = Object.keys(data).length;
+  });
+}
+
+// -----------------------------------------------------------
+// ÉCOUTE DES PROJECTILES
+// -----------------------------------------------------------
+function listenToBullets() {
+  bulletsRef.on('child_added', snap => {
+    bulletsCache[snap.key] = { id: snap.key, ...snap.val() };
+  });
+  bulletsRef.on('child_changed', snap => {
+    bulletsCache[snap.key] = { id: snap.key, ...snap.val() };
+  });
+  bulletsRef.on('child_removed', snap => {
+    delete bulletsCache[snap.key];
+  });
+}
+
+// -----------------------------------------------------------
+// ENTRÉES CLAVIER (uniquement pour MON avion)
+// -----------------------------------------------------------
+const keysDown = {};
+window.addEventListener('keydown', (e) => {
+  keysDown[e.key] = true;
+  if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => { keysDown[e.key] = false; });
+
+function readMyInput() {
+  return {
+    left:  !!keysDown['ArrowLeft'],
+    right: !!keysDown['ArrowRight'],
+    up:    !!keysDown['ArrowUp'],
+    down:  !!keysDown['ArrowDown'],
+    fire:  !!keysDown[' '],
+  };
+}
+
+// -----------------------------------------------------------
+// COLLISIONS PROJECTILES — chaque client est autoritaire sur SON propre avion
+// -----------------------------------------------------------
+function checkMyBulletCollisions() {
+  if (!me || !me.alive) return;
+  const planeRadius = 10, bulletRadius = 3;
+  const speedPerSec = CONFIG.bulletSpeed * 60; // conversion frame -> seconde
+
+  for (const id in bulletsCache) {
+    const b = bulletsCache[id];
+    if (b.hit || b.ownerId === playerId) continue; // pas de tir sur soi-même
+
+    const elapsedSec = (Date.now() - b.ts) / 1000;
+    const bx = b.x0 + Math.cos(b.angle) * speedPerSec * elapsedSec;
+    const by = b.y0 + Math.sin(b.angle) * speedPerSec * elapsedSec;
+
+    const dist = Math.hypot(bx - me.x, by - me.y);
+    if (dist < planeRadius + bulletRadius) {
+      // Je marque le projectile comme "touché" : le tireur (owner) verra
+      // ce changement et s'attribuera le point + supprimera le projectile.
+      bulletsRef.child(id).update({ hit: true });
+      me.hit();
+    }
+  }
+}
+
+// -----------------------------------------------------------
+// COLLISIONS AVION-VS-AVION
+// Chaque client vérifie uniquement SA propre distance aux autres avions
+// et s'applique les dégâts à lui-même si trop proche. Comme tout le monde
+// fait ce même calcul de son côté, le choc est naturellement subi par
+// les deux pilotes, sans avoir besoin de coordination réseau spéciale.
+// -----------------------------------------------------------
+function checkMyPlaneCollisions() {
+  if (!me || !me.alive || me.invuln > 0) return;
+
+  for (const id in remotePlayers) {
+    if (id === playerId) continue; // pas de collision avec soi-même
+    const p = remotePlayers[id];
+    if (!p.alive || p.x === undefined) continue;
+
+    const dist = Math.hypot(p.x - me.x, p.y - me.y);
+    if (dist < CONFIG.planeCollisionRadius * 2) {
+      me.hit();
+      break; // un seul choc traité par frame, même si plusieurs avions sont proches
+    }
+  }
+}
+
+// Si UN DE MES projectiles vient d'être marqué "hit" par sa victime,
+// je m'attribue le point et je nettoie le projectile.
+function checkMyScoring() {
+  for (const id in bulletsCache) {
+    const b = bulletsCache[id];
+    if (b.hit && b.ownerId === playerId && !b._scored) {
+      b._scored = true; // évite de compter deux fois côté client
+      me.score++;
+      pushMyState();
+      bulletsRef.child(id).remove();
+    }
+  }
+}
+
+// Nettoyage des projectiles expirés (chacun nettoie ceux qu'il a lui-même tirés)
+function cleanupExpiredBullets() {
+  const life = 1500; // ms (~90 frames à 60fps)
+  for (const id in bulletsCache) {
+    const b = bulletsCache[id];
+    if (b.ownerId === playerId && !b.hit && Date.now() - b.ts > life) {
+      bulletsRef.child(id).remove();
+    }
+  }
+}
+
+// -----------------------------------------------------------
+// BOUCLE DE JEU
+// -----------------------------------------------------------
+let lastNetworkPush = 0;
+const NETWORK_PUSH_INTERVAL = 50; // ms (~20 fois / seconde)
+
+function gameLoop() {
+  if (me) {
+    me.update(readMyInput());
+    checkMyBulletCollisions();
+    checkMyPlaneCollisions();
+    checkMyScoring();
+    cleanupExpiredBullets();
+
+    hudScore.textContent = me.score;
+    hudLives.textContent = me.lives;
+
+    const now = performance.now();
+    if (now - lastNetworkPush > NETWORK_PUSH_INTERVAL) {
+      pushMyState();
+      lastNetworkPush = now;
+    }
+  }
+
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// -----------------------------------------------------------
+// RENDU
+// -----------------------------------------------------------
+const clouds = [
+  {x: 120, y: 90, r: 40}, {x: 180, y: 100, r: 28},
+  {x: 760, y: 480, r: 36}, {x: 820, y: 460, r: 24},
+  {x: 500, y: 60, r: 30},
+];
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+  drawPlanes();
+  drawBullets();
+}
+
+function drawBackground() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  for (const c of clouds) {
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPlanes() {
+  for (const id in remotePlayers) {
+    const p = remotePlayers[id];
+    if (p.x === undefined) continue;
+
+    // Traînée
+    ctx.save();
+    ctx.strokeStyle = p.color || '#fff';
+    ctx.globalAlpha = 0.25;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    p.trail.forEach((pt, i) => i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y));
+    ctx.stroke();
+    ctx.restore();
+
+    if (!p.alive) continue;
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle || 0);
+    ctx.fillStyle = p.color || '#fff';
+    ctx.beginPath();
+    ctx.moveTo(16, 0);
+    ctx.lineTo(-12, -9);
+    ctx.lineTo(-6, 0);
+    ctx.lineTo(-12, 9);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+
+    // Pseudo au-dessus de l'avion
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '11px Segoe UI, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.name || '', p.x, p.y - 18);
+    ctx.restore();
+  }
+}
+
+function drawBullets() {
+  const speedPerSec = CONFIG.bulletSpeed * 60;
+  for (const id in bulletsCache) {
+    const b = bulletsCache[id];
+    if (b.hit) continue;
+    const elapsedSec = (Date.now() - b.ts) / 1000;
+    const bx = b.x0 + Math.cos(b.angle) * speedPerSec * elapsedSec;
+    const by = b.y0 + Math.sin(b.angle) * speedPerSec * elapsedSec;
+
+    ctx.save();
+    ctx.fillStyle = b.color || '#fff';
+    ctx.shadowColor = b.color || '#fff';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(bx, by, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+</script>
+</body>
+</html>
