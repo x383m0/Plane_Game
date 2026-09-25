@@ -33,8 +33,11 @@ Split of responsibilities:
   tallies kills/deaths when a `died` message arrives — so score can't
   double-count even if two players grab the same coin in the same instant.
 - **Position updates broadcast ~15 times/sec** (every 66ms), same cadence as
-  the Tetris board sync, which is plenty for planes that turn at a bounded
-  rate.
+  the Tetris board sync. Each client still *renders* at a full 60fps, though:
+  incoming updates are stored as a target position, and every other player's
+  plane glides toward that target each frame instead of snapping to it. Without
+  this, remote planes visibly teleport 15 times a second, which reads as
+  choppy, low-framerate motion even though your own plane is smooth.
 - **Shots are relayed as fire-and-forget events** — the shooter simulates the
   bullet locally and tells everyone else "a bullet was fired from here, going
   this way," and each client checks that bullet against their own plane only.
@@ -66,9 +69,21 @@ Split of responsibilities:
 
 ## Controls
 
-- **← / →** or **A / D** — steer left/right (you fly forward automatically)
+- **Mouse movement** — steer. The plane always flies forward and turns to
+  face wherever your cursor is (the camera keeps you centered on screen, so
+  the turn is computed straight from screen-center → cursor).
 - **↑** or **W** — boost (limited meter, recharges when not in use)
-- **Space** — fire (hold to keep firing at the weapon's cooldown rate)
+- **Left click** or **Space** — fire, at a very high rate of fire
+
+### Gun heat
+
+The gun fires fast (about 90ms between shots), but holding it down builds
+heat. Max out the heat bar and the gun locks up until it cools back down —
+so short controlled bursts beat holding the trigger. Heat drains on its own
+whenever you let off fire, and drains faster once you've overheated. Like
+the hit-detection trust model below, heat is tracked client-side and
+self-reported, so it's fine for casual play but not hardened against a
+modified client.
 
 ## Known limitations
 

@@ -148,6 +148,12 @@ button:active { transform: translateY(1px); }
 .bar-fill { height: 100%; width: 100%; transition: width 0.12s linear; }
 .bar-fill.hp { background: linear-gradient(90deg, #ff5e5e, #ffb84d); }
 .bar-fill.boost { background: linear-gradient(90deg, #4ad3ff, #7ef0c0); }
+.bar-fill.heat { background: linear-gradient(90deg, #ffe08a, #ff5e3a); }
+.bar-fill.heat.overheat { background: #ff2d2d; animation: heatPulse 0.35s ease-in-out infinite alternate; }
+@keyframes heatPulse {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
 
 #scorePanel {
   position: absolute;
