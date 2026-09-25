@@ -96,7 +96,14 @@ function respawnLocal() {
 }
 
 function updateLocalPlane(dtSec, keys) {
-  if (!myState.alive) return;
+  if (!myState.alive) {
+    // Was returning before this check ever ran, so nobody ever respawned.
+    if (myState.respawnAt && performance.now() >= myState.respawnAt) {
+      myState.respawnAt = 0;
+      respawnLocal();
+    }
+    return;
+  }
 
   // Steer toward the mouse cursor. The camera always keeps the player
   // centered on screen, so "screen center -> cursor" gives the aim angle.
@@ -163,11 +170,6 @@ function updateLocalPlane(dtSec, keys) {
         break;
       }
     }
-  }
-
-  if (!myState.alive && myState.respawnAt && now >= myState.respawnAt) {
-    myState.respawnAt = 0;
-    respawnLocal();
   }
 }
 
@@ -279,6 +281,15 @@ function handleState(fromId, data) {
 }
 
 function handleShoot(fromId, data) {
+  // The host is a player too, but this only runs on the host machine. When the
+  // shot comes from a connected client, the host's own bullets array never
+  // got it before (fireBullet() only pushes locally for whoever fired), so
+  // the host neither rendered it nor could take damage from it. Skip the push
+  // when the host is the shooter (fromId === myId) since fireBullet() already
+  // added it there.
+  if (fromId !== myId) {
+    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+  }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'shoot', from: fromId, id: data.id, x: data.x, y: data.y, angle: data.angle });
   });
@@ -383,7 +394,7 @@ function renderLobby() {
   Object.values(players).sort((a, b) => a.id - b.id).forEach(p => {
     const li = document.createElement('li');
     if (p.connected === false) li.className = 'offline';
-    li.innerHTML = `<span>${p.id === myId ? '★ ' : ''}${escapeHtml(p.name || ('Player ' + (p.id + 1)))}</span><span>${p.connected === false ? 'left' : 'ready'}</span>`;
+    li.innerHTML = `<span>${escapeHtml(p.name || ('Player ' + (p.id + 1)))}</span><span>${p.connected === false ? 'left' : 'ready'}</span>`;
     lobbyList.appendChild(li);
   });
 }

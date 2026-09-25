@@ -86,6 +86,11 @@ self-reported, so it's fine for casual play but not hardened against a
 modified client.
 
 ## Known limitations
+- Fixed: shots fired by anyone other than the host used to be invisible to
+  the host and couldn't damage it — the host relayed those shots to other
+  clients but never added them to its own local bullet list. It now does.
+- Fixed: respawning never actually happened — the update function returned
+  before the code that checks the respawn timer, so that check never ran.
 
 - If the host disconnects, the match ends for everyone (the host is the
   relay hub and the coin/score authority). Joiners disconnecting doesn't
