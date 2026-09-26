@@ -41,6 +41,7 @@ const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS =
 const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
 const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
 const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each flare wave; easy to tune
+const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30% HP
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
@@ -73,6 +74,7 @@ let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
 let bombs = [];                   // {id,ownerId,x,y,vx,vy,born}
 let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
 let explosions = [];              // {x,y,born,kind} — see FX above
+let specialEffects = [];           // imported impact/death/water effects
 let clouds = [];
 let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
@@ -184,22 +186,128 @@ function playExplosionSound(kind, x, y) {
 }
 function playLockSound() { if (!playAsset('lock', .22, 1.15)) tone(880, .08, .045, 'square', -220); }
 
-function spawnExplosion(x, y, kind) {
-  explosions.push({ x, y, born: performance.now(), kind });
-  playExplosionSound(kind, x, y);
-  if (kind === 'blast' || kind === 'crash' || kind === 'shock') screenShake = Math.max(screenShake, kind === 'crash' ? 18 : 11);
+function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
+  if (kind === 'blast') specialEffects.push(new ImpactExplosion(x, y, 'missile'));
+  else if (kind === 'crash') specialEffects.push(new ImpactExplosion(x, y, 'death'));
+  else if (kind === 'spark') specialEffects.push(new BulletHitEffect(x, y, angle));
+  else if (kind === 'water') specialEffects.push(new WaterSplashEffect(x, y));
+  else if (kind === 'planeWater') specialEffects.push(new WaterCrashEffect(x, y));
+  else explosions.push({ x, y, born: performance.now(), kind });
+  if (kind === 'blast' || kind === 'crash' || kind === 'planeWater') playExplosionSound(kind === 'planeWater' ? 'crash' : kind, x, y);
+  else if (kind === 'spark' || kind === 'water') playExplosionSound('spark', x, y);
+  else if (kind !== 'water') playExplosionSound(kind, x, y);
+  if (kind === 'blast' || kind === 'crash' || kind === 'planeWater' || kind === 'shock') screenShake = Math.max(screenShake, kind === 'crash' || kind === 'planeWater' ? 22 : 11);
 }
 function pruneExplosions(now) {
   for (let i = explosions.length - 1; i >= 0; i--) {
     if (now - explosions[i].born > FX[explosions[i].kind].life) explosions.splice(i, 1);
   }
+  for (let i = specialEffects.length - 1; i >= 0; i--) {
+    if (specialEffects[i].dead) specialEffects.splice(i, 1);
+  }
 }
+function updateSpecialEffects(dtSec) { specialEffects.forEach(e => e.update(dtSec)); }
 // Used when another client reports a hit on a bullet/missile we're also
 // tracking locally, so our copy disappears (with an effect) at the same time.
 function removeProjectileLocal(kind, id) {
   const arr = kind === 'missile' ? missiles : kind === 'bomb' ? bombs : bullets;
   const idx = arr.findIndex(p => p.id === id);
   if (idx !== -1) arr.splice(idx, 1);
+}
+
+// ================= Imported impact effects =================
+// These effects are world-space versions of the five effects supplied in
+// explosion-effect.html. They intentionally own their particles and lifetime
+// so projectile/death gameplay code stays separate from rendering.
+class ImpactExplosion {
+  constructor(x, y, type = 'missile') {
+    this.x = x; this.y = y; this.type = type; this.age = 0; this.dead = false;
+    const big = type === 'death';
+    this.maxLife = big ? 1.45 : .85;
+    this.shockwaveMax = big ? 165 : 40;
+    this.flashAlpha = big ? .78 : .4;
+    this.particles = []; this.debris = []; this.smoke = []; this.fireballs = [];
+    const fireballCount = big ? 3 : 1;
+    for (let i = 0; i < fireballCount; i++) this.fireballs.push({
+      delay: i * .05, life: 0, maxLife: (big ? .45 : .3) + i * .08,
+      maxR: (big ? 60 : 34) + i * (big ? 22 : 10)
+    });
+    const coreCount = big ? 58 : 30;
+    for (let i = 0; i < coreCount; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const speed = (big ? 80 : 55) + Math.random() * (big ? 330 : 220);
+      this.particles.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+        r: (big ? 4.3 : 3) + Math.random() * (big ? 10 : 6), life: 0,
+        maxLife: (big ? .7 : .45) + Math.random() * .5, hue: 15 + Math.random() * 35,
+        spark: Math.random() < .3 });
+    }
+    const debrisCount = big ? 18 : 0;
+    for (let i = 0; i < debrisCount; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const speed = 120 + Math.random() * 230;
+      this.debris.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed - 55,
+        rot: Math.random() * Math.PI * 2, vrot: (Math.random() - .5) * 12,
+        len: 9 + Math.random() * 16, life: 0, maxLife: 1 + Math.random() * .8 });
+    }
+    const smokeCount = big ? 25 : 12;
+    for (let i = 0; i < smokeCount; i++) {
+      const a = Math.random() * Math.PI * 2;
+      this.smoke.push({ x: 0, y: 0, vx: Math.cos(a) * (big ? 40 : 25),
+        vy: Math.sin(a) * (big ? 40 : 25) - (big ? 30 : 16),
+        r: (big ? 14 : 8) + Math.random() * (big ? 29 : 16), life: 0,
+        maxLife: (big ? 1.4 : .9) + Math.random() * .7, delay: Math.random() * .2 });
+    }
+  }
+  update(dt) {
+    this.age += dt;
+    this.fireballs.forEach(f => { if (f.delay > 0) f.delay -= dt; else f.life += dt; });
+    this.particles.forEach(p => { p.life += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .94; p.vy = p.vy * .94 + 40 * dt; });
+    this.particles = this.particles.filter(p => p.life < p.maxLife);
+    this.debris.forEach(d => { d.life += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 220 * dt; d.rot += d.vrot * dt; });
+    this.debris = this.debris.filter(d => d.life < d.maxLife);
+    this.smoke.forEach(s => { if (s.delay > 0) s.delay -= dt; else { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.r += dt * (this.type === 'death' ? 28 : 16); } });
+    this.smoke = this.smoke.filter(s => s.life < s.maxLife);
+    this.dead = this.age > this.maxLife && !this.particles.length && !this.debris.length && !this.smoke.length;
+  }
+  draw(ctx) {
+    const big = this.type === 'death';
+    ctx.save(); ctx.translate(this.x, this.y);
+    const swT = Math.min(1, this.age / (this.maxLife * .55));
+    if (swT < 1) {
+      const r = (1 - Math.pow(1 - swT, 2)) * this.shockwaveMax;
+      ctx.globalAlpha = (1 - swT) * .7; ctx.strokeStyle = '#ffe3a0'; ctx.lineWidth = 6 * (1 - swT) + 1.5;
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+    }
+    this.smoke.forEach(s => { if (s.delay > 0) return; const t = s.life / s.maxLife; ctx.globalAlpha = (1 - t) * .35; const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r); g.addColorStop(0, 'rgba(90,90,95,.9)'); g.addColorStop(1, 'rgba(90,90,95,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill(); });
+    this.fireballs.forEach(f => { if (f.delay > 0 || f.life > f.maxLife) return; const t = f.life / f.maxLife; const r = f.maxR * Math.sqrt(Math.sin(t * Math.PI * .5 + .001)); ctx.globalAlpha = (1 - t) * .9; const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r); g.addColorStop(0, 'rgba(255,244,214,.95)'); g.addColorStop(.35, 'rgba(255,150,40,.85)'); g.addColorStop(.7, 'rgba(255,60,20,.5)'); g.addColorStop(1, 'rgba(255,60,20,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); });
+    this.particles.forEach(p => { const t = p.life / p.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = `hsl(${p.hue},100%,${p.spark ? 75 : 55 - t * 30}%)`; ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(.5, p.r * (1 - t * .6)), 0, Math.PI * 2); ctx.fill(); });
+    const flashT = Math.min(1, this.age / .2);
+    if (flashT < 1) { ctx.globalAlpha = (1 - flashT) * this.flashAlpha * 2; const g = ctx.createRadialGradient(0, 0, 0, 0, 0, this.shockwaveMax * .75); g.addColorStop(0, '#fff'); g.addColorStop(.4, '#fff7dd'); g.addColorStop(1, 'rgba(255,180,40,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, this.shockwaveMax * .75, 0, Math.PI * 2); ctx.fill(); }
+    this.debris.forEach(d => { const t = d.life / d.maxLife; ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(d.rot); ctx.globalAlpha = 1 - t; ctx.fillStyle = '#8a8f96'; ctx.fillRect(-d.len / 2, -1.5, d.len, 3); ctx.restore(); });
+    ctx.restore();
+  }
+}
+
+class BulletHitEffect {
+  constructor(x, y, angle = -Math.PI / 2) {
+    this.x = x; this.y = y; this.age = 0; this.maxLife = .28; this.dead = false; this.flashLife = 0; this.sparks = [];
+    const count = 8 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < count; i++) { const a = angle + Math.PI + (Math.random() - .5) * 1.6; const speed = 90 + Math.random() * 160; this.sparks.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, len: 3 + Math.random() * 6, life: 0, maxLife: .12 + Math.random() * .16 }); }
+  }
+  update(dt) { this.age += dt; this.flashLife += dt; this.sparks.forEach(s => { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= .9; s.vy = s.vy * .9 + 260 * dt; }); this.sparks = this.sparks.filter(s => s.life < s.maxLife); this.dead = this.age > this.maxLife && !this.sparks.length; }
+  draw(ctx) { ctx.save(); ctx.translate(this.x, this.y); if (this.flashLife < .07) { const t = this.flashLife / .07; ctx.globalAlpha = 1 - t; const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 10); g.addColorStop(0, '#fffbe8'); g.addColorStop(1, 'rgba(255,220,120,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.fill(); } this.sparks.forEach(s => { const t = s.life / s.maxLife; ctx.globalAlpha = 1 - t; ctx.strokeStyle = `hsl(${45 + Math.random() * 10},100%,${70 - t * 20}%)`; ctx.lineWidth = 1.6 * (1 - t) + .4; ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx * .02, s.y - s.vy * .02); ctx.stroke(); }); ctx.restore(); }
+}
+
+class WaterSplashEffect {
+  constructor(x, y) { this.x = x; this.y = y; this.age = 0; this.dead = false; this.drops = []; this.rings = [0, .08].map(delay => ({ delay, life: 0, maxLife: .5, maxR: 16 + Math.random() * 6 })); this.mist = []; for (let i = 0; i < 5; i++) this.mist.push({ x: (Math.random() - .5) * 4, r: 2 + Math.random() * 3, life: 0, maxLife: .25 + Math.random() * .15 }); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + (Math.random() - .5) * 1.7, speed = 45 + Math.random() * 95; this.drops.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: .9 + Math.random() * 1.5, life: 0, maxLife: .3 + Math.random() * .25 }); } }
+  update(dt) { this.age += dt; this.drops.forEach(d => { d.life += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 380 * dt; }); this.drops = this.drops.filter(d => d.life < d.maxLife && d.y < 40); this.rings.forEach(r => { if (r.delay > 0) r.delay -= dt; else r.life += dt; }); this.rings = this.rings.filter(r => r.life < r.maxLife); this.mist.forEach(m => { m.life += dt; m.r += dt * 30; }); this.mist = this.mist.filter(m => m.life < m.maxLife); this.dead = this.age > .9 && !this.drops.length && !this.rings.length && !this.mist.length; }
+  draw(ctx) { ctx.save(); ctx.translate(this.x, this.y); this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife; ctx.globalAlpha = (1 - t) * .55; ctx.strokeStyle = '#dff6ff'; ctx.lineWidth = 2 * (1 - t) + .5; ctx.beginPath(); ctx.ellipse(0, 0, t * r.maxR, t * r.maxR * .35, 0, 0, Math.PI * 2); ctx.stroke(); }); this.mist.forEach(m => { const t = m.life / m.maxLife; ctx.globalAlpha = (1 - t) * .5; ctx.fillStyle = '#eefbff'; ctx.beginPath(); ctx.ellipse(m.x, -m.r * .15, m.r, m.r * .6, 0, 0, Math.PI * 2); ctx.fill(); }); this.drops.forEach(d => { const t = d.life / d.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = '#bfeaff'; ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(.6, d.r * (1 - t * .4)), 0, Math.PI * 2); ctx.fill(); }); ctx.restore(); }
+}
+
+class WaterCrashEffect {
+  constructor(x, y) { this.x = x; this.y = y; this.age = 0; this.dead = false; this.spikes = []; this.drops = []; this.rings = [0, .06, .16, .3, .46].map(delay => ({ delay, life: 0, maxLife: 1.3, maxR: 145 + Math.random() * 35 })); this.flames = []; this.steam = []; this.debris = []; for (let i = 0; i < 16; i++) { const a = -Math.PI / 2 + (Math.random() - .5) * .5, speed = 260 + Math.random() * 290; this.spikes.push({ x: (Math.random() - .5) * 14, y: 0, vx: Math.cos(a) * speed * .35, vy: Math.sin(a) * speed, r: 4 + Math.random() * 5.5, life: 0, maxLife: .55 + Math.random() * .4 }); } for (let i = 0; i < 60; i++) { const a = -Math.PI / 2 + (Math.random() - .5) * 2.2, speed = 120 + Math.random() * 340; this.drops.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 1.3 + Math.random() * 3.3, life: 0, maxLife: .55 + Math.random() * .55 }); } for (let i = 0; i < 28; i++) { const a = Math.random() * Math.PI * 2, speed = 55 + Math.random() * 160; this.flames.push({ x: 0, y: -8, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * .5 - 40, r: 4 + Math.random() * 8, life: 0, maxLife: .16 + Math.random() * .22, hue: 20 + Math.random() * 30 }); } for (let i = 0; i < 30; i++) this.steam.push({ x: 0, y: 0, vx: (Math.random() - .5) * 52, vy: -38 - Math.random() * 36, r: 11 + Math.random() * 22, life: 0, maxLife: 1.1 + Math.random(), delay: .1 + Math.random() * .4 }); for (let i = 0; i < 12; i++) { const a = Math.random() * Math.PI * 2, d = 30 + Math.random() * 75; this.debris.push({ x: Math.cos(a) * d * .3, y: 0, tx: Math.cos(a) * d, rot: Math.random() * Math.PI * 2, vrot: (Math.random() - .5) * 3, len: 8 + Math.random() * 13, life: 0, maxLife: 1.8 + Math.random() * .5, settle: .3 + Math.random() * .2 }); } }
+  update(dt) { this.age += dt; this.spikes.forEach(s => { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 500 * dt; }); this.spikes = this.spikes.filter(s => s.life < s.maxLife && s.y < 20); this.drops.forEach(d => { d.life += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 420 * dt; }); this.drops = this.drops.filter(d => d.life < d.maxLife && d.y < 30); this.rings.forEach(r => { if (r.delay > 0) r.delay -= dt; else r.life += dt; }); this.rings = this.rings.filter(r => r.life < r.maxLife); this.flames.forEach(f => { f.life += dt; f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= .9; f.vy *= .9; }); this.flames = this.flames.filter(f => f.life < f.maxLife); this.steam.forEach(s => { if (s.delay > 0) s.delay -= dt; else { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= .98; s.r += dt * 14; } }); this.steam = this.steam.filter(s => s.life < s.maxLife); this.debris.forEach(d => { d.life += dt; const t = Math.min(1, d.life / d.settle), eased = 1 - Math.pow(1 - t, 3); d.x += (d.tx - d.x) * eased * .3; d.rot += d.vrot * dt * (1 - eased * .8); }); this.debris = this.debris.filter(d => d.life < d.maxLife); this.dead = this.age > 2.3 && !this.spikes.length && !this.drops.length && !this.rings.length && !this.flames.length && !this.steam.length && !this.debris.length; }
+  draw(ctx) { ctx.save(); ctx.translate(this.x, this.y); this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife; ctx.globalAlpha = (1 - t) * .5; ctx.strokeStyle = '#dff6ff'; ctx.lineWidth = 2.5 * (1 - t) + .5; ctx.beginPath(); ctx.ellipse(0, 0, t * r.maxR, t * r.maxR * .32, 0, 0, Math.PI * 2); ctx.stroke(); }); this.debris.forEach(d => { const t = d.life / d.maxLife; ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(d.rot); ctx.globalAlpha = Math.min(1, (1 - t) * 1.4); ctx.fillStyle = '#6f757c'; ctx.fillRect(-d.len / 2, -1.5, d.len, 3); ctx.restore(); }); this.flames.forEach(f => { const t = f.life / f.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = `hsl(${f.hue},100%,${60 - t * 20}%)`; ctx.beginPath(); ctx.arc(f.x, f.y, Math.max(.5, f.r * (1 - t * .7)), 0, Math.PI * 2); ctx.fill(); }); this.steam.forEach(s => { if (s.delay > 0) return; const t = s.life / s.maxLife; ctx.globalAlpha = (1 - t) * .4; const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r); g.addColorStop(0, 'rgba(230,238,240,.9)'); g.addColorStop(1, 'rgba(230,238,240,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill(); }); this.spikes.forEach(s => { const t = s.life / s.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = '#cdeeff'; ctx.beginPath(); ctx.arc(s.x, s.y, Math.max(.6, s.r * (1 - t * .3)), 0, Math.PI * 2); ctx.fill(); }); this.drops.forEach(d => { const t = d.life / d.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = '#bfeaff'; ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(.5, d.r * (1 - t * .4)), 0, Math.PI * 2); ctx.fill(); }); ctx.restore(); }
 }
 
 function buildClouds() {
@@ -264,7 +372,7 @@ function respawnLocal() {
 }
 
 function crashLocal(message = 'You crashed.') {
-  finishDeath(null, message);
+  finishDeath(null, message, 'planeWater');
 }
 
 function beginDeathFall(killerId, message = 'Aircraft disabled') {
@@ -284,7 +392,7 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   respawnMsgEl.textContent = message;
 }
 
-function finishDeath(killerId, message = 'Shot down!') {
+function finishDeath(killerId, message = 'Shot down!', deathEffect = 'crash') {
   if (!myState || !myState.alive) return;
   const now = performance.now();
   myState.health = 0; myState.alive = false; myState.falling = false;
@@ -292,7 +400,7 @@ function finishDeath(killerId, message = 'Shot down!') {
   respawnMsgEl.textContent = message;
   respawnOverlay.style.display = 'flex';
   myState.respawnAt = now + RESPAWN_DELAY;
-  spawnExplosion(myState.x, Math.min(myState.y, GROUND_Y - 10), 'crash');
+  spawnExplosion(myState.x, Math.min(myState.y, GROUND_Y - 10), deathEffect);
   sendEvent({ type: 'died', by: killerId });
 }
 
@@ -304,7 +412,7 @@ function updateDeathFall(dtSec) {
   myState.turnVelocity = 0;
   myState.roll += myState.fallSpinVelocity * dtSec;
   myState.y += myState.verticalVelocity * dtSec;
-  if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost');
+  if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost', 'planeWater');
 }
 
 // A stall is recoverable. The player can still point the nose down and regain
@@ -358,7 +466,7 @@ function checkFallingHits() {
     const b = bullets[i];
     if (b.ownerId === myId) continue;
     if (pointSegmentDistance(myState.x, myState.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) < HIT_RADIUS) {
-      bullets.splice(i, 1); spawnExplosion(b.x, b.y, 'spark');
+      bullets.splice(i, 1); spawnExplosion(b.x, b.y, 'spark', b.angle);
       sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
       finishDeath(b.ownerId, 'Aircraft destroyed'); return;
     }
@@ -531,7 +639,7 @@ function updateLocalPlane(dtSec, keys) {
       if (b.ownerId === myId) continue;
       if (pointSegmentDistance(myState.x, myState.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) < HIT_RADIUS) {
         bullets.splice(i, 1);
-        spawnExplosion(b.x, b.y, 'spark');
+        spawnExplosion(b.x, b.y, 'spark', b.angle);
         sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
         const rearHit = Math.abs(angleDiff(myState.angle, b.angle)) < Math.PI / 3;
         myState.health -= BULLET_DAMAGE * (rearHit ? 1.35 : 1);
@@ -641,7 +749,7 @@ function updateBullets(dtSec) {
     const b = bullets[i];
     // Rounds persist indefinitely and are removed only when they reach the sea.
     if (b.y >= GROUND_Y - 8) {
-      spawnExplosion(b.x, GROUND_Y - 8, 'spark'); bullets.splice(i, 1); continue;
+      spawnExplosion(b.x, GROUND_Y - 8, 'water'); bullets.splice(i, 1); continue;
     }
     b.prevX = b.x; b.prevY = b.y;
     if (b.vx == null) {
@@ -722,10 +830,12 @@ function spawnFlareSalvo(x, y, angle) {
   const rearX = -Math.cos(angle), rearY = -Math.sin(angle);
   for (let side of [-1, 1]) {
     for (let i = 0; i < FLARE_SALVO_COUNT; i++) {
-      const spread = 12 + i * 8;
       const f = {
-        x: x + sideX * side * spread + rearX * (i * 5),
-        y: y + sideY * side * spread + rearY * (i * 5),
+        // Every flare starts at its own dispenser on the aircraft. The
+        // staggered born time controls when it becomes visible, so each one
+        // can be seen leaving the plane instead of appearing pre-scattered.
+        x: x + sideX * side * 10,
+        y: y + sideY * side * 10,
         vx: sideX * side * (35 + i * 7) + rearX * 55,
         vy: sideY * side * (35 + i * 7) + rearY * 55,
         born: now + i * FLARE_SPAWN_INTERVAL_MS
@@ -811,6 +921,17 @@ function startHost() {
   isHost = true; myId = 0;
   players[0] = freshPlayerState(0, myName);
   peer = new Peer();
+  peer.on('error', err => {
+    const message = err && err.type === 'unavailable-id'
+      ? 'That room code is unavailable. Try hosting again.'
+      : 'Network error — check the connection and try again.';
+    statusEl.textContent = message;
+    startBtn.style.display = 'none'; waitHint.style.display = 'block';
+  });
+  peer.on('disconnected', () => {
+    statusEl.textContent = 'Disconnected from the signaling server.';
+    startBtn.style.display = 'none'; waitHint.style.display = 'block';
+  });
   peer.on('open', id => {
     statusEl.textContent = 'Share this code: ' + id;
     chooseRole.style.display = 'none'; lobby.style.display = 'flex';
@@ -830,6 +951,10 @@ function startHost() {
     });
     c.on('data', data => handleHostReceive(id, data));
     c.on('close', () => { if (players[id]) players[id].connected = false; broadcastRoster(); });
+    c.on('error', () => {
+      if (players[id]) players[id].connected = false;
+      broadcastRoster();
+    });
   });
   startBtn.onclick = () => {
     if (started) return;
@@ -1007,6 +1132,16 @@ function startJoin() {
   const hostId = document.getElementById('hostIdInput').value.trim();
   if (!hostId) return;
   peer = new Peer();
+  peer.on('error', err => {
+    const message = err && err.type === 'peer-unavailable'
+      ? 'Room not found. Check the room code.'
+      : 'Unable to connect to the network.';
+    statusEl.textContent = message;
+    chooseRole.style.display = 'flex'; lobby.style.display = 'none';
+  });
+  peer.on('disconnected', () => {
+    statusEl.textContent = 'Disconnected from the signaling server.';
+  });
   peer.on('open', () => {
     const conn = peer.connect(hostId, { reliable: true });
     connections.host = conn;
@@ -1016,6 +1151,14 @@ function startJoin() {
       startBtn.style.display = 'none'; waitHint.style.display = 'block';
     });
     conn.on('data', handleClientReceive);
+    conn.on('error', () => {
+      statusEl.textContent = 'Connection failed. Check the room code and try again.';
+      chooseRole.style.display = 'flex'; lobby.style.display = 'none';
+    });
+    conn.on('close', () => {
+      statusEl.textContent = 'Host connection closed.';
+      if (!started) { chooseRole.style.display = 'flex'; lobby.style.display = 'none'; }
+    });
   });
 }
 
@@ -1128,7 +1271,7 @@ function pushKillFeed(killerId, victimId) {
 function onKilled(killerId, victimId) {
   pushKillFeed(killerId, victimId);
   const v = players[victimId];
-  if (v) spawnExplosion(v.x, v.y, 'crash');
+  if (v) spawnExplosion(v.x, v.y, v.y >= GROUND_Y - 20 ? 'planeWater' : 'crash');
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
@@ -1186,19 +1329,19 @@ function resizeCanvas() {
 // This compact silhouette is drawn at runtime, so it stays sharp, readable,
 // and easy to tint for every pilot without needing an external image asset.
 const PLANE_SPRITE_LEN = 88;
-function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = false) {
+function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = false, onFire = false) {
   const main = alive ? color : '#566875';
   const dark = alive ? '#082238' : '#273844';
   const highlight = alive ? '#d8f5ff' : '#83939a';
   ctx.save();
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.shadowColor = alive ? color : 'transparent'; ctx.shadowBlur = alive ? 9 : 0;
-  if (falling) {
+  if (falling || onFire) {
     // Fatal uncontrolled aircraft burn while descending. The trail is drawn
     // in the aircraft's local space, so it remains attached while the plane
     // spins visually and does not affect its falling movement.
     const pulse = .82 + Math.sin(performance.now() / 70) * .12;
-    const length = 62 + pulse * 34;
+    const length = falling ? 62 + pulse * 34 : 42 + pulse * 22;
     const fire = ctx.createLinearGradient(-24, 0, -length, 0);
     fire.addColorStop(0, 'rgba(255,255,220,.98)');
     fire.addColorStop(.22, 'rgba(255,205,75,.95)');
@@ -1208,7 +1351,7 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = 
     ctx.beginPath();
     ctx.moveTo(-22, -5); ctx.lineTo(-length, Math.sin(performance.now() / 55) * 5);
     ctx.lineTo(-22, 5); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = 'rgba(55,58,62,.42)';
+    ctx.fillStyle = falling ? 'rgba(55,58,62,.42)' : 'rgba(55,58,62,.25)';
     ctx.beginPath(); ctx.arc(-length * .72, -7, 4 + pulse * 3, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(-length * .86, 6, 3 + pulse * 2, 0, Math.PI * 2); ctx.fill();
   }
@@ -1284,8 +1427,10 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.translate(p.x - Math.cos(p.angle) * kick, p.y - Math.sin(p.angle) * kick);
   ctx.rotate(p.angle);
   const roll = p.roll || 0;
+  const health = p.health == null ? MAX_HEALTH : p.health;
+  const onFire = p.falling === true || (p.alive !== false && health <= MAX_HEALTH * CRITICAL_HEALTH_FRACTION);
   ctx.globalAlpha = flicker ? 0.4 : 1;
-  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true, roll, p.falling === true);
+  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true, roll, p.falling === true, onFire);
   ctx.restore();
 
   ctx.globalAlpha = 1;
@@ -1672,6 +1817,7 @@ function render(now) {
   drawPlane(ctx, myState, true, now);
 
   explosions.forEach(e => drawExplosion(ctx, e, now));
+  specialEffects.forEach(e => e.draw(ctx));
 
   ctx.restore();
 
@@ -1738,6 +1884,7 @@ function loop(ts) {
   updateMissiles(dtSec);
   updateBombs(dtSec);
   updateFlares(dtSec);
+  updateSpecialEffects(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
   interpolateRemotePlayers(dtSec);
