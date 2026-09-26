@@ -17,12 +17,12 @@ const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
 const BARREL_ROLL_DURATION = 720, BARREL_ROLL_SPEED = Math.PI * 2.8, BARREL_ROLL_COOLDOWN = 900;
 const STALL_SPIN_SPEED = 5.2, FALL_GRAVITY = 420;
 
-const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = 720, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
+const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = Infinity, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
 const BULLET_SIGHT_TIME = .42;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
-const HEAT_MAX = 100, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
+const HEAT_MAX = 300, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
@@ -232,6 +232,7 @@ function respawnLocal() {
   myState.speed = PLANE_SPEED; myState.verticalVelocity = 0; myState.turnVelocity = 0;
   myState.roll = 0; myState.barrelRollUntil = 0; myState.barrelRollCooldown = 0; myState.barrelRollDirection = 1;
   myState.falling = false; myState.deathKiller = null; myState.fallSpinVelocity = 0;
+  myState.boosting = false;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
@@ -248,6 +249,7 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   if (!myState || !myState.alive || myState.falling) return;
   myState.health = 0;
   myState.falling = true;
+  myState.boosting = false;
   myState.deathKiller = killerId;
   myState.speed = Math.max(0, myState.speed * .35);
   myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
@@ -341,6 +343,7 @@ function updateLocalPlane(dtSec, keys) {
   // the aircraft faster but also reduces turn authority through the flight
   // model above.
   myState.boost = BOOST_MAX;
+  myState.boosting = boosting;
 
   const now = performance.now();
   myState.barrelRollCooldown = Math.max(0, myState.barrelRollCooldown - dtSec * 1000);
@@ -522,7 +525,10 @@ function updateBullets(dtSec) {
   const now = performance.now();
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    if (now - b.born > BULLET_LIFE) { spawnExplosion(b.x, b.y, 'muzzle'); bullets.splice(i, 1); continue; }
+    // Rounds persist indefinitely and are removed only when they reach the sea.
+    if (b.y >= GROUND_Y - 8) {
+      spawnExplosion(b.x, GROUND_Y - 8, 'spark'); bullets.splice(i, 1); continue;
+    }
     b.prevX = b.x; b.prevY = b.y;
     if (b.vx == null) {
       b.vx = Math.cos(b.angle) * BULLET_SPEED;
@@ -730,6 +736,7 @@ function applyRemoteState(p, data) {
   p.tx = data.x; p.ty = data.y; p.tangle = data.angle;
   p.health = data.health; p.alive = data.alive;
   p.falling = !!data.falling;
+  p.boosting = !!data.boosting;
   if (data.roll != null) p.roll = data.roll;
 }
 
@@ -737,7 +744,7 @@ function handleState(fromId, data) {
   const p = players[fromId];
   if (p) applyRemoteState(p, data);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, roll: data.roll });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, boosting: data.boosting, roll: data.roll });
   });
 }
 
@@ -1025,7 +1032,7 @@ function resizeCanvas() {
 // This compact silhouette is drawn at runtime, so it stays sharp, readable,
 // and easy to tint for every pilot without needing an external image asset.
 const PLANE_SPRITE_LEN = 88;
-function drawPlaneSprite(ctx, color, alive) {
+function drawPlaneSprite(ctx, color, alive, boosting) {
   const main = alive ? color : '#566875';
   const dark = alive ? '#082238' : '#273844';
   const highlight = alive ? '#d8f5ff' : '#83939a';
@@ -1034,13 +1041,14 @@ function drawPlaneSprite(ctx, color, alive) {
   ctx.shadowColor = alive ? color : 'transparent'; ctx.shadowBlur = alive ? 9 : 0;
   // Visual-only exhaust trail. Flight audio is disabled, but the aircraft
   // still needs a clear sense of thrust during fast movement.
-  if (alive) {
-    const exhaust = ctx.createLinearGradient(-27, 0, -53, 0);
+  if (alive && boosting) {
+    const exhaustLength = 80;
+    const exhaust = ctx.createLinearGradient(-27, 0, -exhaustLength, 0);
     exhaust.addColorStop(0, 'rgba(255,244,184,.95)');
     exhaust.addColorStop(.42, 'rgba(255,145,65,.7)');
     exhaust.addColorStop(1, 'rgba(255,70,25,0)');
     ctx.fillStyle = exhaust;
-    ctx.beginPath(); ctx.moveTo(-27,-3); ctx.lineTo(-53,0); ctx.lineTo(-27,3); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-27,-4.5); ctx.lineTo(-exhaustLength,0); ctx.lineTo(-27,4.5); ctx.closePath(); ctx.fill();
   }
   ctx.shadowBlur = 0;
   // wings and tailplane
@@ -1082,7 +1090,7 @@ function drawPlane(ctx, p, isMe, now) {
   const wingProfile = .14 + .86 * Math.abs(Math.cos(roll));
   ctx.scale(1, wingProfile);
   ctx.globalAlpha = flicker ? 0.4 : 1;
-  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false);
+  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true);
   ctx.restore();
 
   ctx.globalAlpha = 1;
@@ -1432,7 +1440,6 @@ function render(now) {
   drawSkyBackdrop(ctx, camX, camY, W, H);
 
   drawGround(ctx);
-  drawSpeedLines(ctx, now);
 
   ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 5;
@@ -1528,7 +1535,7 @@ function loop(ts) {
 
   if (ts - lastBroadcast > 66) {
     lastBroadcast = ts;
-    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive, falling: myState.falling, roll: myState.roll });
+    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive, falling: myState.falling, boosting: myState.boosting, roll: myState.roll });
   }
 
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';
