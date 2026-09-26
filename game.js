@@ -840,34 +840,43 @@ function tryDeployFlare() {
   myState.flares--;
   unlockAudio();
   playAsset('chaff', .34, 1);
-  spawnFlareSalvo(myState.x, myState.y, myState.angle);
-  resolveFlare(myId, myState.x, myState.y);
+  spawnFlareSalvo(myState.x, myState.y, myState.angle, myId);
   sendEvent({ type: 'flare', x: myState.x, y: myState.y, angle: myState.angle });
 }
 
-function spawnFlareSalvo(x, y, angle) {
-  const now = performance.now();
-  const sideX = -Math.sin(angle), sideY = Math.cos(angle);
-  const rearX = -Math.cos(angle), rearY = -Math.sin(angle);
-  for (let side of [-1, 1]) {
-    for (let i = 0; i < FLARE_SALVO_COUNT; i++) {
+function spawnFlareSalvo(x, y, angle, ownerId = myId) {
+  const launchCount = FLARE_SALVO_COUNT * 2;
+  for (let launchIndex = 0; launchIndex < launchCount; launchIndex++) {
+    const side = launchIndex % 2 === 0 ? -1 : 1;
+    const flareNumber = Math.floor(launchIndex / 2);
+    // Only create the flare at its launch time. Previously all objects were
+    // inserted immediately with future timestamps, which made the salvo look
+    // like every flare spawned on top of the first one.
+    setTimeout(() => {
+      const born = performance.now();
+      // Re-read the aircraft at launch time. This makes every flare originate
+      // from the plane's current position, even while the plane is turning or
+      // moving during the rest of the salvo.
+      const source = ownerId === myId && myState
+        ? myState
+        : (players[ownerId] || { x, y, angle });
+      const launchX = Number.isFinite(source.x) ? source.x : x;
+      const launchY = Number.isFinite(source.y) ? source.y : y;
+      const launchAngle = Number.isFinite(source.angle) ? source.angle : angle;
+      const sideX = -Math.sin(launchAngle), sideY = Math.cos(launchAngle);
+      const rearX = -Math.cos(launchAngle), rearY = -Math.sin(launchAngle);
       const f = {
-        // Every flare starts at its own dispenser on the aircraft. The
-        // staggered born time controls when it becomes visible, so each one
-        // can be seen leaving the plane instead of appearing pre-scattered.
-        x: x + sideX * side * 10,
-        y: y + sideY * side * 10,
-        vx: sideX * side * (35 + i * 7) + rearX * 55,
-        vy: sideY * side * (35 + i * 7) + rearY * 55,
-        born: now + i * FLARE_SPAWN_INTERVAL_MS
+        x: launchX + sideX * side * 10,
+        y: launchY + sideY * side * 10,
+        vx: sideX * side * (35 + flareNumber * 7) + rearX * 55,
+        vy: sideY * side * (35 + flareNumber * 7) + rearY * 55,
+        born
       };
       flares.push(f);
-      // The salvo has the characteristic repeated popping/firing sound.
-      setTimeout(() => {
-        const volume = proximityVolume(f.x, f.y, .18);
-        if (volume > .005) playAsset('flare', volume, 1.02 + i * .015);
-      }, i * FLARE_SPAWN_INTERVAL_MS);
-    }
+      resolveFlare(ownerId, f.x, f.y);
+      const volume = proximityVolume(f.x, f.y, .18);
+      if (volume > .005) playAsset('flare', volume, 1.02 + flareNumber * .015);
+    }, launchIndex * FLARE_SPAWN_INTERVAL_MS);
   }
 }
 
@@ -1084,8 +1093,7 @@ function handleBomb(fromId, data) {
 
 function handleFlare(fromId, data) {
   if (fromId !== myId) {
-    spawnFlareSalvo(data.x, data.y, data.angle || 0);
-    resolveFlare(fromId, data.x, data.y);
+    spawnFlareSalvo(data.x, data.y, data.angle || 0, fromId);
   }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
@@ -1224,8 +1232,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'flare') {
     if (data.from !== myId) {
-      spawnFlareSalvo(data.x, data.y, data.angle || 0);
-      resolveFlare(data.from, data.x, data.y);
+      spawnFlareSalvo(data.x, data.y, data.angle || 0, data.from);
     }
   }
   else if (data.type === 'impact') {
