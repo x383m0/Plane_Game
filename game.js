@@ -9,7 +9,7 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 const AIRBRAKE_MULT = 0.58;
-const GRAVITY_ACCEL = 420;        // acceleration along the flight path when diving/climbing
+const GRAVITY_ACCEL = 260;        // gentler speed loss while climbing; diving still gains speed
 const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
 const TOP_BOUNDARY_DEPTH = 260;
 const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
@@ -40,6 +40,7 @@ const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
 const FLARE_BREAK_RADIUS = 260, FLARE_ACTIVE_MS = 900;
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
+const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
 // fixed lifetime, used for gun/missile impacts, launches, kills, and pickups.
@@ -138,6 +139,13 @@ function playAsset(name, volume = .65, rate = 1) {
   const a = source.cloneNode(); a.src = source.src; a.volume = clamp(volume, 0, 1); a.playbackRate = rate;
   a.load(); a.play().catch(() => {}); return true;
 }
+function proximityVolume(x, y, baseVolume) {
+  if (!myState || !Number.isFinite(x) || !Number.isFinite(y)) return baseVolume;
+  const distance = dist(myState.x, myState.y, x, y);
+  if (distance >= SOUND_MAX_DISTANCE) return 0;
+  const near = 1 - distance / SOUND_MAX_DISTANCE;
+  return baseVolume * near * near;
+}
 function tone(freq, duration, volume, type = 'sine', slide = 0) {
   if (!audioCtx || !masterGain) return;
   const t = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
@@ -156,16 +164,26 @@ function noiseBurst(duration, volume, filterType = 'bandpass', frequency = 900) 
   source.connect(filter); filter.connect(g); g.connect(masterGain); source.start();
 }
 function playCannonSound() { if (!playAsset('cannon', .34, 1.22)) { noiseBurst(.055, .12, 'bandpass', 1100); tone(82, .09, .09, 'sawtooth', -32); } }
-function playMissileLaunchSound() { if (!playAsset('missile', .36, 1.05)) { noiseBurst(.34, .08, 'lowpass', 520); tone(92, .38, .09, 'sawtooth', 240); } }
-function playExplosionSound(kind) {
-  if (kind === 'blast' || kind === 'crash' || kind === 'shock') { if (!playAsset('explosion', kind === 'crash' ? .42 : .3, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, .14, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, .12, 'sine', -34); } }
-  else if (kind === 'spark') playAsset('impact', .2, 1.08);
+function playMissileLaunchSound(x = null, y = null) {
+  const volume = x == null || y == null ? .36 : proximityVolume(x, y, .36);
+  if (volume <= .005) return;
+  if (!playAsset('missile', volume, 1.05)) { noiseBurst(.34, volume * .22, 'lowpass', 520); tone(92, .38, volume * .25, 'sawtooth', 240); }
+}
+function playExplosionSound(kind, x, y) {
+  if (kind === 'blast' || kind === 'crash' || kind === 'shock') {
+    const volume = proximityVolume(x, y, kind === 'crash' ? .42 : .3);
+    if (volume <= .005) return;
+    if (!playAsset('explosion', volume, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, volume * .34, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, volume * .29, 'sine', -34); }
+  } else if (kind === 'spark') {
+    const volume = proximityVolume(x, y, .2);
+    if (volume > .005) playAsset('impact', volume, 1.08);
+  }
 }
 function playLockSound() { if (!playAsset('lock', .22, 1.15)) tone(880, .08, .045, 'square', -220); }
 
 function spawnExplosion(x, y, kind) {
   explosions.push({ x, y, born: performance.now(), kind });
-  playExplosionSound(kind);
+  playExplosionSound(kind, x, y);
   if (kind === 'blast' || kind === 'crash' || kind === 'shock') screenShake = Math.max(screenShake, kind === 'crash' ? 18 : 11);
 }
 function pruneExplosions(now) {
@@ -217,7 +235,7 @@ function createLocalState() {
     speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
     stallTime: 0,
     roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
-    falling: false, deathKiller: null, fallSpinVelocity: 0,
+    falling: false, stalled: false, deathKiller: null, fallSpinVelocity: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
@@ -234,7 +252,7 @@ function respawnLocal() {
   myState.speed = PLANE_SPEED; myState.verticalVelocity = 0; myState.turnVelocity = 0;
   myState.stallTime = 0;
   myState.roll = 0; myState.barrelRollUntil = 0; myState.barrelRollCooldown = 0; myState.barrelRollDirection = 1;
-  myState.falling = false; myState.deathKiller = null; myState.fallSpinVelocity = 0;
+  myState.falling = false; myState.stalled = false; myState.deathKiller = null; myState.fallSpinVelocity = 0;
   myState.boosting = false;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
@@ -285,6 +303,43 @@ function updateDeathFall(dtSec) {
   myState.roll += myState.fallSpinVelocity * dtSec;
   myState.y += myState.verticalVelocity * dtSec;
   if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost');
+}
+
+// A stall is recoverable. The player can still point the nose down and regain
+// airspeed, but the aircraft is never allowed to travel backward. This is
+// deliberately separate from updateDeathFall(), which is used after fatal
+// damage and remains fully uncontrollable.
+function updateStalledFlight(dtSec, keys) {
+  const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
+  const diff = angleDiff(myState.angle, targetAngle);
+  const desiredTurn = clamp(diff * 4.8, -TURN_RATE * 1.15, TURN_RATE * 1.15);
+  myState.turnVelocity += (desiredTurn - myState.turnVelocity) * clamp(TURN_ACCEL * 1.15 * dtSec, 0, 1);
+  myState.turnVelocity *= Math.max(0, 1 - TURN_DAMPING * .75 * dtSec);
+  myState.turnVelocity = clamp(myState.turnVelocity, -TURN_RATE * 1.25, TURN_RATE * 1.25);
+  myState.angle += myState.turnVelocity * dtSec;
+
+  const boosting = keys.boost && !keys.airbrake;
+  const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
+  const drag = (myState.speed - PLANE_SPEED) * .82;
+  const thrust = boosting ? 250 : 0;
+  myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight - drag) * dtSec, 0, MAX_FLIGHT_SPEED);
+  myState.boosting = boosting && myState.speed > 0;
+
+  // While stalled, gravity pulls the aircraft down. Once the nose points into
+  // the dive and speed is rebuilt, normal flight resumes.
+  if (myState.speed < 55 || Math.sin(myState.angle) <= .08) {
+    myState.verticalVelocity += FALL_GRAVITY * dtSec;
+  } else {
+    myState.verticalVelocity *= Math.max(0, 1 - 5 * dtSec);
+  }
+  myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * dtSec, 30, WORLD_W - 30);
+  myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
+
+  if (myState.speed >= 55 && Math.sin(myState.angle) > .08) {
+    myState.stalled = false;
+    myState.verticalVelocity = 0;
+  }
+  if (myState.y >= GROUND_Y - 12) crashLocal('You hit the sea.');
 }
 
 function checkFallingHits() {
@@ -339,6 +394,10 @@ function updateLocalPlane(dtSec, keys) {
     if (myState.alive) checkFallingHits();
     return;
   }
+  if (myState.stalled) {
+    updateStalledFlight(dtSec, keys);
+    return;
+  }
 
   // Steer toward the mouse cursor with angular momentum. The plane no longer
   // snaps toward the cursor: speed, air-brake input, and turn inertia matter.
@@ -383,7 +442,7 @@ function updateLocalPlane(dtSec, keys) {
     myState.stallTime += dtSec * 1000;
     if (myState.stallTime >= STALL_DELAY) {
       myState.speed = 0;
-      myState.falling = true;
+      myState.stalled = true;
       myState.boosting = false;
       myState.turnVelocity = 0;
       myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
@@ -801,6 +860,7 @@ function handleMissile(fromId, data) {
   if (fromId !== myId) {
     missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), trail: [] });
     spawnExplosion(data.x, data.y, 'launch');
+    playMissileLaunchSound(data.x, data.y);
   }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle });
@@ -932,6 +992,7 @@ function handleClientReceive(data) {
     if (data.from !== myId) {
       missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
+      playMissileLaunchSound(data.x, data.y);
     }
   }
   else if (data.type === 'bomb') {
@@ -1065,13 +1126,32 @@ function resizeCanvas() {
 // This compact silhouette is drawn at runtime, so it stays sharp, readable,
 // and easy to tint for every pilot without needing an external image asset.
 const PLANE_SPRITE_LEN = 88;
-function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0) {
+function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = false) {
   const main = alive ? color : '#566875';
   const dark = alive ? '#082238' : '#273844';
   const highlight = alive ? '#d8f5ff' : '#83939a';
   ctx.save();
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.shadowColor = alive ? color : 'transparent'; ctx.shadowBlur = alive ? 9 : 0;
+  if (falling) {
+    // Fatal uncontrolled aircraft burn while descending. The trail is drawn
+    // in the aircraft's local space, so it remains attached while the plane
+    // spins visually and does not affect its falling movement.
+    const pulse = .82 + Math.sin(performance.now() / 70) * .12;
+    const length = 62 + pulse * 34;
+    const fire = ctx.createLinearGradient(-24, 0, -length, 0);
+    fire.addColorStop(0, 'rgba(255,255,220,.98)');
+    fire.addColorStop(.22, 'rgba(255,205,75,.95)');
+    fire.addColorStop(.58, 'rgba(255,82,25,.72)');
+    fire.addColorStop(1, 'rgba(80,18,8,0)');
+    ctx.fillStyle = fire;
+    ctx.beginPath();
+    ctx.moveTo(-22, -5); ctx.lineTo(-length, Math.sin(performance.now() / 55) * 5);
+    ctx.lineTo(-22, 5); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(55,58,62,.42)';
+    ctx.beginPath(); ctx.arc(-length * .72, -7, 4 + pulse * 3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-length * .86, 6, 3 + pulse * 2, 0, Math.PI * 2); ctx.fill();
+  }
   // Visual-only exhaust trail. Flight audio is disabled, but the aircraft
   // still needs a clear sense of thrust during fast movement.
   if (alive && boosting) {
@@ -1145,7 +1225,7 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.rotate(p.angle);
   const roll = p.roll || 0;
   ctx.globalAlpha = flicker ? 0.4 : 1;
-  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true, roll);
+  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true, roll, p.falling === true);
   ctx.restore();
 
   ctx.globalAlpha = 1;
