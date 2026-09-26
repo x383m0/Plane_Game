@@ -1,6 +1,6 @@
 // ================= Constants =================
-const WORLD_W = 3600, WORLD_H = 1700;
-const GROUND_Y = WORLD_H - 70;    // top of the water (side-view floor)
+const WORLD_W = 6000, WORLD_H = 3200;
+const GROUND_Y = WORLD_H - 150;   // sea surface / crash boundary
 const MAX_PLAYERS = 8;
 
 const PLANE_SPEED = 285;          // px/s forward, constant auto-flight
@@ -9,7 +9,8 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 const AIRBRAKE_MULT = 0.58;
-const DODGE_COOLDOWN = 1200, DODGE_DURATION = 260, DODGE_SPEED = 470, DODGE_INVULN = 300;
+const HIGH_ALTITUDE_TRIGGER = -80, HIGH_ALTITUDE_RECOVERY = 260;
+const HIGH_ALTITUDE_SPEED = 105;
 
 const BULLET_SPEED = 1850, BULLET_LIFE = 520, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
@@ -67,7 +68,7 @@ let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl;
-let missileCountEl, bombCountEl, flareCountEl, lockWarningEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, altitudeWarningEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -206,7 +207,7 @@ function createLocalState() {
   const base = freshPlayerState(myId, myName);
   return Object.assign(base, {
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
-    dodgeCooldown: 0, dodgeUntil: 0, dodgeDir: 1,
+    highAltitude: false,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
@@ -220,13 +221,27 @@ function respawnLocal() {
   myState.health = MAX_HEALTH;
   myState.heat = 0;
   myState.overheated = false;
-  myState.dodgeCooldown = 0; myState.dodgeUntil = 0;
+  myState.highAltitude = false;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
   myState.alive = true;
   myState.invulnUntil = performance.now() + INVULN_TIME;
   respawnOverlay.style.display = 'none';
+}
+
+function crashLocal(message = 'You crashed.') {
+  if (!myState || !myState.alive) return;
+  const now = performance.now();
+  myState.health = 0;
+  myState.alive = false;
+  myState.highAltitude = false;
+  myState.deaths = (myState.deaths || 0) + 1;
+  respawnMsgEl.textContent = message;
+  respawnOverlay.style.display = 'flex';
+  myState.respawnAt = now + RESPAWN_DELAY;
+  spawnExplosion(myState.x, Math.min(myState.y, GROUND_Y - 10), 'crash');
+  sendEvent({ type: 'died', by: null });
 }
 
 function updateLocalPlane(dtSec, keys) {
@@ -259,13 +274,25 @@ function updateLocalPlane(dtSec, keys) {
   myState.x += Math.cos(myState.angle) * speed * dtSec;
   myState.y += Math.sin(myState.angle) * speed * dtSec;
   const now = performance.now();
-  if (now < myState.dodgeUntil) {
-    const dodgeFade = clamp((myState.dodgeUntil - now) / DODGE_DURATION, 0, 1);
-    myState.x += -Math.sin(myState.angle) * myState.dodgeDir * DODGE_SPEED * dodgeFade * dtSec;
-    myState.y += Math.cos(myState.angle) * myState.dodgeDir * DODGE_SPEED * dodgeFade * dtSec;
-  }
   myState.x = clamp(myState.x, 30, WORLD_W - 30);
-  myState.y = clamp(myState.y, 30, GROUND_Y - 40);
+  if (myState.y < HIGH_ALTITUDE_TRIGGER) myState.highAltitude = true;
+  if (myState.highAltitude) {
+    const recoveryStep = 2.8 * dtSec;
+    const recoveryDiff = angleDiff(myState.angle, Math.PI / 2);
+    myState.angle += Math.abs(recoveryDiff) < recoveryStep ? recoveryDiff : Math.sign(recoveryDiff) * recoveryStep;
+    myState.x = clamp(myState.x + Math.cos(myState.angle) * HIGH_ALTITUDE_SPEED * dtSec, 30, WORLD_W - 30);
+    myState.y += Math.sin(myState.angle) * HIGH_ALTITUDE_SPEED * dtSec;
+    myState.boost = Math.min(BOOST_MAX, myState.boost + BOOST_REGEN * dtSec);
+    if (myState.y >= HIGH_ALTITUDE_RECOVERY) {
+      myState.highAltitude = false;
+      myState.invulnUntil = Math.max(myState.invulnUntil, now + 500);
+    }
+    return;
+  }
+  if (myState.y >= GROUND_Y - 12) {
+    crashLocal('You hit the sea.');
+    return;
+  }
 
   // Weapon heat: cools passively when you let off the trigger; maxing it
   // out locks the gun until it drops back down, so you can't just hold fire.
@@ -297,7 +324,6 @@ function updateLocalPlane(dtSec, keys) {
     myState.flareRegenTimer = 0;
     myState.flares++;
   }
-  myState.dodgeCooldown = Math.max(0, myState.dodgeCooldown - dtSec * 1000);
   myState.bombCooldown = Math.max(0, myState.bombCooldown - dtSec * 1000);
   myState.bombRegenTimer += dtSec * 1000;
   if (myState.bombs < BOMB_MAX && myState.bombRegenTimer >= BOMB_REGEN_MS) {
@@ -405,19 +431,8 @@ function fireBullet() {
   sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
 }
 
-function tryDodge() {
-  if (!myState || !myState.alive || myState.dodgeCooldown > 0) return;
-  const now = performance.now();
-  myState.dodgeCooldown = DODGE_COOLDOWN;
-  myState.dodgeUntil = now + DODGE_DURATION;
-  myState.dodgeDir = mouseY < window.innerHeight / 2 ? -1 : 1;
-  myState.invulnUntil = Math.max(myState.invulnUntil, now + DODGE_INVULN);
-  spawnExplosion(myState.x, myState.y, 'shock');
-  screenShake = Math.max(screenShake, 5);
-}
-
 function tryDropBomb() {
-  if (!myState || !myState.alive || myState.bombCooldown > 0 || myState.bombs <= 0) return;
+  if (!myState || !myState.alive || myState.highAltitude || myState.bombCooldown > 0 || myState.bombs <= 0) return;
   unlockAudio();
   myState.bombCooldown = BOMB_COOLDOWN;
   myState.bombs--;
@@ -475,7 +490,7 @@ function findMissileLockTarget() {
 }
 
 function tryFireMissile() {
-  if (!myState || !myState.alive || myState.missileCooldown > 0 || myState.missiles <= 0) return;
+  if (!myState || !myState.alive || myState.highAltitude || myState.missileCooldown > 0 || myState.missiles <= 0) return;
   unlockAudio();
   myState.missileCooldown = MISSILE_COOLDOWN;
   myState.missiles--;
@@ -897,7 +912,6 @@ function wireKeyboard() {
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
       case 'q': case 'Q': tryFireMissile(); break;
       case 'f': case 'F': tryDeployFlare(); break;
-      case 'e': case 'E': tryDodge(); break;
       case 'b': case 'B': tryDropBomb(); break;
     }
   });
@@ -1166,6 +1180,31 @@ function drawGround(ctx) {
   });
 }
 
+function drawSkyBackdrop(ctx, camX, camY, W, H) {
+  const horizon = GROUND_Y - 520;
+  const sunX = WORLD_W * .72, sunY = 560;
+  if (sunX > camX - 220 && sunX < camX + W + 220 && sunY > camY - 220 && sunY < camY + H + 220) {
+    const sun = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 210);
+    sun.addColorStop(0, 'rgba(255,246,190,.9)'); sun.addColorStop(.18, 'rgba(255,215,120,.35)'); sun.addColorStop(1, 'rgba(255,180,80,0)');
+    ctx.fillStyle = sun; ctx.beginPath(); ctx.arc(sunX, sunY, 210, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,246,200,.85)'; ctx.beginPath(); ctx.arc(sunX, sunY, 34, 0, Math.PI * 2); ctx.fill();
+  }
+  const start = Math.floor((camX - 260) / 150) * 150;
+  const end = camX + W + 260;
+  const drawRange = (base, color, scale, offset) => {
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(start, WORLD_H);
+    ctx.lineTo(start, base);
+    for (let x = start; x <= end; x += 150) {
+      const peak = base - 100 - Math.abs(Math.sin(x / 390 + offset)) * 230 * scale - Math.abs(Math.sin(x / 170 + offset * 2)) * 70 * scale;
+      ctx.lineTo(x + 75, peak); ctx.lineTo(x + 150, base + Math.sin(x / 210) * 12);
+    }
+    ctx.lineTo(end, WORLD_H); ctx.closePath(); ctx.fill();
+  };
+  drawRange(horizon + 250, 'rgba(29,71,102,.55)', .65, .5);
+  drawRange(horizon + 330, 'rgba(21,52,78,.72)', .9, 1.8);
+  ctx.fillStyle = 'rgba(172,225,231,.12)'; ctx.fillRect(start, horizon + 280, end - start, 180);
+}
+
 function drawSpeedLines(ctx, now) {
   if (!myState || !keysHeld.boost || !myState.alive) return;
   ctx.save();
@@ -1271,6 +1310,8 @@ function render(now) {
     ctx.fillStyle = `rgba(255,255,255,${c.a})`;
     ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
   });
+
+  drawSkyBackdrop(ctx, camX, camY, W, H);
 
   drawGround(ctx);
   drawSpeedLines(ctx, now);
@@ -1385,6 +1426,7 @@ function loop(ts) {
   if (incomingLock && !lastIncomingLock) { unlockAudio(); playLockSound(); }
   lastIncomingLock = incomingLock;
   lockWarningEl.style.display = incomingLock ? 'block' : 'none';
+  altitudeWarningEl.style.display = myState.highAltitude ? 'block' : 'none';
   gameArea.classList.toggle('missile-lock', incomingLock);
 
   if (!myState.alive && myState.respawnAt) {
@@ -1421,6 +1463,7 @@ window.addEventListener('DOMContentLoaded', () => {
   bombCountEl = document.getElementById('bombCount');
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
+  altitudeWarningEl = document.getElementById('altitudeWarning');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');
