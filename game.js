@@ -9,11 +9,11 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 
-const BULLET_SPEED = 1320, BULLET_LIFE = 620, FIRE_COOLDOWN = 55, BULLET_DAMAGE = 7;
-const HIT_RADIUS = 32, BULLET_RADIUS = 3;
+const BULLET_SPEED = 1850, BULLET_LIFE = 520, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
+const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
-const HEAT_MAX = 100, HEAT_PER_SHOT = 8, HEAT_DECAY = 24, HEAT_DECAY_OVERHEAT = 40;
+const HEAT_MAX = 100, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
@@ -72,6 +72,8 @@ let audioBank = {}, engineAudio = null, audioAssetsStarted = false;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false, wasBoosting = false;
 
 const AUDIO_ASSETS = {
+  // GitHub Pages currently serves the uploaded audio files from the repo root.
+  // Keep these paths flat so the deployed game can actually resolve them.
   cannon: 'a10-cannon.ogg',
   engine: 'a10-engine.ogg',
   flyby: 'jet-flyby.ogg',
@@ -87,6 +89,12 @@ const AUDIO_ASSETS = {
 function rand(min, max) { return min + Math.random() * (max - min); }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function dist(x1, y1, x2, y2) { return Math.hypot(x1 - x2, y1 - y2); }
+function pointSegmentDistance(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  const t = lenSq ? clamp(((px - x1) * dx + (py - y1) * dy) / lenSq, 0, 1) : 0;
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
 function colorFor(id) { return COLORS[id % COLORS.length]; }
 // Shortest signed angular distance from `from` to `to`, in (-PI, PI].
 function angleDiff(from, to) {
@@ -122,13 +130,13 @@ function playAsset(name, volume = .65, rate = 1) {
 }
 function startEngineAudio() {
   if (!audioBank.engine) return;
-  if (!engineAudio) { engineAudio = audioBank.engine.cloneNode(); engineAudio.src = audioBank.engine.src; engineAudio.loop = true; engineAudio.volume = .16; engineAudio.load(); }
+  if (!engineAudio) { engineAudio = audioBank.engine.cloneNode(); engineAudio.src = audioBank.engine.src; engineAudio.loop = true; engineAudio.volume = .055; engineAudio.load(); }
   engineAudio.play().catch(() => {});
 }
 function updateEngineAudio() {
   if (!engineAudio) return;
   const boost = keysHeld.boost && myState && myState.boost > 0;
-  engineAudio.volume = boost ? .24 : .16;
+  engineAudio.volume = boost ? .085 : .055;
   engineAudio.playbackRate = boost ? 1.08 : .96;
 }
 function tone(freq, duration, volume, type = 'sine', slide = 0) {
@@ -148,13 +156,13 @@ function noiseBurst(duration, volume, filterType = 'bandpass', frequency = 900) 
   g.gain.setValueAtTime(volume, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + duration);
   source.connect(filter); filter.connect(g); g.connect(masterGain); source.start();
 }
-function playCannonSound() { if (!playAsset('cannon', .82, 1.12)) { noiseBurst(.055, .34, 'bandpass', 1100); tone(82, .075, .24, 'sawtooth', -32); } }
-function playMissileLaunchSound() { if (!playAsset('missile', .9, 1.05)) { noiseBurst(.34, .2, 'lowpass', 520); tone(92, .38, .22, 'sawtooth', 240); } }
+function playCannonSound() { if (!playAsset('cannon', .34, 1.22)) { noiseBurst(.055, .12, 'bandpass', 1100); tone(82, .09, .09, 'sawtooth', -32); } }
+function playMissileLaunchSound() { if (!playAsset('missile', .36, 1.05)) { noiseBurst(.34, .08, 'lowpass', 520); tone(92, .38, .09, 'sawtooth', 240); } }
 function playExplosionSound(kind) {
-  if (kind === 'blast' || kind === 'crash' || kind === 'shock') { if (!playAsset('explosion', kind === 'crash' ? .95 : .78, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, .42, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, .36, 'sine', -34); } }
-  else if (kind === 'spark') playAsset('impact', .48, 1.08);
+  if (kind === 'blast' || kind === 'crash' || kind === 'shock') { if (!playAsset('explosion', kind === 'crash' ? .42 : .3, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, .14, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, .12, 'sine', -34); } }
+  else if (kind === 'spark') playAsset('impact', .2, 1.08);
 }
-function playLockSound() { if (!playAsset('lock', .48, 1.15)) tone(880, .08, .09, 'square', -220); }
+function playLockSound() { if (!playAsset('lock', .22, 1.15)) tone(880, .08, .045, 'square', -220); }
 
 function spawnExplosion(x, y, kind) {
   explosions.push({ x, y, born: performance.now(), kind });
@@ -301,7 +309,7 @@ function updateLocalPlane(dtSec, keys) {
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
       if (b.ownerId === myId) continue;
-      if (dist(myState.x, myState.y, b.x, b.y) < HIT_RADIUS) {
+      if (pointSegmentDistance(myState.x, myState.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) < HIT_RADIUS) {
         bullets.splice(i, 1);
         spawnExplosion(b.x, b.y, 'spark');
         sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
@@ -412,7 +420,7 @@ function tryDeployFlare() {
   if (!myState || !myState.alive || myState.flareCooldown > 0 || myState.flares <= 0) return;
   myState.flareCooldown = FLARE_MIN_INTERVAL;
   myState.flares--;
-  playAsset('flare', .62, 1.15);
+  playAsset('flare', .25, 1.15);
 
   const f = { x: myState.x, y: myState.y, born: performance.now() };
   flares.push(f);
@@ -897,17 +905,18 @@ function drawCoin(ctx, c, now) {
 
 function drawBullet(ctx, b) {
   ctx.save();
-  ctx.strokeStyle = b.ownerId === myId ? 'rgba(255,244,155,.8)' : 'rgba(255,125,90,.65)';
-  ctx.lineWidth = 2.5; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(b.prevX ?? b.x, b.prevY ?? b.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.strokeStyle = b.ownerId === myId ? 'rgba(255,244,155,.7)' : 'rgba(255,125,90,.55)';
+  ctx.lineWidth = 1; ctx.lineCap = 'round';
+  const tail = 9;
+  ctx.beginPath(); ctx.moveTo(b.x - Math.cos(b.angle) * tail, b.y - Math.sin(b.angle) * tail); ctx.lineTo(b.x, b.y); ctx.stroke();
   ctx.restore();
   ctx.save();
   ctx.translate(b.x, b.y);
   ctx.rotate(b.angle);
-  ctx.shadowColor = b.ownerId === myId ? '#fff59d' : '#ff6548'; ctx.shadowBlur = 10;
+  ctx.shadowColor = b.ownerId === myId ? '#fff59d' : '#ff6548'; ctx.shadowBlur = 5;
   ctx.fillStyle = b.ownerId === myId ? '#fffbd0' : '#ff987d';
   ctx.beginPath();
-  ctx.ellipse(0, 0, BULLET_RADIUS * 3.4, BULLET_RADIUS, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, BULLET_RADIUS * 2.2, BULLET_RADIUS, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -1160,7 +1169,7 @@ function loop(ts) {
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
   updateEngineAudio();
   const boostingNow = keysHeld.boost && myState && myState.boost > 0;
-  if (boostingNow && !wasBoosting) playAsset('flyby', .28, 1.18);
+  if (boostingNow && !wasBoosting) playAsset('flyby', .14, 1.18);
   wasBoosting = boostingNow;
 
   updateLocalPlane(dtSec, keysHeld);
