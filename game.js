@@ -72,15 +72,15 @@ let audioBank = {}, engineAudio = null, audioAssetsStarted = false;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false, wasBoosting = false;
 
 const AUDIO_ASSETS = {
-  cannon: 'audio/a10-cannon.ogg',
-  engine: 'audio/a10-engine.ogg',
-  flyby: 'audio/jet-flyby.ogg',
-  missile: 'audio/missile-launch.ogg',
-  explosion: 'audio/airplane-explosion.ogg',
-  impact: 'audio/heavy-impact.ogg',
-  flare: 'audio/flare.ogg',
-  lock: 'audio/lock-alarm.ogg',
-  boost: 'audio/boost-air.ogg'
+  cannon: 'a10-cannon.ogg',
+  engine: 'a10-engine.ogg',
+  flyby: 'jet-flyby.ogg',
+  missile: 'missile-launch.ogg',
+  explosion: 'airplane-explosion.ogg',
+  impact: 'heavy-impact.ogg',
+  flare: 'flare.ogg',
+  lock: 'lock-alarm.ogg',
+  boost: 'boost-air.ogg'
 };
 
 // ================= World helpers =================
