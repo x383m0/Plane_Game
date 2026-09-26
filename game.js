@@ -20,7 +20,7 @@ const BULLET_SIGHT_TIME = .42;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
-const HEAT_MAX = 100, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
+const HEAT_MAX = 100, HEAT_PER_SHOT = 4, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
