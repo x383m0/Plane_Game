@@ -1,5 +1,6 @@
 // ================= Constants =================
-const WORLD_W = 6000, WORLD_H = 3200;
+const WORLD_W = 6000, WORLD_H = 3680;
+const CAMERA_FOV_MULT = 1.15; // show 15% more world without enlarging the HUD
 const GROUND_Y = WORLD_H - 150;   // sea surface / crash boundary
 const MAX_PLAYERS = 8;
 
@@ -39,6 +40,7 @@ const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS =
 // it's fired within FLARE_BREAK_RADIUS of the missile at the moment of use.
 const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
 const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
+const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each flare wave; easy to tune
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
@@ -72,7 +74,6 @@ let bombs = [];                   // {id,ownerId,x,y,vx,vy,born}
 let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
 let explosions = [];              // {x,y,born,kind} — see FX above
 let clouds = [];
-let stars = [];
 let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
@@ -203,14 +204,12 @@ function removeProjectileLocal(kind, id) {
 
 function buildClouds() {
   clouds = [];
-  stars = [];
   for (let i = 0; i < 90; i++) {
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
       r: rand(30, 90), a: rand(0.08, 0.22)
     });
   }
-  for (let i = 0; i < 180; i++) stars.push({ x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 80), r: rand(.4, 1.5), a: rand(.15, .55) });
 }
 
 function randomSpawnPoint() {
@@ -272,6 +271,7 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   if (!myState || !myState.alive || myState.falling) return;
   myState.health = 0;
   myState.falling = true;
+  myState.stalled = false;
   myState.boosting = false;
   myState.deathKiller = killerId;
   // Once uncontrolled, forward flight physics and steering are disabled. The
@@ -312,6 +312,8 @@ function updateDeathFall(dtSec) {
 // deliberately separate from updateDeathFall(), which is used after fatal
 // damage and remains fully uncontrollable.
 function updateStalledFlight(dtSec, keys) {
+  myState.barrelRollCooldown = Math.max(0, myState.barrelRollCooldown - dtSec * 1000);
+  myState.roll += myState.fallSpinVelocity * dtSec;
   const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
   const diff = angleDiff(myState.angle, targetAngle);
   const desiredTurn = clamp(diff * 4.8, -TURN_RATE * 1.15, TURN_RATE * 1.15);
@@ -345,6 +347,7 @@ function updateStalledFlight(dtSec, keys) {
   if (myState.stallRecoverTime >= 700) {
     myState.stalled = false;
     myState.stallRecoverTime = 0;
+    myState.roll *= .35;
     myState.verticalVelocity = 0;
   }
   if (myState.y >= GROUND_Y - 12) crashLocal('You hit the sea.');
@@ -599,7 +602,7 @@ function fireBullet() {
 }
 
 function tryBarrelRoll(direction = 1) {
-  if (!myState || !myState.alive || myState.falling || myState.barrelRollCooldown > 0) return;
+  if (!myState || !myState.alive || myState.falling || myState.stalled || myState.barrelRollCooldown > 0) return;
   myState.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
   myState.barrelRollUntil = performance.now() + BARREL_ROLL_DURATION;
   myState.barrelRollDirection = direction < 0 ? -1 : 1;
@@ -725,14 +728,14 @@ function spawnFlareSalvo(x, y, angle) {
         y: y + sideY * side * spread + rearY * (i * 5),
         vx: sideX * side * (35 + i * 7) + rearX * 55,
         vy: sideY * side * (35 + i * 7) + rearY * 55,
-        born: now + i * 24
+        born: now + i * FLARE_SPAWN_INTERVAL_MS
       };
       flares.push(f);
       // The salvo has the characteristic repeated popping/firing sound.
       setTimeout(() => {
         const volume = proximityVolume(f.x, f.y, .18);
         if (volume > .005) playAsset('flare', volume, 1.02 + i * .015);
-      }, i * 24);
+      }, i * FLARE_SPAWN_INTERVAL_MS);
     }
   }
 }
@@ -883,6 +886,7 @@ function applyRemoteState(p, data) {
   p.tx = data.x; p.ty = data.y; p.tangle = data.angle;
   p.health = data.health; p.alive = data.alive;
   p.falling = !!data.falling;
+  p.stalled = !!data.stalled;
   p.boosting = !!data.boosting;
   if (data.roll != null) p.roll = data.roll;
 }
@@ -891,7 +895,7 @@ function handleState(fromId, data) {
   const p = players[fromId];
   if (p) applyRemoteState(p, data);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, boosting: data.boosting, roll: data.roll });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, stalled: data.stalled, boosting: data.boosting, roll: data.roll });
   });
 }
 
@@ -1548,15 +1552,15 @@ function drawCrosshair(ctx, now) {
   ctx.restore();
 }
 
-function drawFlightReticles(ctx, now, camX, camY) {
+function drawFlightReticles(ctx, now, camX, camY, viewScale) {
   if (!myState || !myState.alive) return;
-  const cx = myState.x - camX, cy = myState.y - camY;
-  const noseRange = 210;
+  const cx = (myState.x - camX) * viewScale, cy = (myState.y - camY) * viewScale;
+  const noseRange = 210 * viewScale;
   const noseX = cx + Math.cos(myState.angle) * noseRange;
   const noseY = cy + Math.sin(myState.angle) * noseRange;
   const shotT = BULLET_SIGHT_TIME;
-  const shotX = cx + Math.cos(myState.angle) * BULLET_SPEED * shotT;
-  const shotY = cy + Math.sin(myState.angle) * BULLET_SPEED * shotT + .5 * BULLET_GRAVITY * shotT * shotT;
+  const shotX = cx + Math.cos(myState.angle) * BULLET_SPEED * shotT * viewScale;
+  const shotY = cy + (Math.sin(myState.angle) * BULLET_SPEED * shotT + .5 * BULLET_GRAVITY * shotT * shotT) * viewScale;
 
   const mark = (x, y, color, label, size, dashed = false) => {
     if (x < -40 || y < -40 || x > skyCanvas.width + 40 || y > skyCanvas.height + 40) return;
@@ -1578,7 +1582,7 @@ function drawFlightReticles(ctx, now, camX, camY) {
   ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(shotX, shotY); ctx.stroke(); ctx.restore();
 }
 
-function drawAimAssist(ctx, now, camX, camY) {
+function drawAimAssist(ctx, now, camX, camY, viewScale) {
   if (!myState || !myState.alive) return;
   let chosen = null, chosenDist = Infinity;
   Object.values(players).forEach(p => {
@@ -1592,7 +1596,7 @@ function drawAimAssist(ctx, now, camX, camY) {
   const leadTime = clamp(chosenDist / BULLET_SPEED, .06, .42);
   const leadX = chosen.x + Math.cos(chosen.angle) * PLANE_SPEED * leadTime;
   const leadY = chosen.y + Math.sin(chosen.angle) * PLANE_SPEED * leadTime + .5 * BULLET_GRAVITY * leadTime * leadTime;
-  const sx = leadX - camX, sy = leadY - camY;
+  const sx = (leadX - camX) * viewScale, sy = (leadY - camY) * viewScale;
   if (sx < -30 || sy < -30 || sx > skyCanvas.width + 30 || sy > skyCanvas.height + 30) return;
   const size = 7 + Math.sin(now / 140) * 1.2;
   ctx.save();
@@ -1628,24 +1632,21 @@ function render(now) {
 
   const shakeX = (Math.random() - .5) * screenShake;
   const shakeY = (Math.random() - .5) * screenShake;
-  const camX = myState.x - W / 2, camY = myState.y - H / 2;
+  const viewW = W * CAMERA_FOV_MULT, viewH = H * CAMERA_FOV_MULT;
+  const viewScale = 1 / CAMERA_FOV_MULT;
+  const camX = myState.x - viewW / 2, camY = myState.y - viewH / 2;
   ctx.save();
-  ctx.translate(-camX + shakeX, -camY + shakeY);
-
-  stars.forEach(s => {
-    if (s.x < camX - 10 || s.x > camX + W + 10 || s.y < camY - 10 || s.y > camY + H + 10) return;
-    ctx.globalAlpha = s.a * (0.65 + Math.sin(now / 900 + s.x) * .25);
-    ctx.fillStyle = '#d8f7ff'; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
-  });
-  ctx.globalAlpha = 1;
+  ctx.translate(W / 2 + shakeX, H / 2 + shakeY);
+  ctx.scale(viewScale, viewScale);
+  ctx.translate(-myState.x, -myState.y);
 
   clouds.forEach(c => {
-    if (c.x < camX - 100 || c.x > camX + W + 100 || c.y < camY - 100 || c.y > camY + H + 100) return;
+    if (c.x < camX - 100 || c.x > camX + viewW + 100 || c.y < camY - 100 || c.y > camY + viewH + 100) return;
     ctx.fillStyle = `rgba(255,255,255,${c.a})`;
     ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
   });
 
-  drawSkyBackdrop(ctx, camX, camY, W, H);
+  drawSkyBackdrop(ctx, camX, camY, viewW, viewH);
 
   drawGround(ctx);
 
@@ -1675,8 +1676,8 @@ function render(now) {
   ctx.restore();
 
   drawMinimap(now);
-  drawFlightReticles(ctx, now, camX, camY);
-  drawAimAssist(ctx, now, camX, camY);
+  drawFlightReticles(ctx, now, camX, camY, viewScale);
+  drawAimAssist(ctx, now, camX, camY, viewScale);
   drawCrosshair(ctx, now);
 }
 
@@ -1744,7 +1745,7 @@ function loop(ts) {
 
   if (ts - lastBroadcast > 66) {
     lastBroadcast = ts;
-    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive, falling: myState.falling, boosting: myState.boosting, roll: myState.roll });
+    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive, falling: myState.falling, stalled: myState.stalled, boosting: myState.boosting, roll: myState.roll });
   }
 
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';
