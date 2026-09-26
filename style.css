@@ -1,6 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 :root{--cursor-hidden:1}
 #gameArea{cursor:none}
+#gameVersion{position:absolute;right:12px;bottom:9px;z-index:3;color:rgba(220,244,250,.42);font:9px 'Space Mono',monospace;letter-spacing:1px;pointer-events:none;user-select:none}
 .bar-label{width:60px}
 .bomb-icon{width:9px;height:9px;display:inline-block;background:#273a46;border:1px solid #c9e7ef;border-radius:50%;box-shadow:0 0 7px #ff9d5c}
 .controls{max-width:calc(100vw - 24px);overflow:hidden}
