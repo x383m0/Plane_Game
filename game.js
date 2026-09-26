@@ -75,7 +75,7 @@ const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
   // Keep these paths flat so the deployed game can actually resolve them.
   cannon: 'shoot_01.ogg',
-  engine: 'loop_machine_03.ogg',
+  engine: 'flight-engine.ogg',
   flyby: 'jet-flyby.ogg',
   missile: 'missile-launch.ogg',
   explosion: 'airplane-explosion.ogg',
@@ -1051,6 +1051,40 @@ function drawSpeedLines(ctx, now) {
   ctx.restore();
 }
 
+function drawCrosshair(ctx, now) {
+  if (!started || !myState || !myState.alive) return;
+  const x = clamp(mouseX, 18, window.innerWidth - 18);
+  const y = clamp(mouseY, 18, window.innerHeight - 18);
+  const locked = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
+  const boosting = keysHeld.boost && myState.boost > 0;
+  const pulse = 1 + Math.sin(now / 160) * .06;
+  const color = locked ? '#ff6875' : boosting ? '#9cf3ed' : '#bcefff';
+  const glow = locked ? 'rgba(255,70,90,.75)' : boosting ? 'rgba(100,235,255,.65)' : 'rgba(150,235,255,.58)';
+  const gap = 8 * pulse, arm = 15 * pulse, radius = locked ? 23 + Math.sin(now / 100) * 2 : 19;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = locked ? 12 : 8;
+  ctx.lineWidth = locked ? 1.8 : 1.35;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-gap - arm, 0); ctx.lineTo(-gap, 0);
+  ctx.moveTo(gap, 0); ctx.lineTo(gap + arm, 0);
+  ctx.moveTo(0, -gap - arm); ctx.lineTo(0, -gap);
+  ctx.moveTo(0, gap); ctx.lineTo(0, gap + arm);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill();
+  if (locked) {
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.arc(0, 0, 31 + Math.sin(now / 90) * 2, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
 function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
@@ -1112,6 +1146,7 @@ function render(now) {
   ctx.restore();
 
   drawMinimap(now);
+  drawCrosshair(ctx, now);
 }
 
 function drawMinimap(now) {
