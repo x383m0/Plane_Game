@@ -45,6 +45,7 @@ const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
+const CLOUD_BANK_COUNT = 7;
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
 // fixed lifetime, used for gun/missile impacts, launches, kills, and pickups.
@@ -76,11 +77,12 @@ let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
 let explosions = [];              // {x,y,born,kind} — see FX above
 let specialEffects = [];           // imported impact/death/water effects
 let clouds = [];
+let cloudBanks = [];
 let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
-let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, lockProgressEl, lockProgressFillEl, lockProgressTextEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -312,12 +314,30 @@ class WaterCrashEffect {
 
 function buildClouds() {
   clouds = [];
+  cloudBanks = [];
   for (let i = 0; i < 90; i++) {
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
       r: rand(30, 90), a: rand(0.08, 0.22)
     });
   }
+  // Fixed coordinates keep cloud concealment and missile line-of-sight
+  // identical on every multiplayer client.
+  const bankLayout = [
+    [.16, .20, 300, 180], [.38, .31, 350, 220], [.62, .18, 280, 170],
+    [.82, .36, 330, 210], [.24, .54, 340, 230], [.52, .61, 300, 190],
+    [.76, .57, 360, 225]
+  ];
+  cloudBanks = bankLayout.slice(0, CLOUD_BANK_COUNT).map(([nx, ny, rx, ry], i) => ({
+    x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180, rx, ry, alpha: .72 + (i % 3) * .07
+  }));
+}
+
+function isInCloudBank(x, y) {
+  return cloudBanks.some(b => {
+    const dx = (x - b.x) / b.rx, dy = (y - b.y) / b.ry;
+    return dx * dx + dy * dy < 1;
+  });
 }
 
 function randomSpawnPoint() {
@@ -783,6 +803,7 @@ function findMissileLockTarget() {
   let bestId = null, bestDist = MISSILE_LOCK_RANGE;
   Object.values(players).forEach(p => {
     if (p.id === myId || p.connected === false || p.alive === false) return;
+    if (isInCloudBank(p.x, p.y)) return;
     const dx = p.x - myState.x, dy = p.y - myState.y;
     const d = Math.hypot(dx, dy);
     if (d > bestDist) return;
@@ -879,7 +900,7 @@ function updateMissiles(dtSec) {
     // steer itself until the lock-acquisition cooldown has completed.
     if (m.targetId != null && now >= (m.lockReadyAt || m.born)) {
       const target = players[m.targetId];
-      if (target && target.alive !== false && target.connected !== false) {
+      if (target && target.alive !== false && target.connected !== false && !isInCloudBank(target.x, target.y)) {
         const desired = Math.atan2(target.y - m.y, target.x - m.x);
         const step = MISSILE_TURN_RATE * dtSec;
         const diff = angleDiff(m.angle, desired);
@@ -947,6 +968,7 @@ function startHost() {
     c.on('open', () => {
       c.send({ type: 'welcome', id });
       c.send({ type: 'coins', list: coins });
+      if (started) c.send({ type: 'start' });
       broadcastRoster();
     });
     c.on('data', data => handleHostReceive(id, data));
@@ -1421,6 +1443,7 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = 
 }
 
 function drawPlane(ctx, p, isMe, now) {
+  if (isInCloudBank(p.x, p.y)) return;
   const flicker = now < p.invulnUntil && Math.floor(now / 100) % 2 === 0;
   ctx.save();
   const kick = isMe ? recoilKick : 0;
@@ -1644,6 +1667,26 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
   ctx.fillStyle = 'rgba(188,232,226,.10)'; ctx.fillRect(start, horizon + 280, end - start, 180);
 }
 
+function drawCloudBanks(ctx, now, camX, camY, viewW, viewH) {
+  cloudBanks.forEach((b, index) => {
+    if (b.x + b.rx < camX - 80 || b.x - b.rx > camX + viewW + 80 || b.y + b.ry < camY - 80 || b.y - b.ry > camY + viewH + 80) return;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    const pulse = .96 + Math.sin(now / 900 + index) * .04;
+    ctx.scale(pulse, 1);
+    const g = ctx.createRadialGradient(0, -b.ry * .12, b.ry * .08, 0, 0, b.rx);
+    g.addColorStop(0, `rgba(239,252,250,${b.alpha})`);
+    g.addColorStop(.55, `rgba(201,231,232,${b.alpha * .78})`);
+    g.addColorStop(1, 'rgba(165,205,211,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, 0, b.rx, b.ry, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `rgba(241,255,253,${b.alpha * .28})`;
+    ctx.beginPath(); ctx.ellipse(-b.rx * .28, -b.ry * .15, b.rx * .34, b.ry * .42, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(b.rx * .2, -b.ry * .08, b.rx * .42, b.ry * .35, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  });
+}
+
 function drawSpeedLines(ctx, now) {
   if (!myState || !keysHeld.boost || !myState.alive) return;
   ctx.save();
@@ -1753,6 +1796,47 @@ function drawAimAssist(ctx, now, camX, camY, viewScale) {
   ctx.restore();
 }
 
+function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
+  if (!myState || !myState.alive) return;
+  const W = skyCanvas.width, H = skyCanvas.height;
+  Object.values(players).forEach(p => {
+    if (p.id === myId || p.connected === false || p.alive === false) return;
+    const sx = (p.x - camX) * viewScale, sy = (p.y - camY) * viewScale;
+    const hidden = isInCloudBank(p.x, p.y);
+    const onScreen = sx > 28 && sy > 28 && sx < W - 28 && sy < H - 28;
+    if (onScreen && !hidden) return;
+    const angle = Math.atan2(sy - H / 2, sx - W / 2);
+    const radius = Math.max(45, Math.min(W, H) * .5 - 42);
+    const x = clamp(W / 2 + Math.cos(angle) * radius, 28, W - 28);
+    const y = clamp(H / 2 + Math.sin(angle) * radius, 28, H - 28);
+    const pulse = 1 + Math.sin(now / 180 + p.id) * .08;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(angle); ctx.scale(pulse, pulse);
+    ctx.globalAlpha = hidden ? .82 : .68;
+    ctx.fillStyle = hidden ? '#d4f5f0' : '#ff9d8c';
+    ctx.shadowColor = hidden ? '#73e0d2' : '#ff625e'; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.moveTo(13, 0); ctx.lineTo(-8, -7); ctx.lineTo(-4, 0); ctx.lineTo(-8, 7); ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0; ctx.font = '8px Space Mono, monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#eafcff';
+    ctx.fillText(Math.round(dist(myState.x, myState.y, p.x, p.y)), 0, 19);
+    ctx.restore();
+  });
+}
+
+function updateLockProgress(now) {
+  if (!lockProgressEl || !myState) return;
+  let active = null;
+  missiles.forEach(m => {
+    if (m.ownerId !== myId || m.targetId == null) return;
+    const age = now - m.born;
+    if (age <= MISSILE_LOCK_DELAY + 450 && (!active || m.born > active.born)) active = m;
+  });
+  if (!active) { lockProgressEl.style.display = 'none'; return; }
+  const progress = clamp((now - active.born) / MISSILE_LOCK_DELAY, 0, 1);
+  lockProgressEl.style.display = 'block';
+  lockProgressFillEl.style.width = (progress * 100) + '%';
+  lockProgressTextEl.textContent = progress >= 1 ? 'LOCKED' : 'LOCKING ' + Math.round(progress * 100) + '%';
+  lockProgressEl.classList.toggle('locked', progress >= 1);
+}
+
 function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
@@ -1818,12 +1902,15 @@ function render(now) {
 
   explosions.forEach(e => drawExplosion(ctx, e, now));
   specialEffects.forEach(e => e.draw(ctx));
+  // The foreground veil conceals planes and effects inside a cloud bank.
+  drawCloudBanks(ctx, now, camX, camY, viewW, viewH);
 
   ctx.restore();
 
   drawMinimap(now);
   drawFlightReticles(ctx, now, camX, camY, viewScale);
   drawAimAssist(ctx, now, camX, camY, viewScale);
+  drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale);
   drawCrosshair(ctx, now);
 }
 
@@ -1861,6 +1948,9 @@ function interpolateRemotePlayers(dtSec) {
 
 // ================= Game loop =================
 function beginLocalGame() {
+  // A duplicated start packet must not create duplicate keyboard listeners
+  // or a second animation loop, both of which can make the game appear frozen.
+  if (myState) return;
   menu.style.display = 'none'; gameArea.style.display = 'block';
   myState = createLocalState();
   players[myId] = myState;
@@ -1910,11 +2000,12 @@ function loop(ts) {
   speedFillEl.style.width = (speedRatio * 100) + '%';
   speedNeedleEl.style.transform = `rotate(${-112 + speedRatio * 224}deg)`;
 
-  const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId && performance.now() >= (m.lockReadyAt || m.born));
+  const incomingLock = !isInCloudBank(myState.x, myState.y) && missiles.some(m => m.targetId === myId && m.ownerId !== myId && performance.now() >= (m.lockReadyAt || m.born));
   if (incomingLock && !lastIncomingLock) { unlockAudio(); playLockSound(); }
   lastIncomingLock = incomingLock;
   lockWarningEl.style.display = incomingLock ? 'block' : 'none';
   gameArea.classList.toggle('missile-lock', incomingLock);
+  updateLockProgress(ts);
 
   if (!myState.alive && myState.respawnAt) {
     const remain = Math.max(0, myState.respawnAt - performance.now());
@@ -1954,6 +2045,9 @@ window.addEventListener('DOMContentLoaded', () => {
   bombCountEl = document.getElementById('bombCount');
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
+  lockProgressEl = document.getElementById('lockProgress');
+  lockProgressFillEl = document.getElementById('lockProgressFill');
+  lockProgressTextEl = document.getElementById('lockProgressText');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');
