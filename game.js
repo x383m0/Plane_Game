@@ -15,7 +15,8 @@ const TOP_BOUNDARY_DEPTH = 260;
 const MIN_FLIGHT_SPEED = 95, MAX_FLIGHT_SPEED = 720;
 const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
 
-const BULLET_SPEED = 1850, BULLET_LIFE = 520, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
+const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = 720, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
+const BULLET_SIGHT_TIME = .42;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
@@ -424,7 +425,10 @@ function fireBullet() {
     id: myId + '-' + (nextBulletId++), ownerId: myId,
     x: myState.x + Math.cos(myState.angle) * nose,
     y: myState.y + Math.sin(myState.angle) * nose,
-    prevX: myState.x, prevY: myState.y, angle: myState.angle, born: performance.now()
+    prevX: myState.x, prevY: myState.y, angle: myState.angle,
+    vx: Math.cos(myState.angle) * BULLET_SPEED,
+    vy: Math.sin(myState.angle) * BULLET_SPEED,
+    born: performance.now()
   };
   bullets.push(b);
   spawnExplosion(b.x, b.y, 'muzzle');
@@ -455,8 +459,14 @@ function updateBullets(dtSec) {
     const b = bullets[i];
     if (now - b.born > BULLET_LIFE) { spawnExplosion(b.x, b.y, 'muzzle'); bullets.splice(i, 1); continue; }
     b.prevX = b.x; b.prevY = b.y;
-    b.x += Math.cos(b.angle) * BULLET_SPEED * dtSec;
-    b.y += Math.sin(b.angle) * BULLET_SPEED * dtSec;
+    if (b.vx == null) {
+      b.vx = Math.cos(b.angle) * BULLET_SPEED;
+      b.vy = Math.sin(b.angle) * BULLET_SPEED;
+    }
+    b.vy += BULLET_GRAVITY * dtSec;
+    b.x += b.vx * dtSec;
+    b.y += b.vy * dtSec;
+    b.angle = Math.atan2(b.vy, b.vx);
   }
 }
 
@@ -672,7 +682,7 @@ function handleShoot(fromId, data) {
   // when the host is the shooter (fromId === myId) since fireBullet() already
   // added it there.
   if (fromId !== myId) {
-    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, born: performance.now() });
+    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
     spawnExplosion(data.x, data.y, 'muzzle');
   }
   Object.entries(connections).forEach(([id, c]) => {
@@ -807,7 +817,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'shoot') {
     if (data.from !== myId) {
-      bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, born: performance.now() });
+      bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
       spawnExplosion(data.x, data.y, 'muzzle');
     }
   }
@@ -1251,7 +1261,42 @@ function drawCrosshair(ctx, now) {
     ctx.beginPath(); ctx.arc(0, 0, 31 + Math.sin(now / 90) * 2, 0, Math.PI * 2); ctx.stroke();
     ctx.setLineDash([]);
   }
+  ctx.shadowBlur = 0;
+  ctx.font = '8px Space Mono, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = color;
+  ctx.fillText('GO', 0, 34);
   ctx.restore();
+}
+
+function drawFlightReticles(ctx, now, camX, camY) {
+  if (!myState || !myState.alive) return;
+  const cx = myState.x - camX, cy = myState.y - camY;
+  const noseRange = 210;
+  const noseX = cx + Math.cos(myState.angle) * noseRange;
+  const noseY = cy + Math.sin(myState.angle) * noseRange;
+  const shotT = BULLET_SIGHT_TIME;
+  const shotX = cx + Math.cos(myState.angle) * BULLET_SPEED * shotT;
+  const shotY = cy + Math.sin(myState.angle) * BULLET_SPEED * shotT + .5 * BULLET_GRAVITY * shotT * shotT;
+
+  const mark = (x, y, color, label, size, dashed = false) => {
+    if (x < -40 || y < -40 || x > skyCanvas.width + 40 || y > skyCanvas.height + 40) return;
+    ctx.save(); ctx.translate(x, y); ctx.strokeStyle = color; ctx.fillStyle = color;
+    ctx.shadowColor = color; ctx.shadowBlur = 8; ctx.lineWidth = 1.4;
+    if (dashed) ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.arc(0, 0, size, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-size - 5, 0); ctx.lineTo(-size + 1, 0); ctx.moveTo(size - 1, 0); ctx.lineTo(size + 5, 0); ctx.moveTo(0, -size - 5); ctx.lineTo(0, -size + 1); ctx.moveTo(0, size - 1); ctx.lineTo(0, size + 5); ctx.stroke();
+    ctx.setLineDash([]); ctx.shadowBlur = 0; ctx.font = '8px Space Mono, monospace'; ctx.textAlign = 'center'; ctx.fillText(label, 0, size + 14);
+    ctx.restore();
+  };
+
+  // NOSE is where the aircraft/guns are currently pointing.
+  mark(noseX, noseY, 'rgba(238,250,255,.9)', 'NOSE', 8);
+  // SHOT is where a bullet fired now will be after the sighting interval,
+  // including gravity drop. Align this marker with the target lead marker.
+  mark(shotX, shotY, '#ffd166', 'SHOT', 10, true);
+  ctx.save(); ctx.strokeStyle = 'rgba(255,209,102,.18)'; ctx.lineWidth = 1; ctx.setLineDash([2, 5]);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(shotX, shotY); ctx.stroke(); ctx.restore();
 }
 
 function drawAimAssist(ctx, now, camX, camY) {
@@ -1267,7 +1312,7 @@ function drawAimAssist(ctx, now, camX, camY) {
   if (!chosen) return;
   const leadTime = clamp(chosenDist / BULLET_SPEED, .06, .42);
   const leadX = chosen.x + Math.cos(chosen.angle) * PLANE_SPEED * leadTime;
-  const leadY = chosen.y + Math.sin(chosen.angle) * PLANE_SPEED * leadTime;
+  const leadY = chosen.y + Math.sin(chosen.angle) * PLANE_SPEED * leadTime + .5 * BULLET_GRAVITY * leadTime * leadTime;
   const sx = leadX - camX, sy = leadY - camY;
   if (sx < -30 || sy < -30 || sx > skyCanvas.width + 30 || sy > skyCanvas.height + 30) return;
   const size = 7 + Math.sin(now / 140) * 1.2;
@@ -1276,6 +1321,7 @@ function drawAimAssist(ctx, now, camX, camY) {
   ctx.rotate(Math.PI / 4);
   ctx.strokeStyle = 'rgba(255,229,133,.9)'; ctx.lineWidth = 1.4; ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 8;
   ctx.strokeRect(-size / 2, -size / 2, size, size);
+  ctx.rotate(-Math.PI / 4); ctx.shadowBlur = 0; ctx.font = '8px Space Mono, monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#ffe9a3'; ctx.fillText('AIM', 0, size + 12);
   ctx.restore();
 }
 
@@ -1343,6 +1389,7 @@ function render(now) {
   ctx.restore();
 
   drawMinimap(now);
+  drawFlightReticles(ctx, now, camX, camY);
   drawAimAssist(ctx, now, camX, camY);
   drawCrosshair(ctx, now);
 }
