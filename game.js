@@ -9,8 +9,11 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 const AIRBRAKE_MULT = 0.58;
-const HIGH_ALTITUDE_TRIGGER = -80, HIGH_ALTITUDE_RECOVERY = 260;
-const HIGH_ALTITUDE_SPEED = 105;
+const GRAVITY_ACCEL = 235;        // acceleration along the flight path when diving/climbing
+const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
+const TOP_BOUNDARY_DEPTH = 260;
+const MIN_FLIGHT_SPEED = 95, MAX_FLIGHT_SPEED = 720;
+const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
 
 const BULLET_SPEED = 1850, BULLET_LIFE = 520, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
@@ -68,7 +71,7 @@ let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl;
-let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, altitudeWarningEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -207,7 +210,7 @@ function createLocalState() {
   const base = freshPlayerState(myId, myName);
   return Object.assign(base, {
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
-    highAltitude: false,
+    speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
@@ -221,7 +224,7 @@ function respawnLocal() {
   myState.health = MAX_HEALTH;
   myState.heat = 0;
   myState.overheated = false;
-  myState.highAltitude = false;
+  myState.speed = PLANE_SPEED; myState.verticalVelocity = 0; myState.turnVelocity = 0;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
@@ -235,7 +238,6 @@ function crashLocal(message = 'You crashed.') {
   const now = performance.now();
   myState.health = 0;
   myState.alive = false;
-  myState.highAltitude = false;
   myState.deaths = (myState.deaths || 0) + 1;
   respawnMsgEl.textContent = message;
   respawnOverlay.style.display = 'flex';
@@ -254,41 +256,38 @@ function updateLocalPlane(dtSec, keys) {
     return;
   }
 
-  // Steer toward the mouse cursor. The camera always keeps the player
-  // centered on screen, so "screen center -> cursor" gives the aim angle.
-  // Boosting trades agility for speed, same as a real jet's wider turn radius.
+  // Steer toward the mouse cursor with angular momentum. The plane no longer
+  // snaps toward the cursor: speed, air-brake input, and turn inertia matter.
   const boosting = keys.boost && myState.boost > 0 && !keys.airbrake;
   const airbraking = keys.airbrake && !boosting;
   const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
-  const speedBeforeTurn = PLANE_SPEED * (boosting ? BOOST_MULT : airbraking ? AIRBRAKE_MULT : 1);
-  const speedPenalty = clamp(speedBeforeTurn / (PLANE_SPEED * BOOST_MULT), .62, 1);
-  const turnAssist = airbraking ? 1.34 : 1;
-  const turnStep = TURN_RATE * (boosting ? BOOST_TURN_MULT : 1) * turnAssist * (1.16 - speedPenalty * .25) * dtSec;
   const diff = angleDiff(myState.angle, targetAngle);
-  myState.angle += Math.abs(diff) < turnStep ? diff : Math.sign(diff) * turnStep;
+  const speedRatio = clamp(myState.speed / MAX_FLIGHT_SPEED, .2, 1);
+  const speedTurnPenalty = .72 + (1 - speedRatio) * .52;
+  const turnAuthority = airbraking ? 1.28 : boosting ? BOOST_TURN_MULT : 1;
+  const desiredTurn = clamp(diff * 5.5, -TURN_RATE, TURN_RATE) * speedTurnPenalty * turnAuthority;
+  myState.turnVelocity += (desiredTurn - myState.turnVelocity) * clamp(TURN_ACCEL * dtSec, 0, 1);
+  myState.turnVelocity *= Math.max(0, 1 - TURN_DAMPING * dtSec);
+  myState.turnVelocity = clamp(myState.turnVelocity, -TURN_RATE * 1.15, TURN_RATE * 1.15);
+  myState.angle += myState.turnVelocity * dtSec;
 
   if (boosting) myState.boost = Math.max(0, myState.boost - BOOST_DRAIN * dtSec);
   else myState.boost = Math.min(BOOST_MAX, myState.boost + BOOST_REGEN * dtSec);
 
-  const speed = speedBeforeTurn;
-  myState.x += Math.cos(myState.angle) * speed * dtSec;
-  myState.y += Math.sin(myState.angle) * speed * dtSec;
   const now = performance.now();
   myState.x = clamp(myState.x, 30, WORLD_W - 30);
-  if (myState.y < HIGH_ALTITUDE_TRIGGER) myState.highAltitude = true;
-  if (myState.highAltitude) {
-    const recoveryStep = 2.8 * dtSec;
-    const recoveryDiff = angleDiff(myState.angle, Math.PI / 2);
-    myState.angle += Math.abs(recoveryDiff) < recoveryStep ? recoveryDiff : Math.sign(recoveryDiff) * recoveryStep;
-    myState.x = clamp(myState.x + Math.cos(myState.angle) * HIGH_ALTITUDE_SPEED * dtSec, 30, WORLD_W - 30);
-    myState.y += Math.sin(myState.angle) * HIGH_ALTITUDE_SPEED * dtSec;
-    myState.boost = Math.min(BOOST_MAX, myState.boost + BOOST_REGEN * dtSec);
-    if (myState.y >= HIGH_ALTITUDE_RECOVERY) {
-      myState.highAltitude = false;
-      myState.invulnUntil = Math.max(myState.invulnUntil, now + 500);
-    }
-    return;
+  const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
+  const drag = (myState.speed - PLANE_SPEED) * .82;
+  const thrust = boosting ? 250 : airbraking ? -300 : 0;
+  myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight - drag) * dtSec, MIN_FLIGHT_SPEED, MAX_FLIGHT_SPEED);
+  if (myState.y < 0) {
+    const depth = clamp(-myState.y / TOP_BOUNDARY_DEPTH, .2, 1);
+    myState.verticalVelocity += TOP_BOUNDARY_GRAVITY * depth * dtSec;
+  } else {
+    myState.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
   }
+  myState.x += Math.cos(myState.angle) * myState.speed * dtSec;
+  myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
   if (myState.y >= GROUND_Y - 12) {
     crashLocal('You hit the sea.');
     return;
@@ -432,7 +431,7 @@ function fireBullet() {
 }
 
 function tryDropBomb() {
-  if (!myState || !myState.alive || myState.highAltitude || myState.bombCooldown > 0 || myState.bombs <= 0) return;
+  if (!myState || !myState.alive || myState.bombCooldown > 0 || myState.bombs <= 0) return;
   unlockAudio();
   myState.bombCooldown = BOMB_COOLDOWN;
   myState.bombs--;
@@ -490,7 +489,7 @@ function findMissileLockTarget() {
 }
 
 function tryFireMissile() {
-  if (!myState || !myState.alive || myState.highAltitude || myState.missileCooldown > 0 || myState.missiles <= 0) return;
+  if (!myState || !myState.alive || myState.missileCooldown > 0 || myState.missiles <= 0) return;
   unlockAudio();
   myState.missileCooldown = MISSILE_COOLDOWN;
   myState.missiles--;
@@ -1426,7 +1425,6 @@ function loop(ts) {
   if (incomingLock && !lastIncomingLock) { unlockAudio(); playLockSound(); }
   lastIncomingLock = incomingLock;
   lockWarningEl.style.display = incomingLock ? 'block' : 'none';
-  altitudeWarningEl.style.display = myState.highAltitude ? 'block' : 'none';
   gameArea.classList.toggle('missile-lock', incomingLock);
 
   if (!myState.alive && myState.respawnAt) {
@@ -1463,7 +1461,6 @@ window.addEventListener('DOMContentLoaded', () => {
   bombCountEl = document.getElementById('bombCount');
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
-  altitudeWarningEl = document.getElementById('altitudeWarning');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');
