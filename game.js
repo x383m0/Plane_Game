@@ -30,7 +30,7 @@ const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firi
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
 // plane can (so out-turning one alone is hard) but can be decoyed by a flare.
 const MISSILE_SPEED = 920, MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
-const MISSILE_LOCK_DELAY = 850;   // target lock must mature before homing begins
+const MISSILE_LOCK_DELAY = 850;   // time facing a target before right-click can fire
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
@@ -45,7 +45,8 @@ const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
-const CLOUD_BANK_COUNT = 7;
+const CLOUD_COUNT = 45;           // lighter background coverage; easy to tune
+const CLOUD_BANK_COUNT = 4;       // fewer dense concealment zones
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
 // fixed lifetime, used for gun/missile impacts, launches, kills, and pickups.
@@ -315,7 +316,7 @@ class WaterCrashEffect {
 function buildClouds() {
   clouds = [];
   cloudBanks = [];
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < CLOUD_COUNT; i++) {
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
       r: rand(30, 90), a: rand(0.08, 0.22)
@@ -324,9 +325,8 @@ function buildClouds() {
   // Fixed coordinates keep cloud concealment and missile line-of-sight
   // identical on every multiplayer client.
   const bankLayout = [
-    [.16, .20, 300, 180], [.38, .31, 350, 220], [.62, .18, 280, 170],
-    [.82, .36, 330, 210], [.24, .54, 340, 230], [.52, .61, 300, 190],
-    [.76, .57, 360, 225]
+    [.16, .20, 300, 180], [.38, .31, 350, 220],
+    [.62, .18, 280, 170], [.82, .36, 330, 210]
   ];
   cloudBanks = bankLayout.slice(0, CLOUD_BANK_COUNT).map(([nx, ny, rx, ry], i) => ({
     x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180, rx, ry, alpha: .72 + (i % 3) * .07
@@ -814,24 +814,48 @@ function findMissileLockTarget() {
   return bestId;
 }
 
+function updateMissileLock(dtSec) {
+  if (!missileLockHeld || !myState || !myState.alive || myState.falling || myState.missileCooldown > 0 || myState.missiles <= 0) {
+    missileLockTargetId = null;
+    missileLockProgress = 0;
+    return;
+  }
+  const targetId = findMissileLockTarget();
+  if (targetId == null) {
+    missileLockTargetId = null;
+    missileLockProgress = 0;
+    return;
+  }
+  if (targetId !== missileLockTargetId) {
+    missileLockTargetId = targetId;
+    missileLockProgress = 0;
+  }
+  missileLockProgress = clamp(missileLockProgress + dtSec * 1000 / MISSILE_LOCK_DELAY, 0, 1);
+}
+
 function tryFireMissile() {
-  if (!myState || !myState.alive || myState.missileCooldown > 0 || myState.missiles <= 0) return;
+  if (!myState || !myState.alive || myState.falling || myState.missileCooldown > 0 || myState.missiles <= 0) return;
   unlockAudio();
   myState.missileCooldown = MISSILE_COOLDOWN;
   myState.missiles--;
 
-  const targetId = findMissileLockTarget();
+  // Releasing before the lock completes still fires, but the missile is
+  // dumb/unguided. A completed facing lock is the only thing that grants a
+  // target and homing behavior.
+  const targetId = missileLockProgress >= 1 ? missileLockTargetId : null;
   const nose = 22;
   const m = {
     id: myId + '-m' + (nextMissileId++), ownerId: myId, targetId,
     x: myState.x + Math.cos(myState.angle) * nose,
     y: myState.y + Math.sin(myState.angle) * nose,
-    angle: myState.angle, born: performance.now(), lockReadyAt: performance.now() + MISSILE_LOCK_DELAY, trail: [], exhaust: 1
+    angle: myState.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [], exhaust: 1
   };
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
   playMissileLaunchSound(); screenShake = Math.max(screenShake, 7);
-  sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle });
+  sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, locked: true });
+  missileLockTargetId = null;
+  missileLockProgress = 0;
 }
 
 function tryDeployFlare() {
@@ -905,8 +929,8 @@ function updateMissiles(dtSec) {
       continue;
     }
 
-    // A missile can be launched toward a target immediately, but it cannot
-    // steer itself until the lock-acquisition cooldown has completed.
+    // Missiles are launched only after the shooter completes its facing lock,
+    // so a launched missile can begin homing immediately.
     if (m.targetId != null && now >= (m.lockReadyAt || m.born)) {
       const target = players[m.targetId];
       if (target && target.alive !== false && target.connected !== false && !isInCloudBank(target.x, target.y)) {
@@ -1073,12 +1097,12 @@ function handleShoot(fromId, data) {
 
 function handleMissile(fromId, data) {
   if (fromId !== myId) {
-    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now() + MISSILE_LOCK_DELAY, trail: [] });
+    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
     spawnExplosion(data.x, data.y, 'launch');
     playMissileLaunchSound(data.x, data.y);
   }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, locked: true });
   });
 }
 
@@ -1222,7 +1246,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'missile') {
     if (data.from !== myId) {
-      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now() + MISSILE_LOCK_DELAY, trail: [] });
+      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
@@ -1307,9 +1331,10 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp
 
 // ================= Input =================
 const keysHeld = { boost: false, airbrake: false, shoot: false };
+let missileLockHeld = false, missileLockTargetId = null, missileLockProgress = 0;
 let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // aim point; steering targets this each frame
 
-function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; }
+function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; missileLockHeld = false; missileLockTargetId = null; missileLockProgress = 0; }
 window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });
 
@@ -1341,9 +1366,12 @@ function wireMouse() {
   window.addEventListener('mousedown', e => {
     unlockAudio();
     if (e.button === 0) keysHeld.shoot = true;
-    else if (e.button === 2) tryFireMissile();
+    else if (e.button === 2) { missileLockHeld = true; missileLockProgress = 0; missileLockTargetId = null; e.preventDefault(); }
   });
-  window.addEventListener('mouseup', e => { if (e.button === 0) keysHeld.shoot = false; });
+  window.addEventListener('mouseup', e => {
+    if (e.button === 0) keysHeld.shoot = false;
+    if (e.button === 2) { tryFireMissile(); missileLockHeld = false; missileLockTargetId = null; missileLockProgress = 0; e.preventDefault(); }
+  });
   window.addEventListener('contextmenu', e => e.preventDefault());
 }
 
@@ -1830,14 +1858,8 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
 
 function updateLockProgress(now) {
   if (!lockProgressEl || !myState) return;
-  let active = null;
-  missiles.forEach(m => {
-    if (m.ownerId !== myId || m.targetId == null) return;
-    const age = now - m.born;
-    if (age <= MISSILE_LOCK_DELAY + 450 && (!active || m.born > active.born)) active = m;
-  });
-  if (!active) { lockProgressEl.style.display = 'none'; return; }
-  const progress = clamp((now - active.born) / MISSILE_LOCK_DELAY, 0, 1);
+  if (!missileLockHeld || missileLockTargetId == null) { lockProgressEl.style.display = 'none'; return; }
+  const progress = missileLockProgress;
   lockProgressEl.style.display = 'block';
   lockProgressFillEl.style.width = (progress * 100) + '%';
   lockProgressTextEl.textContent = progress >= 1 ? 'LOCKED' : 'LOCKING ' + Math.round(progress * 100) + '%';
@@ -1977,6 +1999,7 @@ function loop(ts) {
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
   updateLocalPlane(dtSec, keysHeld);
+  updateMissileLock(dtSec);
   updateBullets(dtSec);
   updateMissiles(dtSec);
   updateBombs(dtSec);
