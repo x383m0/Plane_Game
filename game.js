@@ -68,7 +68,20 @@ let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let lastSpawnTick = 0;
 let audioCtx = null, masterGain = null;
-let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
+let audioBank = {}, engineAudio = null, audioAssetsStarted = false;
+let screenShake = 0, recoilKick = 0, lastIncomingLock = false, wasBoosting = false;
+
+const AUDIO_ASSETS = {
+  cannon: 'audio/a10-cannon.ogg',
+  engine: 'audio/a10-engine.ogg',
+  flyby: 'audio/jet-flyby.ogg',
+  missile: 'audio/missile-launch.ogg',
+  explosion: 'audio/airplane-explosion.ogg',
+  impact: 'audio/heavy-impact.ogg',
+  flare: 'audio/flare.ogg',
+  lock: 'audio/lock-alarm.ogg',
+  boost: 'audio/boost-air.ogg'
+};
 
 // ================= World helpers =================
 function rand(min, max) { return min + Math.random() * (max - min); }
@@ -94,6 +107,28 @@ function unlockAudio() {
     masterGain = audioCtx.createGain(); masterGain.gain.value = 0.24; masterGain.connect(audioCtx.destination);
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (!audioAssetsStarted) {
+    audioAssetsStarted = true;
+    Object.entries(AUDIO_ASSETS).forEach(([name, src]) => {
+      const a = new Audio(src); a.preload = 'auto'; audioBank[name] = a;
+    });
+  }
+}
+function playAsset(name, volume = .65, rate = 1) {
+  const source = audioBank[name]; if (!source) return false;
+  const a = source.cloneNode(); a.volume = clamp(volume, 0, 1); a.playbackRate = rate;
+  a.play().catch(() => {}); return true;
+}
+function startEngineAudio() {
+  if (engineAudio || !audioBank.engine) return;
+  engineAudio = audioBank.engine.cloneNode(); engineAudio.loop = true; engineAudio.volume = .16;
+  engineAudio.play().catch(() => {});
+}
+function updateEngineAudio() {
+  if (!engineAudio) return;
+  const boost = keysHeld.boost && myState && myState.boost > 0;
+  engineAudio.volume = boost ? .24 : .16;
+  engineAudio.playbackRate = boost ? 1.08 : .96;
 }
 function tone(freq, duration, volume, type = 'sine', slide = 0) {
   if (!audioCtx || !masterGain) return;
@@ -112,10 +147,13 @@ function noiseBurst(duration, volume, filterType = 'bandpass', frequency = 900) 
   g.gain.setValueAtTime(volume, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + duration);
   source.connect(filter); filter.connect(g); g.connect(masterGain); source.start();
 }
-function playCannonSound() { noiseBurst(.055, .34, 'bandpass', 1100); tone(82, .075, .24, 'sawtooth', -32); tone(164, .045, .13, 'square', -70); }
-function playMissileLaunchSound() { noiseBurst(.34, .2, 'lowpass', 520); tone(92, .38, .22, 'sawtooth', 240); tone(740, .12, .08, 'sine', -380); }
-function playExplosionSound(kind) { if (kind === 'blast' || kind === 'crash' || kind === 'shock') { noiseBurst(kind === 'crash' ? .5 : .32, .42, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, .36, 'sine', -34); } else if (kind === 'spark') tone(420, .07, .08, 'triangle', -250); }
-function playLockSound() { tone(880, .08, .09, 'square', -220); }
+function playCannonSound() { if (!playAsset('cannon', .82, 1.12)) { noiseBurst(.055, .34, 'bandpass', 1100); tone(82, .075, .24, 'sawtooth', -32); } }
+function playMissileLaunchSound() { if (!playAsset('missile', .9, 1.05)) { noiseBurst(.34, .2, 'lowpass', 520); tone(92, .38, .22, 'sawtooth', 240); } }
+function playExplosionSound(kind) {
+  if (kind === 'blast' || kind === 'crash' || kind === 'shock') { if (!playAsset('explosion', kind === 'crash' ? .95 : .78, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, .42, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, .36, 'sine', -34); } }
+  else if (kind === 'spark') playAsset('impact', .48, 1.08);
+}
+function playLockSound() { if (!playAsset('lock', .48, 1.15)) tone(880, .08, .09, 'square', -220); }
 
 function spawnExplosion(x, y, kind) {
   explosions.push({ x, y, born: performance.now(), kind });
@@ -373,6 +411,7 @@ function tryDeployFlare() {
   if (!myState || !myState.alive || myState.flareCooldown > 0 || myState.flares <= 0) return;
   myState.flareCooldown = FLARE_MIN_INTERVAL;
   myState.flares--;
+  playAsset('flare', .62, 1.15);
 
   const f = { x: myState.x, y: myState.y, born: performance.now() };
   flares.push(f);
@@ -1102,6 +1141,7 @@ function beginLocalGame() {
   players[myId] = myState;
   wireKeyboard();
   wireMouse();
+  startEngineAudio();
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
   requestAnimationFrame(loop);
@@ -1115,6 +1155,10 @@ function loop(ts) {
   const dtSec = dt / 1000;
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
+  updateEngineAudio();
+  const boostingNow = keysHeld.boost && myState && myState.boost > 0;
+  if (boostingNow && !wasBoosting) playAsset('flyby', .28, 1.18);
+  wasBoosting = boostingNow;
 
   updateLocalPlane(dtSec, keysHeld);
   updateBullets(dtSec);
