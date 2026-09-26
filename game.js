@@ -318,6 +318,14 @@ function checkFallingHits() {
 }
 
 function updateLocalPlane(dtSec, keys) {
+  // Recover from invalid local coordinates instead of letting NaN values
+  // make the camera, plane, and aiming reticles disappear permanently.
+  if (!Number.isFinite(myState.x) || !Number.isFinite(myState.y) || !Number.isFinite(myState.angle)) {
+    const safe = randomSpawnPoint();
+    myState.x = safe.x; myState.y = safe.y; myState.angle = 0;
+    myState.speed = PLANE_SPEED; myState.verticalVelocity = 0;
+    myState.turnVelocity = 0; myState.falling = false; myState.stallTime = 0;
+  }
   if (!myState.alive) {
     // Was returning before this check ever ran, so nobody ever respawned.
     if (myState.respawnAt && performance.now() >= myState.respawnAt) {
@@ -1084,7 +1092,6 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0) {
   const topView = Math.max(0, rollDepth);
   const undersideView = Math.max(0, -rollDepth);
   const wingProfile = .14 + .86 * Math.abs(rollDepth);
-  ctx.save();
   ctx.scale(1, wingProfile);
 
   // wings and tailplane
@@ -1127,10 +1134,6 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0) {
     ctx.strokeStyle = 'rgba(255,155,90,.55)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(8,3); ctx.lineTo(22,1); ctx.stroke();
   }
-  ctx.restore();
-  // Close the outer sprite state as well. Leaving this save() open every
-  // frame eventually corrupts the canvas state stack and makes the plane
-  // appear frozen or disappear while the world keeps moving.
   ctx.restore();
 }
 
