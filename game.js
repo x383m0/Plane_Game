@@ -1463,6 +1463,14 @@ function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
 
+  // Reset the main canvas every frame. Without this, a leaked transform from
+  // a plane/effect drawing pass can leave the world view visually frozen while
+  // the simulation and minimap continue to update.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.clearRect(0, 0, W, H);
+
   const grad = ctx.createLinearGradient(0, 0, 0, H);
   grad.addColorStop(0, '#071828'); grad.addColorStop(0.42, '#15506d'); grad.addColorStop(1, '#8dc4d4');
   ctx.fillStyle = grad;
