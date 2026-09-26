@@ -2,7 +2,7 @@
 :root{--cursor-hidden:1}
 #gameArea{cursor:none}
 #gameVersion{position:absolute;right:12px;bottom:9px;z-index:3;color:rgba(220,244,250,.42);font:9px 'Space Mono',monospace;letter-spacing:1px;pointer-events:none;user-select:none}
-.bar-label{width:60px}
+.bar-label{width:60px}.bar-label small{display:block;margin-top:2px;color:#6f9caf;font:8px 'Space Mono',monospace;letter-spacing:.3px}
 .bomb-icon{width:9px;height:9px;display:inline-block;background:#273a46;border:1px solid #c9e7ef;border-radius:50%;box-shadow:0 0 7px #ff9d5c}
 .controls{max-width:calc(100vw - 24px);overflow:hidden}
 #speedometer{position:absolute;right:24px;bottom:128px;width:205px;padding:12px 16px 10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;backdrop-filter:blur(10px);box-shadow:0 8px 30px rgba(0,0,0,.14)}

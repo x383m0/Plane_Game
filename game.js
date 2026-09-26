@@ -73,7 +73,7 @@ let stars = [];
 let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
-let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl;
+let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
 let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
@@ -251,7 +251,11 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   myState.falling = true;
   myState.boosting = false;
   myState.deathKiller = killerId;
-  myState.speed = Math.max(0, myState.speed * .35);
+  // Once uncontrolled, forward flight physics and steering are disabled. The
+  // aircraft must not drift toward the cursor, even if its previous speed was
+  // negative because of a stall.
+  myState.speed = 0;
+  myState.turnVelocity = 0;
   myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
   myState.fallSpinVelocity = STALL_SPIN_SPEED * (Math.random() < .5 ? -1 : 1);
   respawnMsgEl.textContent = message;
@@ -271,10 +275,11 @@ function finishDeath(killerId, message = 'Shot down!') {
 
 function updateDeathFall(dtSec) {
   myState.verticalVelocity += FALL_GRAVITY * dtSec;
-  myState.speed *= Math.max(0, 1 - 1.8 * dtSec);
+  // Falling is intentionally screen-vertical: do not integrate angle or
+  // speed into X. Roll is visual only and has no influence on movement.
+  myState.speed = 0;
+  myState.turnVelocity = 0;
   myState.roll += myState.fallSpinVelocity * dtSec;
-  myState.angle += Math.sin(myState.roll) * .35 * dtSec;
-  myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * .35 * dtSec, 30, WORLD_W - 30);
   myState.y += myState.verticalVelocity * dtSec;
   if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost');
 }
@@ -360,6 +365,18 @@ function updateLocalPlane(dtSec, keys) {
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
   myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight - drag) * dtSec, MIN_FLIGHT_SPEED, MAX_FLIGHT_SPEED);
+  // A prolonged climb can push the simulated airspeed below zero. At that
+  // point the aircraft is stalled and enters the same uncontrolled state as a
+  // disabled plane; from here on, cursor input and negative speed are ignored.
+  if (myState.speed < 0) {
+    myState.speed = 0;
+    myState.falling = true;
+    myState.boosting = false;
+    myState.turnVelocity = 0;
+    myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
+    myState.fallSpinVelocity = STALL_SPIN_SPEED * (Math.random() < .5 ? -1 : 1);
+    return;
+  }
   if (myState.y < 0) {
     const depth = clamp(-myState.y / TOP_BOUNDARY_DEPTH, .2, 1);
     myState.verticalVelocity += TOP_BOUNDARY_GRAVITY * depth * dtSec;
@@ -1027,12 +1044,12 @@ function resizeCanvas() {
   skyCanvas.height = window.innerHeight;
 }
 
-// ---- Vector plane silhouette -------------------------------------------------
+// ---- Multi-view vector plane -------------------------------------------------
 // The original raster F-16 was beautiful but too detailed for a 74px sprite.
 // This compact silhouette is drawn at runtime, so it stays sharp, readable,
 // and easy to tint for every pilot without needing an external image asset.
 const PLANE_SPRITE_LEN = 88;
-function drawPlaneSprite(ctx, color, alive, boosting) {
+function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0) {
   const main = alive ? color : '#566875';
   const dark = alive ? '#082238' : '#273844';
   const highlight = alive ? '#d8f5ff' : '#83939a';
@@ -1051,24 +1068,40 @@ function drawPlaneSprite(ctx, color, alive, boosting) {
     ctx.beginPath(); ctx.moveTo(-27,-4.5); ctx.lineTo(-exhaustLength,0); ctx.lineTo(-27,4.5); ctx.closePath(); ctx.fill();
   }
   ctx.shadowBlur = 0;
+  // A barrel roll is rendered as a sequence of changing drawn views. The
+  // wing projection narrows through the side view, while the lighting and
+  // panel details switch between top and underside as the roll crosses 180°.
+  // This keeps the flight vector independent from the visual roll.
+  const rollDepth = Math.cos(visualRoll);
+  const topView = Math.max(0, rollDepth);
+  const undersideView = Math.max(0, -rollDepth);
+  const wingProfile = .14 + .86 * Math.abs(rollDepth);
+  ctx.save();
+  ctx.scale(1, wingProfile);
+
   // wings and tailplane
-  ctx.fillStyle = dark; ctx.strokeStyle = 'rgba(217,247,255,.7)'; ctx.lineWidth = 1.2;
+  ctx.fillStyle = undersideView > .2 ? '#172b3a' : dark;
+  ctx.strokeStyle = 'rgba(217,247,255,.7)'; ctx.lineWidth = 1.2;
   ctx.beginPath(); ctx.moveTo(8,-3); ctx.lineTo(-8,-25); ctx.lineTo(-18,-24); ctx.lineTo(-11,-4); ctx.lineTo(-33,-11); ctx.lineTo(-37,-8); ctx.lineTo(-19,1); ctx.lineTo(-37,8); ctx.lineTo(-33,11); ctx.lineTo(-11,4); ctx.lineTo(-18,24); ctx.lineTo(-8,25); ctx.lineTo(8,3); ctx.closePath(); ctx.fill(); ctx.stroke();
   // Fuselage with a subtle metallic gradient.
   const body = ctx.createLinearGradient(0,-6,0,6);
   body.addColorStop(0, highlight); body.addColorStop(.18, main); body.addColorStop(.82, main); body.addColorStop(1, dark);
   ctx.fillStyle = body; ctx.strokeStyle = highlight;
   ctx.beginPath(); ctx.moveTo(42,0); ctx.quadraticCurveTo(28,-5,10,-5); ctx.lineTo(-23,-4); ctx.lineTo(-35,0); ctx.lineTo(-23,4); ctx.lineTo(10,5); ctx.quadraticCurveTo(28,5,42,0); ctx.closePath(); ctx.fill(); ctx.stroke();
-  // Canopy and center spine.
-  ctx.fillStyle = alive ? '#183c5a' : '#37484f'; ctx.strokeStyle = 'rgba(225,250,255,.75)';
+  // Canopy and center spine. During the inverted half of the roll, the
+  // canopy highlight is replaced by an underside panel so the view reads as
+  // an aircraft rotating in depth rather than a flat sprite spinning.
+  ctx.fillStyle = undersideView > .2 ? (alive ? '#0b1724' : '#263238') : (alive ? '#183c5a' : '#37484f');
+  ctx.strokeStyle = 'rgba(225,250,255,.75)';
   ctx.beginPath(); ctx.moveTo(18,-4); ctx.quadraticCurveTo(9,-13,-3,-5); ctx.lineTo(7,-2); ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,.38)'; ctx.beginPath(); ctx.moveTo(-27,0); ctx.lineTo(29,0); ctx.stroke();
+  ctx.strokeStyle = undersideView > .2 ? 'rgba(255,170,105,.36)' : 'rgba(255,255,255,.38)';
+  ctx.beginPath(); ctx.moveTo(-27,0); ctx.lineTo(29,0); ctx.stroke();
   // nose point and tail fin
   ctx.fillStyle = highlight; ctx.beginPath(); ctx.moveTo(42,0); ctx.lineTo(29,-2); ctx.lineTo(29,2); ctx.closePath(); ctx.fill();
   ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(-20,-4); ctx.lineTo(-13,-16); ctx.lineTo(-7,-5); ctx.closePath(); ctx.fill();
   // Fine wing panel seams and navigation lights make the jet read better at
   // the small in-game scale without relying on a blurry raster sprite.
-  ctx.strokeStyle = alive ? 'rgba(110,231,255,.5)' : 'rgba(190,210,215,.35)'; ctx.lineWidth = .8;
+  ctx.strokeStyle = undersideView > .2 ? 'rgba(255,170,105,.48)' : (alive ? 'rgba(110,231,255,.5)' : 'rgba(190,210,215,.35)'); ctx.lineWidth = .8;
   ctx.beginPath();
   ctx.moveTo(-9,-20); ctx.lineTo(2,-4); ctx.moveTo(-9,20); ctx.lineTo(2,4);
   ctx.moveTo(-29,-8); ctx.lineTo(-12,-2); ctx.moveTo(-29,8); ctx.lineTo(-12,2);
@@ -1076,6 +1109,15 @@ function drawPlaneSprite(ctx, color, alive, boosting) {
   if (alive) {
     ctx.fillStyle = '#ff6b61'; ctx.beginPath(); ctx.arc(-34,8,1.5,0,Math.PI*2); ctx.fill();
     ctx.fillStyle = '#6ee7ff'; ctx.beginPath(); ctx.arc(-34,-8,1.5,0,Math.PI*2); ctx.fill();
+  }
+  // Bright top-facing panel and darker underside panel are intentionally
+  // different drawn details, visible as the roll passes through each view.
+  if (topView > .35) {
+    ctx.strokeStyle = 'rgba(255,255,255,.42)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(8,-3); ctx.lineTo(22,-1); ctx.stroke();
+  } else if (undersideView > .35) {
+    ctx.strokeStyle = 'rgba(255,155,90,.55)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(8,3); ctx.lineTo(22,1); ctx.stroke();
   }
   ctx.restore();
 }
@@ -1087,10 +1129,8 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.translate(p.x - Math.cos(p.angle) * kick, p.y - Math.sin(p.angle) * kick);
   ctx.rotate(p.angle);
   const roll = p.roll || 0;
-  const wingProfile = .14 + .86 * Math.abs(Math.cos(roll));
-  ctx.scale(1, wingProfile);
   ctx.globalAlpha = flicker ? 0.4 : 1;
-  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true);
+  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false, p.boosting === true, roll);
   ctx.restore();
 
   ctx.globalAlpha = 1;
@@ -1541,6 +1581,7 @@ function loop(ts) {
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';
   boostFillEl.style.width = clamp((myState.boost / BOOST_MAX) * 100, 0, 100) + '%';
   heatFillEl.style.width = clamp((myState.heat / HEAT_MAX) * 100, 0, 100) + '%';
+  heatValueEl.textContent = Math.round(myState.heat) + '/' + HEAT_MAX;
   heatFillEl.classList.toggle('overheat', myState.overheated);
   scoreValEl.textContent = myState.score || 0;
   killsValEl.textContent = myState.kills || 0;
@@ -1586,6 +1627,7 @@ window.addEventListener('DOMContentLoaded', () => {
   hpFillEl = document.getElementById('hpFill');
   boostFillEl = document.getElementById('boostFill');
   heatFillEl = document.getElementById('heatFill');
+  heatValueEl = document.getElementById('heatValue');
   speedValueEl = document.getElementById('speedValue');
   speedNeedleEl = document.getElementById('speedNeedle');
   speedFillEl = document.getElementById('speedFill');
