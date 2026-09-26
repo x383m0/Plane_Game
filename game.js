@@ -16,6 +16,7 @@ const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
 const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
 const BARREL_ROLL_DURATION = 720, BARREL_ROLL_SPEED = Math.PI * 2.8, BARREL_ROLL_COOLDOWN = 900;
 const STALL_SPIN_SPEED = 5.2, FALL_GRAVITY = 420;
+const STALL_DELAY = 320; // brief warning window before a sustained stall becomes uncontrolled
 
 const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = Infinity, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
 const BULLET_SIGHT_TIME = .42;
@@ -214,6 +215,7 @@ function createLocalState() {
   return Object.assign(base, {
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
     speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
+    stallTime: 0,
     roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
     falling: false, deathKiller: null, fallSpinVelocity: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
@@ -230,6 +232,7 @@ function respawnLocal() {
   myState.heat = 0;
   myState.overheated = false;
   myState.speed = PLANE_SPEED; myState.verticalVelocity = 0; myState.turnVelocity = 0;
+  myState.stallTime = 0;
   myState.roll = 0; myState.barrelRollUntil = 0; myState.barrelRollCooldown = 0; myState.barrelRollDirection = 1;
   myState.falling = false; myState.deathKiller = null; myState.fallSpinVelocity = 0;
   myState.boosting = false;
@@ -369,13 +372,18 @@ function updateLocalPlane(dtSec, keys) {
   // point the aircraft is stalled and enters the same uncontrolled state as a
   // disabled plane; from here on, cursor input and negative speed are ignored.
   if (myState.speed < 0) {
-    myState.speed = 0;
-    myState.falling = true;
-    myState.boosting = false;
-    myState.turnVelocity = 0;
-    myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
-    myState.fallSpinVelocity = STALL_SPIN_SPEED * (Math.random() < .5 ? -1 : 1);
-    return;
+    myState.stallTime += dtSec * 1000;
+    if (myState.stallTime >= STALL_DELAY) {
+      myState.speed = 0;
+      myState.falling = true;
+      myState.boosting = false;
+      myState.turnVelocity = 0;
+      myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
+      myState.fallSpinVelocity = STALL_SPIN_SPEED * (Math.random() < .5 ? -1 : 1);
+      return;
+    }
+  } else {
+    myState.stallTime = 0;
   }
   if (myState.y < 0) {
     const depth = clamp(-myState.y / TOP_BOUNDARY_DEPTH, .2, 1);
@@ -1119,6 +1127,10 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0) {
     ctx.strokeStyle = 'rgba(255,155,90,.55)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(8,3); ctx.lineTo(22,1); ctx.stroke();
   }
+  ctx.restore();
+  // Close the outer sprite state as well. Leaving this save() open every
+  // frame eventually corrupts the canvas state stack and makes the plane
+  // appear frozen or disappear while the world keeps moving.
   ctx.restore();
 }
 
