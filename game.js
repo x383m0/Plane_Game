@@ -56,6 +56,7 @@ let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
 let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
 let explosions = [];              // {x,y,born,kind} — see FX above
 let clouds = [];
+let stars = [];
 let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
@@ -95,12 +96,14 @@ function removeProjectileLocal(kind, id) {
 
 function buildClouds() {
   clouds = [];
+  stars = [];
   for (let i = 0; i < 90; i++) {
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
       r: rand(30, 90), a: rand(0.08, 0.22)
     });
   }
+  for (let i = 0; i < 180; i++) stars.push({ x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 80), r: rand(.4, 1.5), a: rand(.15, .55) });
 }
 
 function randomSpawnPoint() {
@@ -730,50 +733,35 @@ function resizeCanvas() {
   skyCanvas.height = window.innerHeight;
 }
 
-// ---- Plane sprite (imported artwork, tinted per player) ----
-const PLANE_SPRITE_LEN = 74;             // nose-to-tail size in world px
-const planeImg = new Image();
-let planeImgReady = false;
-let planeSpriteH = PLANE_SPRITE_LEN * 0.35;
-const tintedPlaneCache = {};             // color hex -> offscreen canvas
-let deadPlaneCanvas = null;
-
-function makeTintedPlaneCanvas(color) {
-  const c = document.createElement('canvas');
-  c.width = planeImg.naturalWidth; c.height = planeImg.naturalHeight;
-  const cx = c.getContext('2d');
-  cx.drawImage(planeImg, 0, 0);
-  // 'color' blend mode takes this fill's hue/saturation but keeps the
-  // artwork's original shading (luminosity), so panel lines and highlights
-  // stay intact while the fuselage takes on the player's color.
-  cx.globalCompositeOperation = 'color';
-  cx.fillStyle = color;
-  cx.fillRect(0, 0, c.width, c.height);
-  // Clip back to the plane's silhouette — the fill above ignores
-  // transparency, so this punches the background back out.
-  cx.globalCompositeOperation = 'destination-in';
-  cx.drawImage(planeImg, 0, 0);
-  return c;
-}
-
-function buildTintedPlaneSprites() {
-  planeSpriteH = PLANE_SPRITE_LEN * (planeImg.naturalHeight / planeImg.naturalWidth);
-  COLORS.forEach(c => { tintedPlaneCache[c] = makeTintedPlaneCanvas(c); });
-  const dc = document.createElement('canvas');
-  dc.width = planeImg.naturalWidth; dc.height = planeImg.naturalHeight;
-  const dcx = dc.getContext('2d');
-  dcx.filter = 'grayscale(1) brightness(0.7)';
-  dcx.drawImage(planeImg, 0, 0);
-  deadPlaneCanvas = dc;
-}
-
-planeImg.onload = () => { planeImgReady = true; buildTintedPlaneSprites(); };
-planeImg.src = 'plane.png';
-
+// ---- Vector plane silhouette -------------------------------------------------
+// The original raster F-16 was beautiful but too detailed for a 74px sprite.
+// This compact silhouette is drawn at runtime, so it stays sharp, readable,
+// and easy to tint for every pilot without needing an external image asset.
+const PLANE_SPRITE_LEN = 88;
 function drawPlaneSprite(ctx, color, alive) {
-  if (!planeImgReady) return; // first couple frames only, before local load completes
-  const src = alive ? (tintedPlaneCache[color] || planeImg) : deadPlaneCanvas;
-  ctx.drawImage(src, -PLANE_SPRITE_LEN / 2, -planeSpriteH / 2, PLANE_SPRITE_LEN, planeSpriteH);
+  const main = alive ? color : '#566875';
+  const dark = alive ? '#082238' : '#273844';
+  const highlight = alive ? '#d8f5ff' : '#83939a';
+  ctx.save();
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.shadowColor = alive ? color : 'transparent'; ctx.shadowBlur = alive ? 9 : 0;
+  // soft engine glow
+  if (alive) { ctx.fillStyle = 'rgba(255,176,91,.72)'; ctx.beginPath(); ctx.moveTo(-34,-4); ctx.lineTo(-49,0); ctx.lineTo(-34,4); ctx.closePath(); ctx.fill(); }
+  ctx.shadowBlur = 0;
+  // wings and tailplane
+  ctx.fillStyle = dark; ctx.strokeStyle = 'rgba(217,247,255,.7)'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(8,-3); ctx.lineTo(-8,-25); ctx.lineTo(-18,-24); ctx.lineTo(-11,-4); ctx.lineTo(-33,-11); ctx.lineTo(-37,-8); ctx.lineTo(-19,1); ctx.lineTo(-37,8); ctx.lineTo(-33,11); ctx.lineTo(-11,4); ctx.lineTo(-18,24); ctx.lineTo(-8,25); ctx.lineTo(8,3); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // fuselage
+  ctx.fillStyle = main; ctx.strokeStyle = highlight;
+  ctx.beginPath(); ctx.moveTo(42,0); ctx.quadraticCurveTo(28,-5,10,-5); ctx.lineTo(-23,-4); ctx.lineTo(-35,0); ctx.lineTo(-23,4); ctx.lineTo(10,5); ctx.quadraticCurveTo(28,5,42,0); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // canopy and center spine
+  ctx.fillStyle = alive ? '#183c5a' : '#37484f'; ctx.strokeStyle = 'rgba(225,250,255,.75)';
+  ctx.beginPath(); ctx.moveTo(18,-4); ctx.quadraticCurveTo(9,-13,-3,-5); ctx.lineTo(7,-2); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.38)'; ctx.beginPath(); ctx.moveTo(-27,0); ctx.lineTo(29,0); ctx.stroke();
+  // nose point and tail fin
+  ctx.fillStyle = highlight; ctx.beginPath(); ctx.moveTo(42,0); ctx.lineTo(29,-2); ctx.lineTo(29,2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(-20,-4); ctx.lineTo(-13,-16); ctx.lineTo(-7,-5); ctx.closePath(); ctx.fill();
+  ctx.restore();
 }
 
 function drawPlane(ctx, p, isMe, now) {
@@ -932,13 +920,25 @@ function render(now) {
   const W = skyCanvas.width, H = skyCanvas.height;
 
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, '#3a6bb5'); grad.addColorStop(1, '#a9d4ef');
+  grad.addColorStop(0, '#071828'); grad.addColorStop(0.42, '#15506d'); grad.addColorStop(1, '#8dc4d4');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
+
+  // Atmospheric bands make the arena feel deeper before the camera moves.
+  const glow = ctx.createRadialGradient(W * .7, H * .25, 0, W * .7, H * .25, H * .75);
+  glow.addColorStop(0, 'rgba(108,224,239,.18)'); glow.addColorStop(1, 'rgba(108,224,239,0)');
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
 
   const camX = myState.x - W / 2, camY = myState.y - H / 2;
   ctx.save();
   ctx.translate(-camX, -camY);
+
+  stars.forEach(s => {
+    if (s.x < camX - 10 || s.x > camX + W + 10 || s.y < camY - 10 || s.y > camY + H + 10) return;
+    ctx.globalAlpha = s.a * (0.65 + Math.sin(now / 900 + s.x) * .25);
+    ctx.fillStyle = '#d8f7ff'; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
 
   clouds.forEach(c => {
     if (c.x < camX - 100 || c.x > camX + W + 100 || c.y < camY - 100 || c.y > camY + H + 100) return;

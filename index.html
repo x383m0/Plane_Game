@@ -9,24 +9,30 @@
 <body>
 
   <div id="menu">
-    <h1>Wings Arena</h1>
-    <p class="tagline">Free-for-all F-16 dogfights. Host a match, share the code, take off.</p>
+    <div class="brand-mark"><span></span><span></span><span></span></div>
+    <div class="eyebrow">SKYLINE NETWORK // ONLINE</div>
+    <h1>WINGS<span>ARENA</span></h1>
+    <p class="tagline">Rise above the clouds. Outfly the lobby.</p>
+    <div class="feature-row"><span>✦ 8 pilots</span><span>✦ LIVE DOGFIGHTS</span><span>✦ ZERO INSTALL</span></div>
 
     <div id="chooseRole">
-      <input id="nameInput" maxlength="14" placeholder="Your callsign" />
-      <button id="hostBtn">Host Game</button>
+      <label class="field-label" for="nameInput">CALLSIGN</label>
+      <input id="nameInput" maxlength="14" placeholder="ENTER YOUR CALLSIGN" autocomplete="off" />
+      <button id="hostBtn"><span>HOST A FLIGHT</span><b>→</b></button>
       <div id="joinBox">
-        <input id="hostIdInput" placeholder="Enter host's code" />
-        <button id="joinBtn">Join Game</button>
+        <input id="hostIdInput" placeholder="ROOM CODE" autocomplete="off" />
+        <button id="joinBtn"><span>JOIN</span><b>→</b></button>
       </div>
+      <p class="microcopy">Share your room code with your squadron.</p>
     </div>
 
     <div id="lobby" style="display:none;">
-      <p id="status"></p>
+      <div class="lobby-head"><span class="status-dot"></span><p id="status"></p></div>
       <ul id="lobbyList"></ul>
-      <button id="startBtn" style="display:none;">Start Game</button>
-      <p class="hint" id="waitHint">Waiting for the host to start...</p>
+      <button id="startBtn" style="display:none;"><span>LAUNCH SORTIE</span><b>→</b></button>
+      <p class="hint" id="waitHint">Waiting for the flight leader…</p>
     </div>
+    <div class="menu-footer"><span>WINGS ARENA v1.0</span><span>BEST WITH MOUSE + KEYBOARD</span></div>
   </div>
 
   <div id="gameArea" style="display:none;">
@@ -49,19 +55,21 @@
       </div>
 
       <div id="scorePanel">
-        <div>Score: <span id="scoreVal">0</span></div>
-        <div>Kills: <span id="killsVal">0</span></div>
+        <div class="panel-kicker">FLIGHT STATUS</div>
+        <div class="score-line"><span>SCORE</span><strong id="scoreVal">0</strong></div>
+        <div class="score-line"><span>KILLS</span><strong id="killsVal">0</strong></div>
       </div>
 
       <div id="weaponPanel">
-        <div id="missileCount">🚀 4/4</div>
-        <div id="flareCount">🔥 3/3</div>
+        <div class="panel-kicker">LOADOUT</div>
+        <div id="missileCount"><i class="weapon-icon missile-icon"></i> MISSILES <b>4/4</b></div>
+        <div id="flareCount"><i class="weapon-icon flare-icon"></i> FLARES <b>3/3</b></div>
       </div>
 
       <div id="lockWarning" style="display:none;">⚠ MISSILE LOCK — PRESS F TO FLARE!</div>
 
       <div id="leaderboard">
-        <h4>Leaderboard</h4>
+        <h4><span>LIVE RANKING</span><em>PTS</em></h4>
         <ol id="lbList"></ol>
       </div>
 
@@ -70,13 +78,14 @@
       <canvas id="minimap" width="180" height="75"></canvas>
 
       <div id="respawnOverlay" style="display:none;">
+        <div class="respawn-kicker">SIGNAL LOST</div>
         <div id="respawnMsg">Shot down!</div>
         <div id="respawnTimer"></div>
       </div>
     </div>
   </div>
 
-  <p class="controls">Controls: Move mouse to steer · ↑ / W boost (harder to turn while boosting) · Click or Space to fire the gun · Right-click or Q to fire a missile · F to flare</p>
+  <div class="controls"><span><b>MOUSE</b> steer</span><span><b>W / ↑</b> boost</span><span><b>CLICK / SPACE</b> cannon</span><span><b>Q</b> missile</span><span><b>F</b> flare</span></div>
 
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="game.js"></script>
