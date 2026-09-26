@@ -233,7 +233,7 @@ function createLocalState() {
   return Object.assign(base, {
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
     speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
-    stallTime: 0,
+    stallTime: 0, stallRecoverTime: 0,
     roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
     falling: false, stalled: false, deathKiller: null, fallSpinVelocity: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
@@ -252,7 +252,7 @@ function respawnLocal() {
   myState.speed = PLANE_SPEED; myState.verticalVelocity = 0; myState.turnVelocity = 0;
   myState.stallTime = 0;
   myState.roll = 0; myState.barrelRollUntil = 0; myState.barrelRollCooldown = 0; myState.barrelRollDirection = 1;
-  myState.falling = false; myState.stalled = false; myState.deathKiller = null; myState.fallSpinVelocity = 0;
+  myState.falling = false; myState.stalled = false; myState.stallRecoverTime = 0; myState.deathKiller = null; myState.fallSpinVelocity = 0;
   myState.boosting = false;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
@@ -335,8 +335,14 @@ function updateStalledFlight(dtSec, keys) {
   myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * dtSec, 30, WORLD_W - 30);
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
 
-  if (myState.speed >= 55 && Math.sin(myState.angle) > .08) {
+  if (myState.speed >= 90 && Math.sin(myState.angle) > .22) {
+    myState.stallRecoverTime += dtSec * 1000;
+  } else {
+    myState.stallRecoverTime = 0;
+  }
+  if (myState.stallRecoverTime >= 700) {
     myState.stalled = false;
+    myState.stallRecoverTime = 0;
     myState.verticalVelocity = 0;
   }
   if (myState.y >= GROUND_Y - 12) crashLocal('You hit the sea.');
@@ -443,6 +449,7 @@ function updateLocalPlane(dtSec, keys) {
     if (myState.stallTime >= STALL_DELAY) {
       myState.speed = 0;
       myState.stalled = true;
+      myState.stallRecoverTime = 0;
       myState.boosting = false;
       myState.turnVelocity = 0;
       myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
@@ -589,11 +596,21 @@ function fireBullet() {
   sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
 }
 
-function tryBarrelRoll() {
+function tryBarrelRoll(direction = 1) {
   if (!myState || !myState.alive || myState.falling || myState.barrelRollCooldown > 0) return;
   myState.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
   myState.barrelRollUntil = performance.now() + BARREL_ROLL_DURATION;
-  myState.barrelRollDirection = mouseY < window.innerHeight / 2 ? -1 : 1;
+  myState.barrelRollDirection = direction < 0 ? -1 : 1;
+}
+
+function testDeathOrReset() {
+  if (!myState) return;
+  if (myState.alive) {
+    beginDeathFall(null, 'TEST — uncontrolled fall');
+  } else if (myState.respawnAt) {
+    myState.respawnAt = 0;
+    respawnLocal();
+  }
 }
 
 function tryDropBomb() {
@@ -1089,9 +1106,10 @@ function wireKeyboard() {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
       case 'ArrowDown': case 's': case 'S': case 'Shift': keysHeld.airbrake = true; break;
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
-      case 'q': case 'Q': tryFireMissile(); break;
+      case 'q': case 'Q': tryBarrelRoll(-1); break;
       case 'f': case 'F': tryDeployFlare(); break;
-      case 'r': case 'R': tryBarrelRoll(); break;
+      case 'e': case 'E': tryBarrelRoll(1); break;
+      case 'r': case 'R': testDeathOrReset(); break;
       case 'b': case 'B': tryDropBomb(); break;
     }
   });
