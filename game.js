@@ -9,7 +9,7 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 const AIRBRAKE_MULT = 0.58;
-const GRAVITY_ACCEL = 260;        // gentler speed loss while climbing; diving still gains speed
+const GRAVITY_ACCEL = 180;        // very forgiving climb penalty; diving still gains speed
 const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
 const TOP_BOUNDARY_DEPTH = 260;
 const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
@@ -28,7 +28,8 @@ const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firi
 
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
 // plane can (so out-turning one alone is hard) but can be decoyed by a flare.
-const MISSILE_SPEED = 500, MISSILE_TURN_RATE = 4.6, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
+const MISSILE_SPEED = 920, MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
+const MISSILE_LOCK_DELAY = 850;   // target lock must mature before homing begins
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
@@ -37,7 +38,7 @@ const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS =
 // Flares: a limited-charge countermeasure that breaks a missile's lock if
 // it's fired within FLARE_BREAK_RADIUS of the missile at the moment of use.
 const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
-const FLARE_BREAK_RADIUS = 260, FLARE_ACTIVE_MS = 900;
+const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
@@ -92,7 +93,8 @@ const AUDIO_ASSETS = {
   missile: 'missile-launch.ogg',
   explosion: 'airplane-explosion.ogg',
   impact: 'heavy-impact.ogg',
-  flare: 'flare.ogg',
+  flare: 'freesound_community-firecracker-104159.mp3',
+  chaff: 'chaff_flare.mp3',
   lock: 'lock-alarm.ogg',
 };
 
@@ -692,7 +694,7 @@ function tryFireMissile() {
     id: myId + '-m' + (nextMissileId++), ownerId: myId, targetId,
     x: myState.x + Math.cos(myState.angle) * nose,
     y: myState.y + Math.sin(myState.angle) * nose,
-    angle: myState.angle, born: performance.now(), trail: [], exhaust: 1
+    angle: myState.angle, born: performance.now(), lockReadyAt: performance.now() + MISSILE_LOCK_DELAY, trail: [], exhaust: 1
   };
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
@@ -704,12 +706,35 @@ function tryDeployFlare() {
   if (!myState || !myState.alive || myState.falling || myState.flareCooldown > 0 || myState.flares <= 0) return;
   myState.flareCooldown = FLARE_MIN_INTERVAL;
   myState.flares--;
-  playAsset('flare', .25, 1.15);
+  unlockAudio();
+  playAsset('chaff', .34, 1);
+  spawnFlareSalvo(myState.x, myState.y, myState.angle);
+  resolveFlare(myId, myState.x, myState.y);
+  sendEvent({ type: 'flare', x: myState.x, y: myState.y, angle: myState.angle });
+}
 
-  const f = { x: myState.x, y: myState.y, born: performance.now() };
-  flares.push(f);
-  resolveFlare(myId, f.x, f.y);
-  sendEvent({ type: 'flare', x: f.x, y: f.y });
+function spawnFlareSalvo(x, y, angle) {
+  const now = performance.now();
+  const sideX = -Math.sin(angle), sideY = Math.cos(angle);
+  const rearX = -Math.cos(angle), rearY = -Math.sin(angle);
+  for (let side of [-1, 1]) {
+    for (let i = 0; i < FLARE_SALVO_COUNT; i++) {
+      const spread = 12 + i * 8;
+      const f = {
+        x: x + sideX * side * spread + rearX * (i * 5),
+        y: y + sideY * side * spread + rearY * (i * 5),
+        vx: sideX * side * (35 + i * 7) + rearX * 55,
+        vy: sideY * side * (35 + i * 7) + rearY * 55,
+        born: now + i * 24
+      };
+      flares.push(f);
+      // The salvo has the characteristic repeated popping/firing sound.
+      setTimeout(() => {
+        const volume = proximityVolume(f.x, f.y, .18);
+        if (volume > .005) playAsset('flare', volume, 1.02 + i * .015);
+      }, i * 24);
+    }
+  }
 }
 
 // Detonates any missile (in our own local copy of the world) that's currently
@@ -737,7 +762,9 @@ function updateMissiles(dtSec) {
       continue;
     }
 
-    if (m.targetId != null) {
+    // A missile can be launched toward a target immediately, but it cannot
+    // steer itself until the lock-acquisition cooldown has completed.
+    if (m.targetId != null && now >= (m.lockReadyAt || m.born)) {
       const target = players[m.targetId];
       if (target && target.alive !== false && target.connected !== false) {
         const desired = Math.atan2(target.y - m.y, target.x - m.x);
@@ -756,6 +783,17 @@ function updateMissiles(dtSec) {
     m.x += Math.cos(m.angle) * MISSILE_SPEED * dtSec;
     m.y += Math.sin(m.angle) * MISSILE_SPEED * dtSec;
   }
+}
+
+function updateFlares(dtSec) {
+  const now = performance.now();
+  flares.forEach(f => {
+    if (now < f.born) return;
+    f.x += (f.vx || 0) * dtSec;
+    f.y += (f.vy || 0) * dtSec;
+    f.vx *= Math.max(0, 1 - 1.8 * dtSec);
+    f.vy *= Math.max(0, 1 - 1.8 * dtSec);
+  });
 }
 
 function pruneFlares(now) {
@@ -875,7 +913,7 @@ function handleShoot(fromId, data) {
 
 function handleMissile(fromId, data) {
   if (fromId !== myId) {
-    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), trail: [] });
+    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now() + MISSILE_LOCK_DELAY, trail: [] });
     spawnExplosion(data.x, data.y, 'launch');
     playMissileLaunchSound(data.x, data.y);
   }
@@ -895,11 +933,11 @@ function handleBomb(fromId, data) {
 
 function handleFlare(fromId, data) {
   if (fromId !== myId) {
-    flares.push({ x: data.x, y: data.y, born: performance.now() });
+    spawnFlareSalvo(data.x, data.y, data.angle || 0);
     resolveFlare(fromId, data.x, data.y);
   }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
   });
 }
 
@@ -1007,7 +1045,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'missile') {
     if (data.from !== myId) {
-      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), trail: [] });
+      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now() + MISSILE_LOCK_DELAY, trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
@@ -1017,7 +1055,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'flare') {
     if (data.from !== myId) {
-      flares.push({ x: data.x, y: data.y, born: performance.now() });
+      spawnFlareSalvo(data.x, data.y, data.angle || 0);
       resolveFlare(data.from, data.x, data.y);
     }
   }
@@ -1347,16 +1385,25 @@ function drawBomb(ctx, b) {
 
 function drawFlare(ctx, f, now) {
   const frac = clamp(1 - (now - f.born) / FLARE_ACTIVE_MS, 0, 1);
-  if (frac <= 0) return;
+  if (frac <= 0 || now < f.born) return;
   ctx.save();
   ctx.globalAlpha = frac;
-  const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 26);
-  grad.addColorStop(0, 'rgba(255,240,180,0.95)');
-  grad.addColorStop(1, 'rgba(255,140,60,0)');
+  const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 24);
+  grad.addColorStop(0, 'rgba(255,255,225,1)');
+  grad.addColorStop(.25, 'rgba(255,205,85,.95)');
+  grad.addColorStop(1, 'rgba(255,105,35,0)');
   ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.arc(f.x, f.y, 26, 0, Math.PI * 2);
+  ctx.arc(f.x, f.y, 24, 0, Math.PI * 2);
   ctx.fill();
+  // Game-like flare body: a bright core, cross-shaped burning element, and a
+  // short drifting ember trail instead of a generic glowing circle.
+  ctx.translate(f.x, f.y);
+  ctx.strokeStyle = '#fff5bb'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-8,0); ctx.lineTo(8,0); ctx.moveTo(0,-8); ctx.lineTo(0,8); ctx.stroke();
+  ctx.fillStyle = '#fffbd5'; ctx.beginPath(); ctx.arc(0,0,3.2,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,145,55,.75)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-f.vx * .08, -f.vy * .08); ctx.lineTo(-f.vx * .28, -f.vy * .28); ctx.stroke();
   ctx.restore();
 }
 
@@ -1689,6 +1736,7 @@ function loop(ts) {
   updateBullets(dtSec);
   updateMissiles(dtSec);
   updateBombs(dtSec);
+  updateFlares(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
   interpolateRemotePlayers(dtSec);
@@ -1714,7 +1762,7 @@ function loop(ts) {
   speedFillEl.style.width = (speedRatio * 100) + '%';
   speedNeedleEl.style.transform = `rotate(${-112 + speedRatio * 224}deg)`;
 
-  const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
+  const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId && performance.now() >= (m.lockReadyAt || m.born));
   if (incomingLock && !lastIncomingLock) { unlockAudio(); playLockSound(); }
   lastIncomingLock = incomingLock;
   lockWarningEl.style.display = incomingLock ? 'block' : 'none';
