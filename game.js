@@ -9,11 +9,13 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 const AIRBRAKE_MULT = 0.58;
-const GRAVITY_ACCEL = 235;        // acceleration along the flight path when diving/climbing
+const GRAVITY_ACCEL = 420;        // acceleration along the flight path when diving/climbing
 const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
 const TOP_BOUNDARY_DEPTH = 260;
-const MIN_FLIGHT_SPEED = 95, MAX_FLIGHT_SPEED = 720;
+const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
 const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
+const BARREL_ROLL_DURATION = 720, BARREL_ROLL_SPEED = Math.PI * 2.8, BARREL_ROLL_COOLDOWN = 900;
+const STALL_SPIN_SPEED = 5.2, FALL_GRAVITY = 420;
 
 const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = 720, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
 const BULLET_SIGHT_TIME = .42;
@@ -212,6 +214,8 @@ function createLocalState() {
   return Object.assign(base, {
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
     speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
+    roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
+    falling: false, deathKiller: null, fallSpinVelocity: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
@@ -226,6 +230,8 @@ function respawnLocal() {
   myState.heat = 0;
   myState.overheated = false;
   myState.speed = PLANE_SPEED; myState.verticalVelocity = 0; myState.turnVelocity = 0;
+  myState.roll = 0; myState.barrelRollUntil = 0; myState.barrelRollCooldown = 0; myState.barrelRollDirection = 1;
+  myState.falling = false; myState.deathKiller = null; myState.fallSpinVelocity = 0;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
@@ -235,16 +241,70 @@ function respawnLocal() {
 }
 
 function crashLocal(message = 'You crashed.') {
+  finishDeath(null, message);
+}
+
+function beginDeathFall(killerId, message = 'Aircraft disabled') {
+  if (!myState || !myState.alive || myState.falling) return;
+  myState.health = 0;
+  myState.falling = true;
+  myState.deathKiller = killerId;
+  myState.speed = Math.max(0, myState.speed * .35);
+  myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
+  myState.fallSpinVelocity = STALL_SPIN_SPEED * (Math.random() < .5 ? -1 : 1);
+  respawnMsgEl.textContent = message;
+}
+
+function finishDeath(killerId, message = 'Shot down!') {
   if (!myState || !myState.alive) return;
   const now = performance.now();
-  myState.health = 0;
-  myState.alive = false;
+  myState.health = 0; myState.alive = false; myState.falling = false;
   myState.deaths = (myState.deaths || 0) + 1;
   respawnMsgEl.textContent = message;
   respawnOverlay.style.display = 'flex';
   myState.respawnAt = now + RESPAWN_DELAY;
   spawnExplosion(myState.x, Math.min(myState.y, GROUND_Y - 10), 'crash');
-  sendEvent({ type: 'died', by: null });
+  sendEvent({ type: 'died', by: killerId });
+}
+
+function updateDeathFall(dtSec) {
+  myState.verticalVelocity += FALL_GRAVITY * dtSec;
+  myState.speed *= Math.max(0, 1 - 1.8 * dtSec);
+  myState.roll += myState.fallSpinVelocity * dtSec;
+  myState.angle += Math.sin(myState.roll) * .35 * dtSec;
+  myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * .35 * dtSec, 30, WORLD_W - 30);
+  myState.y += myState.verticalVelocity * dtSec;
+  if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost');
+}
+
+function checkFallingHits() {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    if (b.ownerId === myId) continue;
+    if (pointSegmentDistance(myState.x, myState.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) < HIT_RADIUS) {
+      bullets.splice(i, 1); spawnExplosion(b.x, b.y, 'spark');
+      sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
+      finishDeath(b.ownerId, 'Aircraft destroyed'); return;
+    }
+  }
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    const m = missiles[i];
+    if (m.ownerId === myId || (m.targetId != null && m.targetId !== myId)) continue;
+    if (dist(myState.x, myState.y, m.x, m.y) < MISSILE_HIT_RADIUS) {
+      missiles.splice(i, 1); spawnExplosion(m.x, m.y, 'blast');
+      sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
+      finishDeath(m.ownerId, 'Aircraft destroyed'); return;
+    }
+  }
+  for (let i = bombs.length - 1; i >= 0; i--) {
+    const b = bombs[i];
+    if (b.ownerId === myId) continue;
+    if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
+      bombs.splice(i, 1); spawnExplosion(b.x, b.y, 'blast');
+      sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
+      finishDeath(b.ownerId, 'Aircraft destroyed'); return;
+    }
+  }
 }
 
 function updateLocalPlane(dtSec, keys) {
@@ -254,6 +314,11 @@ function updateLocalPlane(dtSec, keys) {
       myState.respawnAt = 0;
       respawnLocal();
     }
+    return;
+  }
+  if (myState.falling) {
+    updateDeathFall(dtSec);
+    if (myState.alive) checkFallingHits();
     return;
   }
 
@@ -278,6 +343,15 @@ function updateLocalPlane(dtSec, keys) {
   myState.boost = BOOST_MAX;
 
   const now = performance.now();
+  myState.barrelRollCooldown = Math.max(0, myState.barrelRollCooldown - dtSec * 1000);
+  if (now < myState.barrelRollUntil) {
+    myState.roll += myState.barrelRollDirection * BARREL_ROLL_SPEED * dtSec;
+  } else if (myState.speed < 0) {
+    // A stalled aircraft loses control and tumbles until it recovers or falls.
+    myState.roll += STALL_SPIN_SPEED * dtSec;
+  } else {
+    myState.roll *= Math.max(0, 1 - 7 * dtSec);
+  }
   myState.x = clamp(myState.x, 30, WORLD_W - 30);
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
@@ -355,13 +429,7 @@ function updateLocalPlane(dtSec, keys) {
         const rearHit = Math.abs(angleDiff(myState.angle, b.angle)) < Math.PI / 3;
         myState.health -= BULLET_DAMAGE * (rearHit ? 1.35 : 1);
         if (myState.health <= 0) {
-          myState.health = 0;
-          myState.alive = false;
-          myState.deaths = (myState.deaths || 0) + 1;
-          respawnMsgEl.textContent = 'Shot down!';
-          respawnOverlay.style.display = 'flex';
-          myState.respawnAt = now + RESPAWN_DELAY;
-          sendEvent({ type: 'died', by: b.ownerId });
+          beginDeathFall(b.ownerId, 'Aircraft disabled');
         }
         break;
       }
@@ -380,11 +448,7 @@ function updateLocalPlane(dtSec, keys) {
         sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
         myState.health -= BOMB_DAMAGE;
         if (myState.health <= 0) {
-          myState.health = 0; myState.alive = false;
-          myState.deaths = (myState.deaths || 0) + 1;
-          respawnMsgEl.textContent = 'Bombed!'; respawnOverlay.style.display = 'flex';
-          myState.respawnAt = now + RESPAWN_DELAY;
-          sendEvent({ type: 'died', by: b.ownerId });
+          beginDeathFall(b.ownerId, 'Aircraft disabled');
         }
         break;
       }
@@ -404,13 +468,7 @@ function updateLocalPlane(dtSec, keys) {
         sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
         myState.health -= MISSILE_DAMAGE;
         if (myState.health <= 0) {
-          myState.health = 0;
-          myState.alive = false;
-          myState.deaths = (myState.deaths || 0) + 1;
-          respawnMsgEl.textContent = 'Shot down!';
-          respawnOverlay.style.display = 'flex';
-          myState.respawnAt = now + RESPAWN_DELAY;
-          sendEvent({ type: 'died', by: m.ownerId });
+          beginDeathFall(m.ownerId, 'Aircraft disabled');
         }
         break;
       }
@@ -434,6 +492,13 @@ function fireBullet() {
   spawnExplosion(b.x, b.y, 'muzzle');
   playCannonSound(); recoilKick = Math.min(10, recoilKick + 3.2);
   sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
+}
+
+function tryBarrelRoll() {
+  if (!myState || !myState.alive || myState.falling || myState.barrelRollCooldown > 0) return;
+  myState.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
+  myState.barrelRollUntil = performance.now() + BARREL_ROLL_DURATION;
+  myState.barrelRollDirection = mouseY < window.innerHeight / 2 ? -1 : 1;
 }
 
 function tryDropBomb() {
@@ -521,7 +586,7 @@ function tryFireMissile() {
 }
 
 function tryDeployFlare() {
-  if (!myState || !myState.alive || myState.flareCooldown > 0 || myState.flares <= 0) return;
+  if (!myState || !myState.alive || myState.falling || myState.flareCooldown > 0 || myState.flares <= 0) return;
   myState.flareCooldown = FLARE_MIN_INTERVAL;
   myState.flares--;
   playAsset('flare', .25, 1.15);
@@ -664,13 +729,15 @@ function applyRemoteState(p, data) {
   }
   p.tx = data.x; p.ty = data.y; p.tangle = data.angle;
   p.health = data.health; p.alive = data.alive;
+  p.falling = !!data.falling;
+  if (data.roll != null) p.roll = data.roll;
 }
 
 function handleState(fromId, data) {
   const p = players[fromId];
   if (p) applyRemoteState(p, data);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, roll: data.roll });
   });
 }
 
@@ -923,6 +990,7 @@ function wireKeyboard() {
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
       case 'q': case 'Q': tryFireMissile(); break;
       case 'f': case 'F': tryDeployFlare(); break;
+      case 'r': case 'R': tryBarrelRoll(); break;
       case 'b': case 'B': tryDropBomb(); break;
     }
   });
@@ -1010,6 +1078,9 @@ function drawPlane(ctx, p, isMe, now) {
   const kick = isMe ? recoilKick : 0;
   ctx.translate(p.x - Math.cos(p.angle) * kick, p.y - Math.sin(p.angle) * kick);
   ctx.rotate(p.angle);
+  const roll = p.roll || 0;
+  const wingProfile = .14 + .86 * Math.abs(Math.cos(roll));
+  ctx.scale(1, wingProfile);
   ctx.globalAlpha = flicker ? 0.4 : 1;
   drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false);
   ctx.restore();
@@ -1457,7 +1528,7 @@ function loop(ts) {
 
   if (ts - lastBroadcast > 66) {
     lastBroadcast = ts;
-    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive });
+    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive, falling: myState.falling, roll: myState.roll });
   }
 
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';
