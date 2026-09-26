@@ -102,11 +102,12 @@ function angleDiff(from, to) {
 function unlockAudio() {
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return;
-    audioCtx = new AC();
-    masterGain = audioCtx.createGain(); masterGain.gain.value = 0.24; masterGain.connect(audioCtx.destination);
+    if (AC) {
+      audioCtx = new AC();
+      masterGain = audioCtx.createGain(); masterGain.gain.value = 0.24; masterGain.connect(audioCtx.destination);
+    }
   }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   if (!audioAssetsStarted) {
     audioAssetsStarted = true;
     Object.entries(AUDIO_ASSETS).forEach(([name, src]) => {
@@ -116,12 +117,12 @@ function unlockAudio() {
 }
 function playAsset(name, volume = .65, rate = 1) {
   const source = audioBank[name]; if (!source) return false;
-  const a = source.cloneNode(); a.volume = clamp(volume, 0, 1); a.playbackRate = rate;
-  a.play().catch(() => {}); return true;
+  const a = source.cloneNode(); a.src = source.src; a.volume = clamp(volume, 0, 1); a.playbackRate = rate;
+  a.load(); a.play().catch(() => {}); return true;
 }
 function startEngineAudio() {
-  if (engineAudio || !audioBank.engine) return;
-  engineAudio = audioBank.engine.cloneNode(); engineAudio.loop = true; engineAudio.volume = .16;
+  if (!audioBank.engine) return;
+  if (!engineAudio) { engineAudio = audioBank.engine.cloneNode(); engineAudio.src = audioBank.engine.src; engineAudio.loop = true; engineAudio.volume = .16; engineAudio.load(); }
   engineAudio.play().catch(() => {});
 }
 function updateEngineAudio() {
@@ -789,6 +790,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) reset
 
 function wireKeyboard() {
   document.addEventListener('keydown', e => {
+    unlockAudio(); if (started) startEngineAudio();
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
@@ -807,6 +809,7 @@ function wireKeyboard() {
 function wireMouse() {
   window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
   window.addEventListener('mousedown', e => {
+    unlockAudio(); if (started) startEngineAudio();
     if (e.button === 0) keysHeld.shoot = true;
     else if (e.button === 2) tryFireMissile();
   });
