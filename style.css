@@ -1,6 +1,8 @@
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 :root{--cursor-hidden:1}
 #gameArea{cursor:none}
+.bomb-icon{width:9px;height:9px;display:inline-block;background:#273a46;border:1px solid #c9e7ef;border-radius:50%;box-shadow:0 0 7px #ff9d5c}
+.controls{max-width:calc(100vw - 24px);overflow:hidden}
 :root{--ink:#eaf6ff;--muted:#8ea8bf;--cyan:#6ee7ff;--orange:#ff9d5c;--panel:rgba(8,20,36,.72);--line:rgba(160,215,242,.2)}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;color:var(--ink);background:#071521;font-family:'Barlow Condensed','Segoe UI',sans-serif}button,input{font:inherit}button{cursor:pointer}
 body:before,body:after{content:"";position:fixed;pointer-events:none;z-index:0}body:before{inset:0;background:radial-gradient(ellipse at 50% 15%,rgba(48,133,175,.28),transparent 44%),linear-gradient(145deg,#091725 0%,#0b2840 48%,#164c62 100%)}body:after{width:70vw;height:70vw;right:-20vw;top:-35vw;border:1px solid rgba(117,213,240,.16);border-radius:50%;box-shadow:0 0 0 42px rgba(117,213,240,.025),0 0 0 84px rgba(117,213,240,.025)}

@@ -8,6 +8,8 @@ const BOOST_MULT = 1.95;
 const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
+const AIRBRAKE_MULT = 0.58;
+const DODGE_COOLDOWN = 1200, DODGE_DURATION = 260, DODGE_SPEED = 470, DODGE_INVULN = 300;
 
 const BULLET_SPEED = 1850, BULLET_LIFE = 520, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
@@ -21,6 +23,8 @@ const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firi
 const MISSILE_SPEED = 500, MISSILE_TURN_RATE = 4.6, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
+const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
+const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS = 42;
 
 // Flares: a limited-charge countermeasure that breaks a missile's lock if
 // it's fired within FLARE_BREAK_RADIUS of the missile at the moment of use.
@@ -54,6 +58,7 @@ let players = {};                 // id -> {id,name,connected,alive,x,y,angle,he
 let coins = [];                   // {id,x,y}
 let bullets = [];                 // {id,ownerId,x,y,angle,born}
 let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
+let bombs = [];                   // {id,ownerId,x,y,vx,vy,born}
 let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
 let explosions = [];              // {x,y,born,kind} — see FX above
 let clouds = [];
@@ -62,7 +67,7 @@ let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl;
-let missileCountEl, flareCountEl, lockWarningEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -163,7 +168,7 @@ function pruneExplosions(now) {
 // Used when another client reports a hit on a bullet/missile we're also
 // tracking locally, so our copy disappears (with an effect) at the same time.
 function removeProjectileLocal(kind, id) {
-  const arr = kind === 'missile' ? missiles : bullets;
+  const arr = kind === 'missile' ? missiles : kind === 'bomb' ? bombs : bullets;
   const idx = arr.findIndex(p => p.id === id);
   if (idx !== -1) arr.splice(idx, 1);
 }
@@ -201,7 +206,9 @@ function createLocalState() {
   const base = freshPlayerState(myId, myName);
   return Object.assign(base, {
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
+    dodgeCooldown: 0, dodgeUntil: 0, dodgeDir: 1,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
+    bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
   });
 }
@@ -213,7 +220,9 @@ function respawnLocal() {
   myState.health = MAX_HEALTH;
   myState.heat = 0;
   myState.overheated = false;
+  myState.dodgeCooldown = 0; myState.dodgeUntil = 0;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
+  myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
   myState.alive = true;
   myState.invulnUntil = performance.now() + INVULN_TIME;
@@ -233,18 +242,28 @@ function updateLocalPlane(dtSec, keys) {
   // Steer toward the mouse cursor. The camera always keeps the player
   // centered on screen, so "screen center -> cursor" gives the aim angle.
   // Boosting trades agility for speed, same as a real jet's wider turn radius.
-  const boosting = keys.boost && myState.boost > 0;
+  const boosting = keys.boost && myState.boost > 0 && !keys.airbrake;
+  const airbraking = keys.airbrake && !boosting;
   const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
-  const turnStep = TURN_RATE * (boosting ? BOOST_TURN_MULT : 1) * dtSec;
+  const speedBeforeTurn = PLANE_SPEED * (boosting ? BOOST_MULT : airbraking ? AIRBRAKE_MULT : 1);
+  const speedPenalty = clamp(speedBeforeTurn / (PLANE_SPEED * BOOST_MULT), .62, 1);
+  const turnAssist = airbraking ? 1.34 : 1;
+  const turnStep = TURN_RATE * (boosting ? BOOST_TURN_MULT : 1) * turnAssist * (1.16 - speedPenalty * .25) * dtSec;
   const diff = angleDiff(myState.angle, targetAngle);
   myState.angle += Math.abs(diff) < turnStep ? diff : Math.sign(diff) * turnStep;
 
   if (boosting) myState.boost = Math.max(0, myState.boost - BOOST_DRAIN * dtSec);
   else myState.boost = Math.min(BOOST_MAX, myState.boost + BOOST_REGEN * dtSec);
 
-  const speed = PLANE_SPEED * (boosting ? BOOST_MULT : 1);
+  const speed = speedBeforeTurn;
   myState.x += Math.cos(myState.angle) * speed * dtSec;
   myState.y += Math.sin(myState.angle) * speed * dtSec;
+  const now = performance.now();
+  if (now < myState.dodgeUntil) {
+    const dodgeFade = clamp((myState.dodgeUntil - now) / DODGE_DURATION, 0, 1);
+    myState.x += -Math.sin(myState.angle) * myState.dodgeDir * DODGE_SPEED * dodgeFade * dtSec;
+    myState.y += Math.cos(myState.angle) * myState.dodgeDir * DODGE_SPEED * dodgeFade * dtSec;
+  }
   myState.x = clamp(myState.x, 30, WORLD_W - 30);
   myState.y = clamp(myState.y, 30, GROUND_Y - 40);
 
@@ -278,6 +297,13 @@ function updateLocalPlane(dtSec, keys) {
     myState.flareRegenTimer = 0;
     myState.flares++;
   }
+  myState.dodgeCooldown = Math.max(0, myState.dodgeCooldown - dtSec * 1000);
+  myState.bombCooldown = Math.max(0, myState.bombCooldown - dtSec * 1000);
+  myState.bombRegenTimer += dtSec * 1000;
+  if (myState.bombs < BOMB_MAX && myState.bombRegenTimer >= BOMB_REGEN_MS) {
+    myState.bombRegenTimer = 0;
+    myState.bombs++;
+  }
 
   // coin pickup (optimistic local removal + tell host)
   for (let i = coins.length - 1; i >= 0; i--) {
@@ -289,7 +315,6 @@ function updateLocalPlane(dtSec, keys) {
   }
 
   // incoming bullet damage (only bullets NOT owned by me)
-  const now = performance.now();
   const invuln = now < myState.invulnUntil;
   if (!invuln) {
     for (let i = bullets.length - 1; i >= 0; i--) {
@@ -299,13 +324,37 @@ function updateLocalPlane(dtSec, keys) {
         bullets.splice(i, 1);
         spawnExplosion(b.x, b.y, 'spark');
         sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
-        myState.health -= BULLET_DAMAGE;
+        const rearHit = Math.abs(angleDiff(myState.angle, b.angle)) < Math.PI / 3;
+        myState.health -= BULLET_DAMAGE * (rearHit ? 1.35 : 1);
         if (myState.health <= 0) {
           myState.health = 0;
           myState.alive = false;
           myState.deaths = (myState.deaths || 0) + 1;
           respawnMsgEl.textContent = 'Shot down!';
           respawnOverlay.style.display = 'flex';
+          myState.respawnAt = now + RESPAWN_DELAY;
+          sendEvent({ type: 'died', by: b.ownerId });
+        }
+        break;
+      }
+    }
+  }
+
+  // Bombs are ballistic and cannot chase you. Their danger comes from
+  // predicting where the target will be, especially near the waterline.
+  if (!invuln && myState.alive) {
+    for (let i = bombs.length - 1; i >= 0; i--) {
+      const b = bombs[i];
+      if (b.ownerId === myId) continue;
+      if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
+        bombs.splice(i, 1);
+        spawnExplosion(b.x, b.y, 'blast');
+        sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
+        myState.health -= BOMB_DAMAGE;
+        if (myState.health <= 0) {
+          myState.health = 0; myState.alive = false;
+          myState.deaths = (myState.deaths || 0) + 1;
+          respawnMsgEl.textContent = 'Bombed!'; respawnOverlay.style.display = 'flex';
           myState.respawnAt = now + RESPAWN_DELAY;
           sendEvent({ type: 'died', by: b.ownerId });
         }
@@ -356,6 +405,34 @@ function fireBullet() {
   sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
 }
 
+function tryDodge() {
+  if (!myState || !myState.alive || myState.dodgeCooldown > 0) return;
+  const now = performance.now();
+  myState.dodgeCooldown = DODGE_COOLDOWN;
+  myState.dodgeUntil = now + DODGE_DURATION;
+  myState.dodgeDir = mouseY < window.innerHeight / 2 ? -1 : 1;
+  myState.invulnUntil = Math.max(myState.invulnUntil, now + DODGE_INVULN);
+  spawnExplosion(myState.x, myState.y, 'shock');
+  screenShake = Math.max(screenShake, 5);
+}
+
+function tryDropBomb() {
+  if (!myState || !myState.alive || myState.bombCooldown > 0 || myState.bombs <= 0) return;
+  unlockAudio();
+  myState.bombCooldown = BOMB_COOLDOWN;
+  myState.bombs--;
+  const angle = myState.angle;
+  const b = {
+    id: myId + '-b' + (nextBulletId++), ownerId: myId,
+    x: myState.x - Math.cos(angle) * 18, y: myState.y - Math.sin(angle) * 18,
+    vx: Math.cos(angle) * BOMB_SPEED, vy: Math.sin(angle) * BOMB_SPEED,
+    born: performance.now()
+  };
+  bombs.push(b);
+  spawnExplosion(b.x, b.y, 'launch');
+  sendEvent({ type: 'bomb', id: b.id, x: b.x, y: b.y, vx: b.vx, vy: b.vy });
+}
+
 function updateBullets(dtSec) {
   const now = performance.now();
   for (let i = bullets.length - 1; i >= 0; i--) {
@@ -364,6 +441,21 @@ function updateBullets(dtSec) {
     b.prevX = b.x; b.prevY = b.y;
     b.x += Math.cos(b.angle) * BULLET_SPEED * dtSec;
     b.y += Math.sin(b.angle) * BULLET_SPEED * dtSec;
+  }
+}
+
+function updateBombs(dtSec) {
+  const now = performance.now();
+  for (let i = bombs.length - 1; i >= 0; i--) {
+    const b = bombs[i];
+    if (now - b.born > BOMB_LIFE || b.y >= GROUND_Y - 8) {
+      spawnExplosion(b.x, Math.min(b.y, GROUND_Y - 8), 'blast');
+      bombs.splice(i, 1);
+      continue;
+    }
+    b.vy += BOMB_GRAVITY * dtSec;
+    b.x += b.vx * dtSec;
+    b.y += b.vy * dtSec;
   }
 }
 
@@ -525,6 +617,7 @@ function handleHostReceive(fromId, data) {
   if (data.type === 'state') handleState(fromId, data);
   else if (data.type === 'shoot') handleShoot(fromId, data);
   else if (data.type === 'missile') handleMissile(fromId, data);
+  else if (data.type === 'bomb') handleBomb(fromId, data);
   else if (data.type === 'flare') handleFlare(fromId, data);
   else if (data.type === 'impact') handleImpact(fromId, data);
   else if (data.type === 'collect') handleCollect(fromId, data.id);
@@ -578,6 +671,15 @@ function handleMissile(fromId, data) {
   }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle });
+  });
+}
+
+function handleBomb(fromId, data) {
+  if (fromId !== myId) {
+    bombs.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
+  }
+  Object.entries(connections).forEach(([id, c]) => {
+    if (Number(id) !== fromId && c.open) c.send({ type: 'bomb', from: fromId, id: data.id, x: data.x, y: data.y, vx: data.vx, vy: data.vy });
   });
 }
 
@@ -699,6 +801,9 @@ function handleClientReceive(data) {
       spawnExplosion(data.x, data.y, 'launch');
     }
   }
+  else if (data.type === 'bomb') {
+    if (data.from !== myId) bombs.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
+  }
   else if (data.type === 'flare') {
     if (data.from !== myId) {
       flares.push({ x: data.x, y: data.y, born: performance.now() });
@@ -719,6 +824,7 @@ function sendEvent(msg) {
     if (msg.type === 'state') handleState(0, msg);
     else if (msg.type === 'shoot') handleShoot(0, msg);
     else if (msg.type === 'missile') handleMissile(0, msg);
+    else if (msg.type === 'bomb') handleBomb(0, msg);
     else if (msg.type === 'flare') handleFlare(0, msg);
     else if (msg.type === 'impact') handleImpact(0, msg);
     else if (msg.type === 'collect') handleCollect(0, msg.id);
@@ -775,10 +881,10 @@ function onKilled(killerId, victimId) {
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
 
 // ================= Input =================
-const keysHeld = { boost: false, shoot: false };
+const keysHeld = { boost: false, airbrake: false, shoot: false };
 let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // aim point; steering targets this each frame
 
-function resetAllInput() { keysHeld.boost = false; keysHeld.shoot = false; }
+function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; }
 window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });
 
@@ -787,14 +893,18 @@ function wireKeyboard() {
     unlockAudio();
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
+      case 'ArrowDown': case 's': case 'S': case 'Shift': keysHeld.airbrake = true; break;
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
       case 'q': case 'Q': tryFireMissile(); break;
       case 'f': case 'F': tryDeployFlare(); break;
+      case 'e': case 'E': tryDodge(); break;
+      case 'b': case 'B': tryDropBomb(); break;
     }
   });
   document.addEventListener('keyup', e => {
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = false; break;
+      case 'ArrowDown': case 's': case 'S': case 'Shift': keysHeld.airbrake = false; break;
       case ' ': keysHeld.shoot = false; break;
     }
   });
@@ -966,6 +1076,18 @@ function drawMissile(ctx, m) {
   ctx.restore();
 }
 
+function drawBomb(ctx, b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(Math.atan2(b.vy, b.vx));
+  ctx.shadowColor = '#ff9d5c'; ctx.shadowBlur = 10;
+  ctx.fillStyle = '#1b2934'; ctx.strokeStyle = '#d3e7ed'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.ellipse(0, 0, 8, 4.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ff9d5c';
+  ctx.beginPath(); ctx.moveTo(-7, -3); ctx.lineTo(-15, 0); ctx.lineTo(-7, 3); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
 function drawFlare(ctx, f, now) {
   const frac = clamp(1 - (now - f.born) / FLARE_ACTIVE_MS, 0, 1);
   if (frac <= 0) return;
@@ -1092,6 +1214,31 @@ function drawCrosshair(ctx, now) {
   ctx.restore();
 }
 
+function drawAimAssist(ctx, now, camX, camY) {
+  if (!myState || !myState.alive) return;
+  let chosen = null, chosenDist = Infinity;
+  Object.values(players).forEach(p => {
+    if (p.id === myId || p.connected === false || p.alive === false) return;
+    const d = dist(myState.x, myState.y, p.x, p.y);
+    const angleToTarget = Math.atan2(p.y - myState.y, p.x - myState.x);
+    if (d > 950 || Math.abs(angleDiff(myState.angle, angleToTarget)) > Math.PI * .78 || d >= chosenDist) return;
+    chosen = p; chosenDist = d;
+  });
+  if (!chosen) return;
+  const leadTime = clamp(chosenDist / BULLET_SPEED, .06, .42);
+  const leadX = chosen.x + Math.cos(chosen.angle) * PLANE_SPEED * leadTime;
+  const leadY = chosen.y + Math.sin(chosen.angle) * PLANE_SPEED * leadTime;
+  const sx = leadX - camX, sy = leadY - camY;
+  if (sx < -30 || sy < -30 || sx > skyCanvas.width + 30 || sy > skyCanvas.height + 30) return;
+  const size = 7 + Math.sin(now / 140) * 1.2;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(Math.PI / 4);
+  ctx.strokeStyle = 'rgba(255,229,133,.9)'; ctx.lineWidth = 1.4; ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 8;
+  ctx.strokeRect(-size / 2, -size / 2, size, size);
+  ctx.restore();
+}
+
 function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
@@ -1140,6 +1287,7 @@ function render(now) {
   flares.forEach(f => drawFlare(ctx, f, now));
   bullets.forEach(b => drawBullet(ctx, b));
   missiles.forEach(m => drawMissile(ctx, m));
+  bombs.forEach(b => drawBomb(ctx, b));
 
   Object.values(players).forEach(p => {
     if (p.id === myId) return;
@@ -1153,6 +1301,7 @@ function render(now) {
   ctx.restore();
 
   drawMinimap(now);
+  drawAimAssist(ctx, now, camX, camY);
   drawCrosshair(ctx, now);
 }
 
@@ -1211,6 +1360,7 @@ function loop(ts) {
   updateLocalPlane(dtSec, keysHeld);
   updateBullets(dtSec);
   updateMissiles(dtSec);
+  updateBombs(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
   interpolateRemotePlayers(dtSec);
@@ -1228,6 +1378,7 @@ function loop(ts) {
   scoreValEl.textContent = myState.score || 0;
   killsValEl.textContent = myState.kills || 0;
   missileCountEl.textContent = 'MISSILES  ' + myState.missiles + '/' + MISSILE_MAX;
+  bombCountEl.textContent = 'BOMBS  ' + myState.bombs + '/' + BOMB_MAX;
   flareCountEl.textContent = 'FLARES  ' + myState.flares + '/' + FLARE_MAX;
 
   const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
@@ -1267,6 +1418,7 @@ window.addEventListener('DOMContentLoaded', () => {
   scoreValEl = document.getElementById('scoreVal');
   killsValEl = document.getElementById('killsVal');
   missileCountEl = document.getElementById('missileCount');
+  bombCountEl = document.getElementById('bombCount');
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
   lbListEl = document.getElementById('lbList');
