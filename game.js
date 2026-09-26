@@ -71,7 +71,7 @@ let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl;
-let missileCountEl, bombCountEl, flareCountEl, lockWarningEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -271,8 +271,10 @@ function updateLocalPlane(dtSec, keys) {
   myState.turnVelocity = clamp(myState.turnVelocity, -TURN_RATE * 1.15, TURN_RATE * 1.15);
   myState.angle += myState.turnVelocity * dtSec;
 
-  if (boosting) myState.boost = Math.max(0, myState.boost - BOOST_DRAIN * dtSec);
-  else myState.boost = Math.min(BOOST_MAX, myState.boost + BOOST_REGEN * dtSec);
+  // Boost is intentionally unlimited. The tradeoff is speed: boosting makes
+  // the aircraft faster but also reduces turn authority through the flight
+  // model above.
+  myState.boost = BOOST_MAX;
 
   const now = performance.now();
   myState.x = clamp(myState.x, 30, WORLD_W - 30);
@@ -1420,6 +1422,10 @@ function loop(ts) {
   missileCountEl.textContent = 'MISSILES  ' + myState.missiles + '/' + MISSILE_MAX;
   bombCountEl.textContent = 'BOMBS  ' + myState.bombs + '/' + BOMB_MAX;
   flareCountEl.textContent = 'FLARES  ' + myState.flares + '/' + FLARE_MAX;
+  const speedRatio = clamp((myState.speed - MIN_FLIGHT_SPEED) / (MAX_FLIGHT_SPEED - MIN_FLIGHT_SPEED), 0, 1);
+  speedValueEl.textContent = Math.round(myState.speed);
+  speedFillEl.style.width = (speedRatio * 100) + '%';
+  speedNeedleEl.style.transform = `rotate(${-112 + speedRatio * 224}deg)`;
 
   const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
   if (incomingLock && !lastIncomingLock) { unlockAudio(); playLockSound(); }
@@ -1455,6 +1461,9 @@ window.addEventListener('DOMContentLoaded', () => {
   hpFillEl = document.getElementById('hpFill');
   boostFillEl = document.getElementById('boostFill');
   heatFillEl = document.getElementById('heatFill');
+  speedValueEl = document.getElementById('speedValue');
+  speedNeedleEl = document.getElementById('speedNeedle');
+  speedFillEl = document.getElementById('speedFill');
   scoreValEl = document.getElementById('scoreVal');
   killsValEl = document.getElementById('killsVal');
   missileCountEl = document.getElementById('missileCount');
