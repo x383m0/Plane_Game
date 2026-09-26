@@ -68,21 +68,18 @@ let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let lastSpawnTick = 0;
 let audioCtx = null, masterGain = null;
-let audioBank = {}, engineAudio = null, audioAssetsStarted = false;
-let screenShake = 0, recoilKick = 0, lastIncomingLock = false, wasBoosting = false;
+let audioBank = {}, audioAssetsStarted = false;
+let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
   // Keep these paths flat so the deployed game can actually resolve them.
   cannon: 'shoot_01.ogg',
-  engine: 'flight-engine.ogg',
-  flyby: 'jet-flyby.ogg',
   missile: 'missile-launch.ogg',
   explosion: 'airplane-explosion.ogg',
   impact: 'heavy-impact.ogg',
   flare: 'flare.ogg',
   lock: 'lock-alarm.ogg',
-  boost: 'boost-air.ogg'
 };
 
 // ================= World helpers =================
@@ -127,17 +124,6 @@ function playAsset(name, volume = .65, rate = 1) {
   const source = audioBank[name]; if (!source) return false;
   const a = source.cloneNode(); a.src = source.src; a.volume = clamp(volume, 0, 1); a.playbackRate = rate;
   a.load(); a.play().catch(() => {}); return true;
-}
-function startEngineAudio() {
-  if (!audioBank.engine) return;
-  if (!engineAudio) { engineAudio = audioBank.engine.cloneNode(); engineAudio.src = audioBank.engine.src; engineAudio.loop = true; engineAudio.volume = .055; engineAudio.load(); }
-  engineAudio.play().catch(() => {});
-}
-function updateEngineAudio() {
-  if (!engineAudio) return;
-  const boost = keysHeld.boost && myState && myState.boost > 0;
-  engineAudio.volume = boost ? .085 : .055;
-  engineAudio.playbackRate = boost ? 1.08 : .96;
 }
 function tone(freq, duration, volume, type = 'sine', slide = 0) {
   if (!audioCtx || !masterGain) return;
@@ -798,7 +784,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) reset
 
 function wireKeyboard() {
   document.addEventListener('keydown', e => {
-    unlockAudio(); if (started) startEngineAudio();
+    unlockAudio();
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
@@ -817,7 +803,7 @@ function wireKeyboard() {
 function wireMouse() {
   window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
   window.addEventListener('mousedown', e => {
-    unlockAudio(); if (started) startEngineAudio();
+    unlockAudio();
     if (e.button === 0) keysHeld.shoot = true;
     else if (e.button === 2) tryFireMissile();
   });
@@ -843,22 +829,43 @@ function drawPlaneSprite(ctx, color, alive) {
   ctx.save();
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.shadowColor = alive ? color : 'transparent'; ctx.shadowBlur = alive ? 9 : 0;
-  // soft engine glow
-  if (alive) { ctx.fillStyle = 'rgba(255,176,91,.72)'; ctx.beginPath(); ctx.moveTo(-34,-4); ctx.lineTo(-49,0); ctx.lineTo(-34,4); ctx.closePath(); ctx.fill(); }
+  // Visual-only exhaust trail. Flight audio is disabled, but the aircraft
+  // still needs a clear sense of thrust during fast movement.
+  if (alive) {
+    const exhaust = ctx.createLinearGradient(-27, 0, -53, 0);
+    exhaust.addColorStop(0, 'rgba(255,244,184,.95)');
+    exhaust.addColorStop(.42, 'rgba(255,145,65,.7)');
+    exhaust.addColorStop(1, 'rgba(255,70,25,0)');
+    ctx.fillStyle = exhaust;
+    ctx.beginPath(); ctx.moveTo(-27,-3); ctx.lineTo(-53,0); ctx.lineTo(-27,3); ctx.closePath(); ctx.fill();
+  }
   ctx.shadowBlur = 0;
   // wings and tailplane
   ctx.fillStyle = dark; ctx.strokeStyle = 'rgba(217,247,255,.7)'; ctx.lineWidth = 1.2;
   ctx.beginPath(); ctx.moveTo(8,-3); ctx.lineTo(-8,-25); ctx.lineTo(-18,-24); ctx.lineTo(-11,-4); ctx.lineTo(-33,-11); ctx.lineTo(-37,-8); ctx.lineTo(-19,1); ctx.lineTo(-37,8); ctx.lineTo(-33,11); ctx.lineTo(-11,4); ctx.lineTo(-18,24); ctx.lineTo(-8,25); ctx.lineTo(8,3); ctx.closePath(); ctx.fill(); ctx.stroke();
-  // fuselage
-  ctx.fillStyle = main; ctx.strokeStyle = highlight;
+  // Fuselage with a subtle metallic gradient.
+  const body = ctx.createLinearGradient(0,-6,0,6);
+  body.addColorStop(0, highlight); body.addColorStop(.18, main); body.addColorStop(.82, main); body.addColorStop(1, dark);
+  ctx.fillStyle = body; ctx.strokeStyle = highlight;
   ctx.beginPath(); ctx.moveTo(42,0); ctx.quadraticCurveTo(28,-5,10,-5); ctx.lineTo(-23,-4); ctx.lineTo(-35,0); ctx.lineTo(-23,4); ctx.lineTo(10,5); ctx.quadraticCurveTo(28,5,42,0); ctx.closePath(); ctx.fill(); ctx.stroke();
-  // canopy and center spine
+  // Canopy and center spine.
   ctx.fillStyle = alive ? '#183c5a' : '#37484f'; ctx.strokeStyle = 'rgba(225,250,255,.75)';
   ctx.beginPath(); ctx.moveTo(18,-4); ctx.quadraticCurveTo(9,-13,-3,-5); ctx.lineTo(7,-2); ctx.closePath(); ctx.fill(); ctx.stroke();
   ctx.strokeStyle = 'rgba(255,255,255,.38)'; ctx.beginPath(); ctx.moveTo(-27,0); ctx.lineTo(29,0); ctx.stroke();
   // nose point and tail fin
   ctx.fillStyle = highlight; ctx.beginPath(); ctx.moveTo(42,0); ctx.lineTo(29,-2); ctx.lineTo(29,2); ctx.closePath(); ctx.fill();
   ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(-20,-4); ctx.lineTo(-13,-16); ctx.lineTo(-7,-5); ctx.closePath(); ctx.fill();
+  // Fine wing panel seams and navigation lights make the jet read better at
+  // the small in-game scale without relying on a blurry raster sprite.
+  ctx.strokeStyle = alive ? 'rgba(110,231,255,.5)' : 'rgba(190,210,215,.35)'; ctx.lineWidth = .8;
+  ctx.beginPath();
+  ctx.moveTo(-9,-20); ctx.lineTo(2,-4); ctx.moveTo(-9,20); ctx.lineTo(2,4);
+  ctx.moveTo(-29,-8); ctx.lineTo(-12,-2); ctx.moveTo(-29,8); ctx.lineTo(-12,2);
+  ctx.stroke();
+  if (alive) {
+    ctx.fillStyle = '#ff6b61'; ctx.beginPath(); ctx.arc(-34,8,1.5,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#6ee7ff'; ctx.beginPath(); ctx.arc(-34,-8,1.5,0,Math.PI*2); ctx.fill();
+  }
   ctx.restore();
 }
 
@@ -1188,7 +1195,6 @@ function beginLocalGame() {
   players[myId] = myState;
   wireKeyboard();
   wireMouse();
-  startEngineAudio();
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
   requestAnimationFrame(loop);
@@ -1202,11 +1208,6 @@ function loop(ts) {
   const dtSec = dt / 1000;
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
-  updateEngineAudio();
-  const boostingNow = keysHeld.boost && myState && myState.boost > 0;
-  if (boostingNow && !wasBoosting) playAsset('flyby', .14, 1.18);
-  wasBoosting = boostingNow;
-
   updateLocalPlane(dtSec, keysHeld);
   updateBullets(dtSec);
   updateMissiles(dtSec);

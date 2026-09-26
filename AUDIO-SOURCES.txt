@@ -3,15 +3,13 @@ WINGS ARENA — TEMPORARY AUDIO SOURCES
 The current audio pass is intentionally modular so individual sounds can be
 replaced later without changing game logic.
 
-Sci-fi pack replacements:
-- flight-engine.ogg -> processed loop_machine_01.ogg engine layer
+Sci-fi pack combat replacement:
 - shoot_01.ogg -> gun layer
 
-No A-10 recordings are used or included in this build.
+Flight audio is currently disabled: no engine, boost, or flyby sound is loaded.
+No A-10 recordings are used in this build.
 
-Temporary military effects from the uploaded sndfx.zip / War on Water: SNDFX:
-- Airplanes/airplane.ogg -> audio/jet-flyby.ogg
-- Airplanes/airplane1.ogg -> audio/boost-air.ogg
+Temporary combat effects from the uploaded sndfx.zip / War on Water: SNDFX:
 - Airplanes/aiplaneexplode.ogg -> audio/airplane-explosion.ogg
 - Guns/torpedo1.ogg -> audio/missile-launch.ogg
 - Guns/gun2Heavy.ogg -> audio/heavy-impact.ogg
