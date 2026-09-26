@@ -3,14 +3,14 @@ const WORLD_W = 3600, WORLD_H = 1700;
 const GROUND_Y = WORLD_H - 70;    // top of the water (side-view floor)
 const MAX_PLAYERS = 8;
 
-const PLANE_SPEED = 230;          // px/s forward, constant auto-flight
-const BOOST_MULT = 1.7;
+const PLANE_SPEED = 285;          // px/s forward, constant auto-flight
+const BOOST_MULT = 1.95;
 const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 
-const BULLET_SPEED = 620, BULLET_LIFE = 750, FIRE_COOLDOWN = 90, BULLET_DAMAGE = 8;
-const HIT_RADIUS = 29, BULLET_RADIUS = 4;
+const BULLET_SPEED = 1320, BULLET_LIFE = 620, FIRE_COOLDOWN = 55, BULLET_DAMAGE = 7;
+const HIT_RADIUS = 32, BULLET_RADIUS = 3;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
 const HEAT_MAX = 100, HEAT_PER_SHOT = 8, HEAT_DECAY = 24, HEAT_DECAY_OVERHEAT = 40;
@@ -18,7 +18,7 @@ const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firi
 
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
 // plane can (so out-turning one alone is hard) but can be decoyed by a flare.
-const MISSILE_SPEED = 360, MISSILE_TURN_RATE = 3.3, MISSILE_LIFE = 4500, MISSILE_DAMAGE = 42;
+const MISSILE_SPEED = 500, MISSILE_TURN_RATE = 4.6, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 
@@ -32,11 +32,12 @@ const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes cat
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
 // fixed lifetime, used for gun/missile impacts, launches, kills, and pickups.
 const FX = {
-  spark:  { life: 220, r: 12, colors: ['rgba(255,255,255,0.9)',  'rgba(255,150,60,0.85)', 'rgba(255,90,40,0)'] },
-  blast:  { life: 480, r: 46, colors: ['rgba(255,255,255,0.95)', 'rgba(255,170,60,0.9)',  'rgba(255,60,20,0)'] },
-  crash:  { life: 700, r: 70, colors: ['rgba(255,255,255,0.95)', 'rgba(255,140,40,0.9)',  'rgba(40,20,10,0)'] },
-  muzzle: { life: 90,  r: 8,  colors: ['rgba(255,255,220,0.95)', 'rgba(255,210,120,0.7)', 'rgba(255,180,80,0)'] },
-  launch: { life: 260, r: 16, colors: ['rgba(230,230,230,0.85)', 'rgba(180,180,180,0.5)', 'rgba(160,160,160,0)'] },
+  spark:  { life: 220, r: 16, colors: ['rgba(255,255,255,0.98)',  'rgba(255,150,60,0.9)', 'rgba(255,55,25,0)'] },
+  blast:  { life: 620, r: 88, colors: ['rgba(255,255,255,1)', 'rgba(255,150,35,0.95)', 'rgba(255,35,10,0)'] },
+  crash:  { life: 850, r: 120, colors: ['rgba(255,255,255,1)', 'rgba(255,105,25,0.95)', 'rgba(40,10,5,0)'] },
+  muzzle: { life: 115, r: 18, colors: ['rgba(255,255,230,1)', 'rgba(255,190,75,0.82)', 'rgba(255,70,20,0)'] },
+  launch: { life: 420, r: 34, colors: ['rgba(255,255,255,0.95)', 'rgba(110,220,255,0.7)', 'rgba(25,95,150,0)'] },
+  shock:  { life: 360, r: 72, colors: ['rgba(255,225,140,0.9)', 'rgba(255,90,30,0.5)', 'rgba(255,30,10,0)'] },
   coin:   { life: 320, r: 14, colors: ['rgba(255,250,210,0.95)', 'rgba(255,209,102,0.85)','rgba(255,190,60,0)'] }
 };
 
@@ -66,6 +67,8 @@ let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let lastSpawnTick = 0;
+let audioCtx = null, masterGain = null;
+let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 
 // ================= World helpers =================
 function rand(min, max) { return min + Math.random() * (max - min); }
@@ -80,7 +83,45 @@ function angleDiff(from, to) {
   return d;
 }
 
-function spawnExplosion(x, y, kind) { explosions.push({ x, y, born: performance.now(), kind }); }
+// Small procedural sound rig: it starts only after a user gesture and keeps
+// the game self-contained. The cannon uses layered low oscillators + clipped
+// noise to suggest a fast, heavy rotary cannon without shipping an audio file.
+function unlockAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    masterGain = audioCtx.createGain(); masterGain.gain.value = 0.24; masterGain.connect(audioCtx.destination);
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function tone(freq, duration, volume, type = 'sine', slide = 0) {
+  if (!audioCtx || !masterGain) return;
+  const t = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + duration);
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(volume, t + .008); g.gain.exponentialRampToValueAtTime(.0001, t + duration);
+  o.connect(g); g.connect(masterGain); o.start(t); o.stop(t + duration + .02);
+}
+function noiseBurst(duration, volume, filterType = 'bandpass', frequency = 900) {
+  if (!audioCtx || !masterGain) return;
+  const length = Math.max(1, Math.floor(audioCtx.sampleRate * duration));
+  const buffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate), data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / length) ** .35;
+  const source = audioCtx.createBufferSource(), filter = audioCtx.createBiquadFilter(), g = audioCtx.createGain();
+  source.buffer = buffer; filter.type = filterType; filter.frequency.value = frequency; filter.Q.value = .8;
+  g.gain.setValueAtTime(volume, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + duration);
+  source.connect(filter); filter.connect(g); g.connect(masterGain); source.start();
+}
+function playCannonSound() { noiseBurst(.055, .34, 'bandpass', 1100); tone(82, .075, .24, 'sawtooth', -32); tone(164, .045, .13, 'square', -70); }
+function playMissileLaunchSound() { noiseBurst(.34, .2, 'lowpass', 520); tone(92, .38, .22, 'sawtooth', 240); tone(740, .12, .08, 'sine', -380); }
+function playExplosionSound(kind) { if (kind === 'blast' || kind === 'crash' || kind === 'shock') { noiseBurst(kind === 'crash' ? .5 : .32, .42, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, .36, 'sine', -34); } else if (kind === 'spark') tone(420, .07, .08, 'triangle', -250); }
+function playLockSound() { tone(880, .08, .09, 'square', -220); }
+
+function spawnExplosion(x, y, kind) {
+  explosions.push({ x, y, born: performance.now(), kind });
+  playExplosionSound(kind);
+  if (kind === 'blast' || kind === 'crash' || kind === 'shock') screenShake = Math.max(screenShake, kind === 'crash' ? 18 : 11);
+}
 function pruneExplosions(now) {
   for (let i = explosions.length - 1; i >= 0; i--) {
     if (now - explosions[i].born > FX[explosions[i].kind].life) explosions.splice(i, 1);
@@ -268,15 +309,17 @@ function updateLocalPlane(dtSec, keys) {
 }
 
 function fireBullet() {
-  const nose = 20;
+  unlockAudio();
+  const nose = 38;
   const b = {
     id: myId + '-' + (nextBulletId++), ownerId: myId,
     x: myState.x + Math.cos(myState.angle) * nose,
     y: myState.y + Math.sin(myState.angle) * nose,
-    angle: myState.angle, born: performance.now()
+    prevX: myState.x, prevY: myState.y, angle: myState.angle, born: performance.now()
   };
   bullets.push(b);
   spawnExplosion(b.x, b.y, 'muzzle');
+  playCannonSound(); recoilKick = Math.min(10, recoilKick + 3.2);
   sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
 }
 
@@ -285,6 +328,7 @@ function updateBullets(dtSec) {
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
     if (now - b.born > BULLET_LIFE) { spawnExplosion(b.x, b.y, 'muzzle'); bullets.splice(i, 1); continue; }
+    b.prevX = b.x; b.prevY = b.y;
     b.x += Math.cos(b.angle) * BULLET_SPEED * dtSec;
     b.y += Math.sin(b.angle) * BULLET_SPEED * dtSec;
   }
@@ -307,6 +351,7 @@ function findMissileLockTarget() {
 
 function tryFireMissile() {
   if (!myState || !myState.alive || myState.missileCooldown > 0 || myState.missiles <= 0) return;
+  unlockAudio();
   myState.missileCooldown = MISSILE_COOLDOWN;
   myState.missiles--;
 
@@ -316,10 +361,11 @@ function tryFireMissile() {
     id: myId + '-m' + (nextMissileId++), ownerId: myId, targetId,
     x: myState.x + Math.cos(myState.angle) * nose,
     y: myState.y + Math.sin(myState.angle) * nose,
-    angle: myState.angle, born: performance.now(), trail: []
+    angle: myState.angle, born: performance.now(), trail: [], exhaust: 1
   };
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
+  playMissileLaunchSound(); screenShake = Math.max(screenShake, 7);
   sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle });
 }
 
@@ -341,7 +387,7 @@ function resolveFlare(fromId, fx, fy) {
   for (let i = missiles.length - 1; i >= 0; i--) {
     const m = missiles[i];
     if (m.targetId === fromId && dist(m.x, m.y, fx, fy) < FLARE_BREAK_RADIUS) {
-      spawnExplosion(m.x, m.y, 'blast');
+      spawnExplosion(m.x, m.y, 'shock');
       missiles.splice(i, 1);
     }
   }
@@ -373,7 +419,7 @@ function updateMissiles(dtSec) {
     }
 
     m.trail.push({ x: m.x, y: m.y });
-    if (m.trail.length > 10) m.trail.shift();
+    if (m.trail.length > 20) m.trail.shift();
 
     m.x += Math.cos(m.angle) * MISSILE_SPEED * dtSec;
     m.y += Math.sin(m.angle) * MISSILE_SPEED * dtSec;
@@ -388,6 +434,7 @@ function pruneFlares(now) {
 
 // ================= Networking: host side =================
 function startHost() {
+  unlockAudio();
   isHost = true; myId = 0;
   players[0] = freshPlayerState(0, myName);
   peer = new Peer();
@@ -482,7 +529,7 @@ function handleShoot(fromId, data) {
   // when the host is the shooter (fromId === myId) since fireBullet() already
   // added it there.
   if (fromId !== myId) {
-    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, born: performance.now() });
     spawnExplosion(data.x, data.y, 'muzzle');
   }
   Object.entries(connections).forEach(([id, c]) => {
@@ -568,6 +615,7 @@ function hostMaybeSpawnCoin(ts) {
 
 // ================= Networking: client side =================
 function startJoin() {
+  unlockAudio();
   const hostId = document.getElementById('hostIdInput').value.trim();
   if (!hostId) return;
   peer = new Peer();
@@ -607,7 +655,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'shoot') {
     if (data.from !== myId) {
-      bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+      bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, born: performance.now() });
       spawnExplosion(data.x, data.y, 'muzzle');
     }
   }
@@ -767,7 +815,8 @@ function drawPlaneSprite(ctx, color, alive) {
 function drawPlane(ctx, p, isMe, now) {
   const flicker = now < p.invulnUntil && Math.floor(now / 100) % 2 === 0;
   ctx.save();
-  ctx.translate(p.x, p.y);
+  const kick = isMe ? recoilKick : 0;
+  ctx.translate(p.x - Math.cos(p.angle) * kick, p.y - Math.sin(p.angle) * kick);
   ctx.rotate(p.angle);
   ctx.globalAlpha = flicker ? 0.4 : 1;
   drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false);
@@ -806,31 +855,49 @@ function drawCoin(ctx, c, now) {
 
 function drawBullet(ctx, b) {
   ctx.save();
+  ctx.strokeStyle = b.ownerId === myId ? 'rgba(255,244,155,.8)' : 'rgba(255,125,90,.65)';
+  ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(b.prevX ?? b.x, b.prevY ?? b.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.restore();
+  ctx.save();
   ctx.translate(b.x, b.y);
   ctx.rotate(b.angle);
-  ctx.fillStyle = b.ownerId === myId ? '#fff59d' : '#ffab91';
+  ctx.shadowColor = b.ownerId === myId ? '#fff59d' : '#ff6548'; ctx.shadowBlur = 10;
+  ctx.fillStyle = b.ownerId === myId ? '#fffbd0' : '#ff987d';
   ctx.beginPath();
-  ctx.ellipse(0, 0, BULLET_RADIUS * 2, BULLET_RADIUS, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, BULLET_RADIUS * 3.4, BULLET_RADIUS, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
 function drawMissile(ctx, m) {
+  const incoming = m.targetId === myId && m.ownerId !== myId;
+  if (incoming) {
+    const pulse = 22 + Math.sin(performance.now() / 90) * 5;
+    ctx.save(); ctx.globalAlpha = .28; ctx.strokeStyle = '#ff4558'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(m.x, m.y, pulse, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
   for (let i = 0; i < m.trail.length; i++) {
     const t = m.trail[i];
-    ctx.fillStyle = `rgba(210,216,224,${((i + 1) / (m.trail.length + 1)) * 0.4})`;
+    const frac = (i + 1) / (m.trail.length + 1);
+    ctx.fillStyle = `rgba(255,${Math.round(110 + frac * 110)},${Math.round(45 + frac * 80)},${frac * .55})`;
     ctx.beginPath();
-    ctx.arc(t.x, t.y, 2.2, 0, Math.PI * 2);
+    ctx.arc(t.x, t.y, 2 + frac * 4, 0, Math.PI * 2);
     ctx.fill();
   }
 
   ctx.save();
   ctx.translate(m.x, m.y);
   ctx.rotate(m.angle);
+  ctx.shadowColor = m.decoyed ? '#9aa5b1' : '#ff6138'; ctx.shadowBlur = 16;
   ctx.fillStyle = m.decoyed ? '#9aa5b1' : '#eef1f5';
   ctx.beginPath();
-  ctx.ellipse(0, 0, 7, 2, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, 11, 3.2, 0, 0, Math.PI * 2);
   ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ff4f2e';
+  ctx.beginPath(); ctx.moveTo(-8,-3); ctx.lineTo(-22,0); ctx.lineTo(-8,3); ctx.closePath(); ctx.fill();
   ctx.fillStyle = '#ffb347';
   ctx.beginPath();
   ctx.moveTo(-7, -1.6);
@@ -870,6 +937,10 @@ function drawExplosion(ctx, e, now) {
   ctx.beginPath();
   ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
   ctx.fill();
+  if (e.kind === 'blast' || e.kind === 'crash' || e.kind === 'shock') {
+    ctx.globalAlpha = (1 - t) * .85; ctx.strokeStyle = e.kind === 'shock' ? '#9ceeff' : '#ffbd5d'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(e.x, e.y, r * (.55 + t * .65), 0, Math.PI * 2); ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -915,6 +986,20 @@ function drawGround(ctx) {
   });
 }
 
+function drawSpeedLines(ctx, now) {
+  if (!myState || !keysHeld.boost || !myState.alive) return;
+  ctx.save();
+  ctx.translate(myState.x, myState.y); ctx.rotate(myState.angle);
+  ctx.globalAlpha = .24 + Math.sin(now / 90) * .05;
+  for (let i = 0; i < 9; i++) {
+    const y = (i - 4) * 13 + Math.sin(now / 170 + i) * 4;
+    const length = 20 + ((i * 17) % 33);
+    ctx.strokeStyle = i % 2 ? '#b9f8ff' : '#6edff2'; ctx.lineWidth = i % 3 === 0 ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(-48 - length, y); ctx.lineTo(-48, y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
@@ -929,9 +1014,11 @@ function render(now) {
   glow.addColorStop(0, 'rgba(108,224,239,.18)'); glow.addColorStop(1, 'rgba(108,224,239,0)');
   ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
 
+  const shakeX = (Math.random() - .5) * screenShake;
+  const shakeY = (Math.random() - .5) * screenShake;
   const camX = myState.x - W / 2, camY = myState.y - H / 2;
   ctx.save();
-  ctx.translate(-camX, -camY);
+  ctx.translate(-camX + shakeX, -camY + shakeY);
 
   stars.forEach(s => {
     if (s.x < camX - 10 || s.x > camX + W + 10 || s.y < camY - 10 || s.y > camY + H + 10) return;
@@ -947,6 +1034,7 @@ function render(now) {
   });
 
   drawGround(ctx);
+  drawSpeedLines(ctx, now);
 
   ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 5;
@@ -1025,6 +1113,8 @@ function loop(ts) {
   const dt = Math.min(lastTime ? ts - lastTime : 16, 60);
   lastTime = ts;
   const dtSec = dt / 1000;
+  screenShake = Math.max(0, screenShake - dtSec * 34);
+  recoilKick = Math.max(0, recoilKick - dtSec * 28);
 
   updateLocalPlane(dtSec, keysHeld);
   updateBullets(dtSec);
@@ -1045,10 +1135,12 @@ function loop(ts) {
   heatFillEl.classList.toggle('overheat', myState.overheated);
   scoreValEl.textContent = myState.score || 0;
   killsValEl.textContent = myState.kills || 0;
-  missileCountEl.textContent = '🚀 ' + myState.missiles + '/' + MISSILE_MAX;
-  flareCountEl.textContent = '🔥 ' + myState.flares + '/' + FLARE_MAX;
+  missileCountEl.textContent = 'MISSILES  ' + myState.missiles + '/' + MISSILE_MAX;
+  flareCountEl.textContent = 'FLARES  ' + myState.flares + '/' + FLARE_MAX;
 
   const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
+  if (incomingLock && !lastIncomingLock) { unlockAudio(); playLockSound(); }
+  lastIncomingLock = incomingLock;
   lockWarningEl.style.display = incomingLock ? 'block' : 'none';
   gameArea.classList.toggle('missile-lock', incomingLock);
 
