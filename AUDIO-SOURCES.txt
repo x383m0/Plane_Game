@@ -3,10 +3,14 @@ WINGS ARENA — TEMPORARY AUDIO SOURCES
 The current audio pass is intentionally modular so individual sounds can be
 replaced later without changing game logic.
 
-User-provided A-10 recordings:
-- audio/a10-engine.ogg: converted from 456267__soundfxstudio__a-10-thunderbolt-maximum-rpm.wav
-- audio/a10-cannon.ogg: processed close-range 1-second slice from 205582__qubodup__a-10.ogg
-- audio/a10-warthog-reference.ogg: original full A-10 reference recording
+Sci-fi pack replacements:
+- loop_machine_03.ogg -> engine layer
+- shoot_01.ogg -> gun layer
+
+The earlier A-10 recordings are retained in the project as references:
+- a10-engine.ogg: converted from 456267__soundfxstudio__a-10-thunderbolt-maximum-rpm.wav
+- a10-cannon.ogg: processed close-range slice from 205582__qubodup__a-10.ogg
+- a10-warthog-reference.ogg: original full A-10 reference recording
 
 Temporary military effects from the uploaded sndfx.zip / War on Water: SNDFX:
 - Airplanes/airplane.ogg -> audio/jet-flyby.ogg

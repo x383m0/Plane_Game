@@ -74,8 +74,8 @@ let screenShake = 0, recoilKick = 0, lastIncomingLock = false, wasBoosting = fal
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
   // Keep these paths flat so the deployed game can actually resolve them.
-  cannon: 'a10-cannon.ogg',
-  engine: 'a10-engine.ogg',
+  cannon: 'shoot_01.ogg',
+  engine: 'loop_machine_03.ogg',
   flyby: 'jet-flyby.ogg',
   missile: 'missile-launch.ogg',
   explosion: 'airplane-explosion.ogg',
