@@ -1,24 +1,44 @@
 // ================= Constants =================
-const WORLD_W = 3000, WORLD_H = 3000;
+const WORLD_W = 3600, WORLD_H = 1700;
+const GROUND_Y = WORLD_H - 70;    // top of the water (side-view floor)
 const MAX_PLAYERS = 8;
 
 const PLANE_SPEED = 230;          // px/s forward, constant auto-flight
 const BOOST_MULT = 1.7;
 const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
-const TURN_RATE = 2.2;            // rad/s (Lowered significantly for heavier F-16 steering)
+const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
+const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 
 const BULLET_SPEED = 620, BULLET_LIFE = 750, FIRE_COOLDOWN = 90, BULLET_DAMAGE = 8;
-const HIT_RADIUS = 24, BULLET_RADIUS = 4;
-
-// Missile & Flare Constants
-const MISSILE_SPEED = 340, MISSILE_TURN = 2.5, MISSILE_LIFE = 4000, MISSILE_COOLDOWN = 1500, MISSILE_DAMAGE = 40;
-const FLARE_LIFE = 2000, FLARE_COOLDOWN = 800;
+const HIT_RADIUS = 29, BULLET_RADIUS = 4;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
 const HEAT_MAX = 100, HEAT_PER_SHOT = 8, HEAT_DECAY = 24, HEAT_DECAY_OVERHEAT = 40;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
+// Homing missiles: limited ammo, regenerates slowly, turns faster than a
+// plane can (so out-turning one alone is hard) but can be decoyed by a flare.
+const MISSILE_SPEED = 360, MISSILE_TURN_RATE = 3.3, MISSILE_LIFE = 4500, MISSILE_DAMAGE = 42;
+const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
+const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
+
+// Flares: a limited-charge countermeasure that breaks a missile's lock if
+// it's fired within FLARE_BREAK_RADIUS of the missile at the moment of use.
+const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
+const FLARE_BREAK_RADIUS = 260, FLARE_ACTIVE_MS = 900;
+
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
+
+// Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
+// fixed lifetime, used for gun/missile impacts, launches, kills, and pickups.
+const FX = {
+  spark:  { life: 220, r: 12, colors: ['rgba(255,255,255,0.9)',  'rgba(255,150,60,0.85)', 'rgba(255,90,40,0)'] },
+  blast:  { life: 480, r: 46, colors: ['rgba(255,255,255,0.95)', 'rgba(255,170,60,0.9)',  'rgba(255,60,20,0)'] },
+  crash:  { life: 700, r: 70, colors: ['rgba(255,255,255,0.95)', 'rgba(255,140,40,0.9)',  'rgba(40,20,10,0)'] },
+  muzzle: { life: 90,  r: 8,  colors: ['rgba(255,255,220,0.95)', 'rgba(255,210,120,0.7)', 'rgba(255,180,80,0)'] },
+  launch: { life: 260, r: 16, colors: ['rgba(230,230,230,0.85)', 'rgba(180,180,180,0.5)', 'rgba(160,160,160,0)'] },
+  coin:   { life: 320, r: 14, colors: ['rgba(255,250,210,0.95)', 'rgba(255,209,102,0.85)','rgba(255,190,60,0)'] }
+};
 
 const MAX_HEALTH = 100, RESPAWN_DELAY = 2200, INVULN_TIME = 1500;
 const COIN_CAP = 16, COIN_VALUE = 10, COIN_PICKUP_RADIUS = 30, COIN_SPAWN_EVERY = 1800;
@@ -28,17 +48,19 @@ const COLORS = ['#ff6b6b', '#4dd0e1', '#ffd166', '#9d7bff', '#6fe08a', '#ff9f43'
 
 // ================= Shared state =================
 let peer = null, isHost = false, myId = null, myName = 'Player';
-let connections = {};             
-let players = {};                 
-let coins = [];                   
-let bullets = [];                 
-let missiles = [];
-let flares = [];
+let connections = {};             // host: {id -> DataConnection}; client: {host -> DataConnection}
+let players = {};                 // id -> {id,name,connected,alive,x,y,angle,health,score,kills,color}
+let coins = [];                   // {id,x,y}
+let bullets = [];                 // {id,ownerId,x,y,angle,born}
+let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
+let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
+let explosions = [];              // {x,y,born,kind} — see FX above
 let clouds = [];
-let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0, nextFlareId = 0;
+let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
-let myState = null;               
+let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl;
+let missileCountEl, flareCountEl, lockWarningEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -49,6 +71,7 @@ function rand(min, max) { return min + Math.random() * (max - min); }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function dist(x1, y1, x2, y2) { return Math.hypot(x1 - x2, y1 - y2); }
 function colorFor(id) { return COLORS[id % COLORS.length]; }
+// Shortest signed angular distance from `from` to `to`, in (-PI, PI].
 function angleDiff(from, to) {
   let d = (to - from) % (Math.PI * 2);
   if (d > Math.PI) d -= Math.PI * 2;
@@ -56,15 +79,32 @@ function angleDiff(from, to) {
   return d;
 }
 
+function spawnExplosion(x, y, kind) { explosions.push({ x, y, born: performance.now(), kind }); }
+function pruneExplosions(now) {
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    if (now - explosions[i].born > FX[explosions[i].kind].life) explosions.splice(i, 1);
+  }
+}
+// Used when another client reports a hit on a bullet/missile we're also
+// tracking locally, so our copy disappears (with an effect) at the same time.
+function removeProjectileLocal(kind, id) {
+  const arr = kind === 'missile' ? missiles : bullets;
+  const idx = arr.findIndex(p => p.id === id);
+  if (idx !== -1) arr.splice(idx, 1);
+}
+
 function buildClouds() {
   clouds = [];
-  for (let i = 0; i < 70; i++) {
-    clouds.push({ x: rand(0, WORLD_W), y: rand(0, WORLD_H), r: rand(30, 90), a: rand(0.08, 0.22) });
+  for (let i = 0; i < 90; i++) {
+    clouds.push({
+      x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
+      r: rand(30, 90), a: rand(0.08, 0.22)
+    });
   }
 }
 
 function randomSpawnPoint() {
-  return { x: rand(150, WORLD_W - 150), y: rand(150, WORLD_H - 150) };
+  return { x: rand(200, WORLD_W - 200), y: rand(120, GROUND_Y - 160) };
 }
 
 function freshPlayerState(id, name) {
@@ -73,7 +113,7 @@ function freshPlayerState(id, name) {
   return {
     id, name, connected: true, alive: true,
     x: p.x, y: p.y, angle,
-    tx: p.x, ty: p.y, tangle: angle, synced: false, 
+    tx: p.x, ty: p.y, tangle: angle, synced: false, // network target for smoothing remote planes
     health: MAX_HEALTH, score: 0, kills: 0, deaths: 0,
     color: colorFor(id), invulnUntil: performance.now() + INVULN_TIME
   };
@@ -82,9 +122,10 @@ function freshPlayerState(id, name) {
 // ================= Local plane simulation =================
 function createLocalState() {
   const base = freshPlayerState(myId, myName);
-  return Object.assign(base, { 
-    boost: BOOST_MAX, heat: 0, overheated: false, 
-    fireTimer: 0, missileTimer: 0, flareTimer: 0, respawnAt: 0 
+  return Object.assign(base, {
+    boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
+    missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
+    flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
   });
 }
 
@@ -95,16 +136,16 @@ function respawnLocal() {
   myState.health = MAX_HEALTH;
   myState.heat = 0;
   myState.overheated = false;
+  myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
+  myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
   myState.alive = true;
-  myState.fireTimer = 0;
-  myState.missileTimer = 0;
-  myState.flareTimer = 0;
   myState.invulnUntil = performance.now() + INVULN_TIME;
   respawnOverlay.style.display = 'none';
 }
 
 function updateLocalPlane(dtSec, keys) {
   if (!myState.alive) {
+    // Was returning before this check ever ran, so nobody ever respawned.
     if (myState.respawnAt && performance.now() >= myState.respawnAt) {
       myState.respawnAt = 0;
       respawnLocal();
@@ -112,12 +153,15 @@ function updateLocalPlane(dtSec, keys) {
     return;
   }
 
+  // Steer toward the mouse cursor. The camera always keeps the player
+  // centered on screen, so "screen center -> cursor" gives the aim angle.
+  // Boosting trades agility for speed, same as a real jet's wider turn radius.
+  const boosting = keys.boost && myState.boost > 0;
   const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
-  const turnStep = TURN_RATE * dtSec;
+  const turnStep = TURN_RATE * (boosting ? BOOST_TURN_MULT : 1) * dtSec;
   const diff = angleDiff(myState.angle, targetAngle);
   myState.angle += Math.abs(diff) < turnStep ? diff : Math.sign(diff) * turnStep;
 
-  const boosting = keys.boost && myState.boost > 0;
   if (boosting) myState.boost = Math.max(0, myState.boost - BOOST_DRAIN * dtSec);
   else myState.boost = Math.min(BOOST_MAX, myState.boost + BOOST_REGEN * dtSec);
 
@@ -125,8 +169,10 @@ function updateLocalPlane(dtSec, keys) {
   myState.x += Math.cos(myState.angle) * speed * dtSec;
   myState.y += Math.sin(myState.angle) * speed * dtSec;
   myState.x = clamp(myState.x, 30, WORLD_W - 30);
-  myState.y = clamp(myState.y, 30, WORLD_H - 30);
+  myState.y = clamp(myState.y, 30, GROUND_Y - 40);
 
+  // Weapon heat: cools passively when you let off the trigger; maxing it
+  // out locks the gun until it drops back down, so you can't just hold fire.
   if (myState.overheated) {
     myState.heat = Math.max(0, myState.heat - HEAT_DECAY_OVERHEAT * dtSec);
     if (myState.heat <= HEAT_MAX * OVERHEAT_RESET_FRAC) myState.overheated = false;
@@ -134,11 +180,7 @@ function updateLocalPlane(dtSec, keys) {
     myState.heat = Math.max(0, myState.heat - HEAT_DECAY * dtSec);
   }
 
-  // Weapons Cooldowns
   myState.fireTimer = Math.max(0, myState.fireTimer - dtSec * 1000);
-  myState.missileTimer = Math.max(0, myState.missileTimer - dtSec * 1000);
-  myState.flareTimer = Math.max(0, myState.flareTimer - dtSec * 1000);
-
   if (keys.shoot && !myState.overheated && myState.fireTimer <= 0) {
     myState.fireTimer = FIRE_COOLDOWN;
     fireBullet();
@@ -146,17 +188,21 @@ function updateLocalPlane(dtSec, keys) {
     if (myState.heat >= HEAT_MAX) myState.overheated = true;
   }
 
-  if (keys.missile && myState.missileTimer <= 0) {
-    myState.missileTimer = MISSILE_COOLDOWN;
-    fireMissile();
+  // Missile & flare cooldowns and slow passive regen.
+  myState.missileCooldown = Math.max(0, myState.missileCooldown - dtSec * 1000);
+  myState.missileRegenTimer += dtSec * 1000;
+  if (myState.missiles < MISSILE_MAX && myState.missileRegenTimer >= MISSILE_REGEN_MS) {
+    myState.missileRegenTimer = 0;
+    myState.missiles++;
+  }
+  myState.flareCooldown = Math.max(0, myState.flareCooldown - dtSec * 1000);
+  myState.flareRegenTimer += dtSec * 1000;
+  if (myState.flares < FLARE_MAX && myState.flareRegenTimer >= FLARE_REGEN_MS) {
+    myState.flareRegenTimer = 0;
+    myState.flares++;
   }
 
-  if (keys.flare && myState.flareTimer <= 0) {
-    myState.flareTimer = FLARE_COOLDOWN;
-    dropFlare();
-  }
-
-  // coin pickup 
+  // coin pickup (optimistic local removal + tell host)
   for (let i = coins.length - 1; i >= 0; i--) {
     const c = coins[i];
     if (dist(myState.x, myState.y, c.x, c.y) < COIN_PICKUP_RADIUS) {
@@ -165,126 +211,175 @@ function updateLocalPlane(dtSec, keys) {
     }
   }
 
+  // incoming bullet damage (only bullets NOT owned by me)
   const now = performance.now();
   const invuln = now < myState.invulnUntil;
   if (!invuln) {
-    const takeDamage = (dmg, attackerId) => {
-      myState.health -= dmg;
-      if (myState.health <= 0) {
-        myState.health = 0;
-        myState.alive = false;
-        myState.deaths = (myState.deaths || 0) + 1;
-        respawnMsgEl.textContent = 'Shot down!';
-        respawnOverlay.style.display = 'flex';
-        myState.respawnAt = now + RESPAWN_DELAY;
-        sendEvent({ type: 'died', by: attackerId });
-      }
-    };
-
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
       if (b.ownerId === myId) continue;
       if (dist(myState.x, myState.y, b.x, b.y) < HIT_RADIUS) {
         bullets.splice(i, 1);
-        takeDamage(BULLET_DAMAGE, b.ownerId);
-        if (!myState.alive) break;
+        spawnExplosion(b.x, b.y, 'spark');
+        sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
+        myState.health -= BULLET_DAMAGE;
+        if (myState.health <= 0) {
+          myState.health = 0;
+          myState.alive = false;
+          myState.deaths = (myState.deaths || 0) + 1;
+          respawnMsgEl.textContent = 'Shot down!';
+          respawnOverlay.style.display = 'flex';
+          myState.respawnAt = now + RESPAWN_DELAY;
+          sendEvent({ type: 'died', by: b.ownerId });
+        }
+        break;
       }
     }
+  }
 
+  // incoming missile damage: only the locked target checks it, or anyone if
+  // it's gone dumb-fire (no target — e.g. its own target died mid-flight)
+  if (!invuln && myState.alive) {
     for (let i = missiles.length - 1; i >= 0; i--) {
       const m = missiles[i];
       if (m.ownerId === myId) continue;
-      if (dist(myState.x, myState.y, m.x, m.y) < HIT_RADIUS) {
+      if (m.targetId != null && m.targetId !== myId) continue;
+      if (dist(myState.x, myState.y, m.x, m.y) < MISSILE_HIT_RADIUS) {
         missiles.splice(i, 1);
-        takeDamage(MISSILE_DAMAGE, m.ownerId);
-        if (!myState.alive) break;
+        spawnExplosion(m.x, m.y, 'blast');
+        sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
+        myState.health -= MISSILE_DAMAGE;
+        if (myState.health <= 0) {
+          myState.health = 0;
+          myState.alive = false;
+          myState.deaths = (myState.deaths || 0) + 1;
+          respawnMsgEl.textContent = 'Shot down!';
+          respawnOverlay.style.display = 'flex';
+          myState.respawnAt = now + RESPAWN_DELAY;
+          sendEvent({ type: 'died', by: m.ownerId });
+        }
+        break;
       }
     }
   }
 }
 
 function fireBullet() {
-  const nose = 24;
+  const nose = 20;
   const b = {
-    id: myId + '-b' + (nextBulletId++), ownerId: myId,
+    id: myId + '-' + (nextBulletId++), ownerId: myId,
     x: myState.x + Math.cos(myState.angle) * nose,
     y: myState.y + Math.sin(myState.angle) * nose,
     angle: myState.angle, born: performance.now()
   };
   bullets.push(b);
+  spawnExplosion(b.x, b.y, 'muzzle');
   sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
 }
 
-function fireMissile() {
-  const m = {
-    id: myId + '-m' + (nextMissileId++), ownerId: myId,
-    x: myState.x + Math.cos(myState.angle) * 20,
-    y: myState.y + Math.sin(myState.angle) * 20,
-    angle: myState.angle, born: performance.now()
-  };
-  missiles.push(m);
-  sendEvent({ type: 'missile', id: m.id, x: m.x, y: m.y, angle: m.angle });
-}
-
-function dropFlare() {
-  const f = {
-    id: myId + '-f' + (nextFlareId++), ownerId: myId,
-    x: myState.x - Math.cos(myState.angle) * 15,
-    y: myState.y - Math.sin(myState.angle) * 15,
-    born: performance.now()
-  };
-  flares.push(f);
-  sendEvent({ type: 'flare', id: f.id, x: f.x, y: f.y });
-}
-
-function updateWeapons(dtSec) {
+function updateBullets(dtSec) {
   const now = performance.now();
-  
-  // Bullets
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    if (now - b.born > BULLET_LIFE) { bullets.splice(i, 1); continue; }
+    if (now - b.born > BULLET_LIFE) { spawnExplosion(b.x, b.y, 'muzzle'); bullets.splice(i, 1); continue; }
     b.x += Math.cos(b.angle) * BULLET_SPEED * dtSec;
     b.y += Math.sin(b.angle) * BULLET_SPEED * dtSec;
   }
+}
 
-  // Flares
-  for (let i = flares.length - 1; i >= 0; i--) {
-    if (now - flares[i].born > FLARE_LIFE) flares.splice(i, 1);
-  }
+// ================= Missiles & flares =================
+function findMissileLockTarget() {
+  let bestId = null, bestDist = MISSILE_LOCK_RANGE;
+  Object.values(players).forEach(p => {
+    if (p.id === myId || p.connected === false || p.alive === false) return;
+    const dx = p.x - myState.x, dy = p.y - myState.y;
+    const d = Math.hypot(dx, dy);
+    if (d > bestDist) return;
+    const angToTarget = Math.atan2(dy, dx);
+    if (Math.abs(angleDiff(myState.angle, angToTarget)) > MISSILE_LOCK_CONE) return;
+    bestDist = d; bestId = p.id;
+  });
+  return bestId;
+}
 
-  // Homing Missiles
+function tryFireMissile() {
+  if (!myState || !myState.alive || myState.missileCooldown > 0 || myState.missiles <= 0) return;
+  myState.missileCooldown = MISSILE_COOLDOWN;
+  myState.missiles--;
+
+  const targetId = findMissileLockTarget();
+  const nose = 22;
+  const m = {
+    id: myId + '-m' + (nextMissileId++), ownerId: myId, targetId,
+    x: myState.x + Math.cos(myState.angle) * nose,
+    y: myState.y + Math.sin(myState.angle) * nose,
+    angle: myState.angle, born: performance.now(), trail: []
+  };
+  missiles.push(m);
+  spawnExplosion(m.x, m.y, 'launch');
+  sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle });
+}
+
+function tryDeployFlare() {
+  if (!myState || !myState.alive || myState.flareCooldown > 0 || myState.flares <= 0) return;
+  myState.flareCooldown = FLARE_MIN_INTERVAL;
+  myState.flares--;
+
+  const f = { x: myState.x, y: myState.y, born: performance.now() };
+  flares.push(f);
+  resolveFlare(myId, f.x, f.y);
+  sendEvent({ type: 'flare', x: f.x, y: f.y });
+}
+
+// Detonates any missile (in our own local copy of the world) that's currently
+// homing on `fromId` and is close enough to this flare to be fooled by it —
+// it explodes on the flare right there rather than flying past it.
+function resolveFlare(fromId, fx, fy) {
   for (let i = missiles.length - 1; i >= 0; i--) {
     const m = missiles[i];
-    if (now - m.born > MISSILE_LIFE) { missiles.splice(i, 1); continue; }
+    if (m.targetId === fromId && dist(m.x, m.y, fx, fy) < FLARE_BREAK_RADIUS) {
+      spawnExplosion(m.x, m.y, 'blast');
+      missiles.splice(i, 1);
+    }
+  }
+}
 
-    let target = null;
-    let bestDist = Infinity;
-
-    // 1. Flares take absolute priority if close (Decoy)
-    flares.forEach(f => {
-      const d = dist(m.x, m.y, f.x, f.y);
-      if (d < 300 && d < bestDist) { bestDist = d; target = f; }
-    });
-
-    // 2. Otherwise lock onto nearest enemy
-    if (!target) {
-      Object.values(players).forEach(p => {
-        if (p.id === m.ownerId || !p.alive || p.connected === false) return;
-        const d = dist(m.x, m.y, p.x, p.y);
-        if (d < 700 && d < bestDist) { bestDist = d; target = p; }
-      });
+function updateMissiles(dtSec) {
+  const now = performance.now();
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    const m = missiles[i];
+    if (now - m.born > MISSILE_LIFE) {
+      // Used to just vanish here with no feedback at all if it never caught
+      // its target — now it detonates in place so a miss is at least visible.
+      spawnExplosion(m.x, m.y, 'blast');
+      missiles.splice(i, 1);
+      continue;
     }
 
-    if (target) {
-      const targetAngle = Math.atan2(target.y - m.y, target.x - m.x);
-      const turnStep = MISSILE_TURN * dtSec;
-      const diff = angleDiff(m.angle, targetAngle);
-      m.angle += Math.abs(diff) < turnStep ? diff : Math.sign(diff) * turnStep;
+    if (m.targetId != null) {
+      const target = players[m.targetId];
+      if (target && target.alive !== false && target.connected !== false) {
+        const desired = Math.atan2(target.y - m.y, target.x - m.x);
+        const step = MISSILE_TURN_RATE * dtSec;
+        const diff = angleDiff(m.angle, desired);
+        m.angle += Math.abs(diff) < step ? diff : Math.sign(diff) * step;
+      } else {
+        m.targetId = null; // target died or left: missile goes dumb/ballistic
+        m.decoyed = true;
+      }
     }
+
+    m.trail.push({ x: m.x, y: m.y });
+    if (m.trail.length > 10) m.trail.shift();
 
     m.x += Math.cos(m.angle) * MISSILE_SPEED * dtSec;
     m.y += Math.sin(m.angle) * MISSILE_SPEED * dtSec;
+  }
+}
+
+function pruneFlares(now) {
+  for (let i = flares.length - 1; i >= 0; i--) {
+    if (now - flares[i].born > FLARE_ACTIVE_MS) flares.splice(i, 1);
   }
 }
 
@@ -347,13 +442,20 @@ function handleHostReceive(fromId, data) {
   else if (data.type === 'shoot') handleShoot(fromId, data);
   else if (data.type === 'missile') handleMissile(fromId, data);
   else if (data.type === 'flare') handleFlare(fromId, data);
+  else if (data.type === 'impact') handleImpact(fromId, data);
   else if (data.type === 'collect') handleCollect(fromId, data.id);
   else if (data.type === 'died') handleDied(fromId, data.by);
   else if (data.type === 'name') { if (players[fromId]) { players[fromId].name = data.name; broadcastRoster(); } }
 }
 
+// Position/angle updates only arrive ~15 times/sec over the network. Instead
+// of snapping the remote plane straight to each update (which looks choppy,
+// like the game is running at 15fps), we store the update as a target and
+// glide the rendered plane toward it every frame in interpolateRemotePlayers().
 function applyRemoteState(p, data) {
   if (!p.synced) {
+    // First update we've ever gotten for this player: snap immediately so
+    // it doesn't visibly slide in from its placeholder spawn point.
     p.x = data.x; p.y = data.y; p.angle = data.angle;
     p.synced = true;
   }
@@ -370,32 +472,63 @@ function handleState(fromId, data) {
 }
 
 function handleShoot(fromId, data) {
-  if (fromId !== myId) bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+  // The host is a player too, but this only runs on the host machine. When the
+  // shot comes from a connected client, the host's own bullets array never
+  // got it before (fireBullet() only pushes locally for whoever fired), so
+  // the host neither rendered it nor could take damage from it. Skip the push
+  // when the host is the shooter (fromId === myId) since fireBullet() already
+  // added it there.
+  if (fromId !== myId) {
+    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+    spawnExplosion(data.x, data.y, 'muzzle');
+  }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'shoot', from: fromId, id: data.id, x: data.x, y: data.y, angle: data.angle });
   });
 }
 
 function handleMissile(fromId, data) {
-  if (fromId !== myId) missiles.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+  if (fromId !== myId) {
+    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), trail: [] });
+    spawnExplosion(data.x, data.y, 'launch');
+  }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, x: data.x, y: data.y, angle: data.angle });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle });
   });
 }
 
 function handleFlare(fromId, data) {
-  if (fromId !== myId) flares.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, born: performance.now() });
+  if (fromId !== myId) {
+    flares.push({ x: data.x, y: data.y, born: performance.now() });
+    resolveFlare(fromId, data.x, data.y);
+  }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, id: data.id, x: data.x, y: data.y });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y });
+  });
+}
+
+// A bullet or missile just hit whoever it was aimed at (data.x/y is where).
+// The victim's client already removed its own copy and sent this so every
+// other client's copy of that same projectile disappears with an explosion
+// at the same moment, instead of lingering until it times out on its own.
+function handleImpact(fromId, data) {
+  if (fromId !== myId) {
+    removeProjectileLocal(data.kind, data.id);
+    spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+  }
+  Object.entries(connections).forEach(([id, c]) => {
+    if (Number(id) !== fromId && c.open) c.send({ type: 'impact', from: fromId, kind: data.kind, id: data.id, x: data.x, y: data.y });
   });
 }
 
 function handleCollect(fromId, coinId) {
   const idx = coins.findIndex(c => c.id === coinId);
   if (idx === -1) return;
+  const c = coins[idx];
   coins.splice(idx, 1);
   if (players[fromId]) players[fromId].score += COIN_VALUE;
-  broadcast({ type: 'coinRemove', id: coinId });
+  spawnExplosion(c.x, c.y, 'coin');
+  broadcast({ type: 'coinRemove', id: coinId, x: c.x, y: c.y });
   broadcastRoster();
 }
 
@@ -406,7 +539,7 @@ function handleDied(fromId, killerId) {
     players[killerId].score += KILL_SCORE;
   }
   broadcast({ type: 'killed', victim: fromId, killer: killerId });
-  pushKillFeed(killerId, fromId);
+  onKilled(killerId, fromId);
   broadcastRoster();
 }
 
@@ -460,22 +593,40 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'coins') coins = data.list;
   else if (data.type === 'coinAdd') coins.push(data.coin);
-  else if (data.type === 'coinRemove') coins = coins.filter(c => c.id !== data.id);
+  else if (data.type === 'coinRemove') {
+    coins = coins.filter(c => c.id !== data.id);
+    if (data.x != null) spawnExplosion(data.x, data.y, 'coin');
+  }
   else if (data.type === 'start') { started = true; buildClouds(); beginLocalGame(); }
   else if (data.type === 'state') {
     const p = players[data.from] = players[data.from] || freshPlayerState(data.from, 'Player ' + (data.from + 1));
     applyRemoteState(p, data);
   }
   else if (data.type === 'shoot') {
-    if (data.from !== myId) bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+    if (data.from !== myId) {
+      bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+      spawnExplosion(data.x, data.y, 'muzzle');
+    }
   }
   else if (data.type === 'missile') {
-    if (data.from !== myId) missiles.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, angle: data.angle, born: performance.now() });
+    if (data.from !== myId) {
+      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), trail: [] });
+      spawnExplosion(data.x, data.y, 'launch');
+    }
   }
   else if (data.type === 'flare') {
-    if (data.from !== myId) flares.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, born: performance.now() });
+    if (data.from !== myId) {
+      flares.push({ x: data.x, y: data.y, born: performance.now() });
+      resolveFlare(data.from, data.x, data.y);
+    }
   }
-  else if (data.type === 'killed') pushKillFeed(data.killer, data.victim);
+  else if (data.type === 'impact') {
+    if (data.from !== myId) {
+      removeProjectileLocal(data.kind, data.id);
+      spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+    }
+  }
+  else if (data.type === 'killed') onKilled(data.killer, data.victim);
 }
 
 function sendEvent(msg) {
@@ -484,6 +635,7 @@ function sendEvent(msg) {
     else if (msg.type === 'shoot') handleShoot(0, msg);
     else if (msg.type === 'missile') handleMissile(0, msg);
     else if (msg.type === 'flare') handleFlare(0, msg);
+    else if (msg.type === 'impact') handleImpact(0, msg);
     else if (msg.type === 'collect') handleCollect(0, msg.id);
     else if (msg.type === 'died') handleDied(0, msg.by);
   } else if (connections.host && connections.host.open) {
@@ -526,13 +678,22 @@ function pushKillFeed(killerId, victimId) {
   setTimeout(() => div.remove(), 4000);
 }
 
+// Runs once per client per death (see handleDied and the 'killed' branch of
+// handleClientReceive) so the kill feed message and crash explosion always
+// fire together, exactly once, on every machine including the victim's own.
+function onKilled(killerId, victimId) {
+  pushKillFeed(killerId, victimId);
+  const v = players[victimId];
+  if (v) spawnExplosion(v.x, v.y, 'crash');
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
 
 // ================= Input =================
-const keysHeld = { boost: false, shoot: false, missile: false, flare: false };
-let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; 
+const keysHeld = { boost: false, shoot: false };
+let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // aim point; steering targets this each frame
 
-function resetAllInput() { keysHeld.boost = false; keysHeld.shoot = false; keysHeld.missile = false; keysHeld.flare = false; }
+function resetAllInput() { keysHeld.boost = false; keysHeld.shoot = false; }
 window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });
 
@@ -541,30 +702,25 @@ function wireKeyboard() {
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
       case ' ': keysHeld.shoot = true; e.preventDefault(); break;
-      case 'Shift': case 'm': case 'M': keysHeld.missile = true; break;
-      case 'f': case 'F': keysHeld.flare = true; break;
+      case 'q': case 'Q': tryFireMissile(); break;
+      case 'f': case 'F': tryDeployFlare(); break;
     }
   });
   document.addEventListener('keyup', e => {
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = false; break;
       case ' ': keysHeld.shoot = false; break;
-      case 'Shift': case 'm': case 'M': keysHeld.missile = false; break;
-      case 'f': case 'F': keysHeld.flare = false; break;
     }
   });
 }
 
 function wireMouse() {
   window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
-  window.addEventListener('mousedown', e => { 
-    if (e.button === 0) keysHeld.shoot = true; 
-    if (e.button === 2) keysHeld.missile = true; 
+  window.addEventListener('mousedown', e => {
+    if (e.button === 0) keysHeld.shoot = true;
+    else if (e.button === 2) tryFireMissile();
   });
-  window.addEventListener('mouseup', e => { 
-    if (e.button === 0) keysHeld.shoot = false; 
-    if (e.button === 2) keysHeld.missile = false; 
-  });
+  window.addEventListener('mouseup', e => { if (e.button === 0) keysHeld.shoot = false; });
   window.addEventListener('contextmenu', e => e.preventDefault());
 }
 
@@ -574,62 +730,50 @@ function resizeCanvas() {
   skyCanvas.height = window.innerHeight;
 }
 
-function drawPlaneShape(ctx, color, alive) {
-  const pColor = alive ? color : 'rgba(120,120,120,0.6)';
-  
-  // Custom F-16 Top-Down Shape
-  ctx.fillStyle = '#6a7885'; // Grey Fuselage
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  
-  // Nose
-  ctx.moveTo(22, 0);
-  ctx.lineTo(8, 2);
-  
-  // Right Wing
-  ctx.lineTo(-4, 16);
-  ctx.lineTo(-12, 16);
-  ctx.lineTo(-8, 3);
-  
-  // Right Rear Stabilizer
-  ctx.lineTo(-16, 3);
-  ctx.lineTo(-20, 8);
-  ctx.lineTo(-22, 8);
-  ctx.lineTo(-20, 1);
-  
-  // Engine
-  ctx.lineTo(-20, -1);
-  
-  // Left Rear Stabilizer
-  ctx.lineTo(-22, -8);
-  ctx.lineTo(-20, -8);
-  ctx.lineTo(-16, -3);
-  
-  // Left Wing
-  ctx.lineTo(-8, -3);
-  ctx.lineTo(-12, -16);
-  ctx.lineTo(-4, -16);
-  
-  // Return to nose
-  ctx.lineTo(8, -2);
-  ctx.closePath();
-  ctx.fill(); ctx.stroke();
-  
-  // Add Player Color Accents on wings
-  ctx.fillStyle = pColor;
-  ctx.beginPath();
-  ctx.moveTo(2, 4); ctx.lineTo(-4, 14); ctx.lineTo(-10, 14); ctx.lineTo(-6, 4);
-  ctx.moveTo(2, -4); ctx.lineTo(-4, -14); ctx.lineTo(-10, -14); ctx.lineTo(-6, -4);
-  ctx.fill();
+// ---- Plane sprite (imported artwork, tinted per player) ----
+const PLANE_SPRITE_LEN = 74;             // nose-to-tail size in world px
+const planeImg = new Image();
+let planeImgReady = false;
+let planeSpriteH = PLANE_SPRITE_LEN * 0.35;
+const tintedPlaneCache = {};             // color hex -> offscreen canvas
+let deadPlaneCanvas = null;
 
-  // Cockpit canopy
-  if (alive) {
-    ctx.fillStyle = '#7ec8ff';
-    ctx.beginPath();
-    ctx.ellipse(4, 0, 6, 2.5, 0, 0, Math.PI * 2);
-    ctx.fill(); ctx.stroke();
-  }
+function makeTintedPlaneCanvas(color) {
+  const c = document.createElement('canvas');
+  c.width = planeImg.naturalWidth; c.height = planeImg.naturalHeight;
+  const cx = c.getContext('2d');
+  cx.drawImage(planeImg, 0, 0);
+  // 'color' blend mode takes this fill's hue/saturation but keeps the
+  // artwork's original shading (luminosity), so panel lines and highlights
+  // stay intact while the fuselage takes on the player's color.
+  cx.globalCompositeOperation = 'color';
+  cx.fillStyle = color;
+  cx.fillRect(0, 0, c.width, c.height);
+  // Clip back to the plane's silhouette — the fill above ignores
+  // transparency, so this punches the background back out.
+  cx.globalCompositeOperation = 'destination-in';
+  cx.drawImage(planeImg, 0, 0);
+  return c;
+}
+
+function buildTintedPlaneSprites() {
+  planeSpriteH = PLANE_SPRITE_LEN * (planeImg.naturalHeight / planeImg.naturalWidth);
+  COLORS.forEach(c => { tintedPlaneCache[c] = makeTintedPlaneCanvas(c); });
+  const dc = document.createElement('canvas');
+  dc.width = planeImg.naturalWidth; dc.height = planeImg.naturalHeight;
+  const dcx = dc.getContext('2d');
+  dcx.filter = 'grayscale(1) brightness(0.7)';
+  dcx.drawImage(planeImg, 0, 0);
+  deadPlaneCanvas = dc;
+}
+
+planeImg.onload = () => { planeImgReady = true; buildTintedPlaneSprites(); };
+planeImg.src = 'plane.png';
+
+function drawPlaneSprite(ctx, color, alive) {
+  if (!planeImgReady) return; // first couple frames only, before local load completes
+  const src = alive ? (tintedPlaneCache[color] || planeImg) : deadPlaneCanvas;
+  ctx.drawImage(src, -PLANE_SPRITE_LEN / 2, -planeSpriteH / 2, PLANE_SPRITE_LEN, planeSpriteH);
 }
 
 function drawPlane(ctx, p, isMe, now) {
@@ -638,20 +782,20 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.translate(p.x, p.y);
   ctx.rotate(p.angle);
   ctx.globalAlpha = flicker ? 0.4 : 1;
-  drawPlaneShape(ctx, p.color || colorFor(p.id), p.alive !== false);
+  drawPlaneSprite(ctx, p.color || colorFor(p.id), p.alive !== false);
   ctx.restore();
 
   ctx.globalAlpha = 1;
   ctx.fillStyle = '#fff';
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText((isMe ? '' : '') + (p.name || 'Player'), p.x, p.y - 30);
+  ctx.fillText((isMe ? '' : '') + (p.name || 'Player'), p.x, p.y - 34);
 
   const w = 30, h = 4, frac = clamp((p.health != null ? p.health : 100) / MAX_HEALTH, 0, 1);
   ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fillRect(p.x - w / 2, p.y - 24, w, h);
+  ctx.fillRect(p.x - w / 2, p.y - 28, w, h);
   ctx.fillStyle = frac > 0.4 ? '#6fe08a' : '#ff6b6b';
-  ctx.fillRect(p.x - w / 2, p.y - 24, w * frac, h);
+  ctx.fillRect(p.x - w / 2, p.y - 28, w * frac, h);
 }
 
 function drawCoin(ctx, c, now) {
@@ -684,40 +828,103 @@ function drawBullet(ctx, b) {
 }
 
 function drawMissile(ctx, m) {
+  for (let i = 0; i < m.trail.length; i++) {
+    const t = m.trail[i];
+    ctx.fillStyle = `rgba(210,216,224,${((i + 1) / (m.trail.length + 1)) * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   ctx.save();
   ctx.translate(m.x, m.y);
   ctx.rotate(m.angle);
-  // Rocket body
-  ctx.fillStyle = '#eee';
-  ctx.fillRect(-6, -2, 14, 4);
-  // Rocket tip
-  ctx.fillStyle = '#ff2d2d';
+  ctx.fillStyle = m.decoyed ? '#9aa5b1' : '#eef1f5';
   ctx.beginPath();
-  ctx.moveTo(8, -2); ctx.lineTo(12, 0); ctx.lineTo(8, 2);
+  ctx.ellipse(0, 0, 7, 2, 0, 0, Math.PI * 2);
   ctx.fill();
-  // Engine flame
-  ctx.fillStyle = '#ff9f43';
+  ctx.fillStyle = '#ffb347';
   ctx.beginPath();
-  ctx.moveTo(-6, -1.5); ctx.lineTo(-14, 0); ctx.lineTo(-6, 1.5);
+  ctx.moveTo(-7, -1.6);
+  ctx.lineTo(-12, 0);
+  ctx.lineTo(-7, 1.6);
+  ctx.closePath();
   ctx.fill();
   ctx.restore();
 }
 
 function drawFlare(ctx, f, now) {
-  const flicker = (Math.floor(now / 50) % 2 === 0) ? 1.0 : 0.6;
+  const frac = clamp(1 - (now - f.born) / FLARE_ACTIVE_MS, 0, 1);
+  if (frac <= 0) return;
   ctx.save();
-  ctx.translate(f.x, f.y);
-  ctx.fillStyle = `rgba(255, 140, 0, ${flicker})`;
+  ctx.globalAlpha = frac;
+  const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 26);
+  grad.addColorStop(0, 'rgba(255,240,180,0.95)');
+  grad.addColorStop(1, 'rgba(255,140,60,0)');
+  ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.arc(0, 0, 6, 0, Math.PI * 2);
-  ctx.fill();
-  
-  // Outer glow
-  ctx.fillStyle = `rgba(255, 100, 0, ${flicker * 0.3})`;
-  ctx.beginPath();
-  ctx.arc(0, 0, 14, 0, Math.PI * 2);
+  ctx.arc(f.x, f.y, 26, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+}
+
+function drawExplosion(ctx, e, now) {
+  const cfg = FX[e.kind];
+  const t = clamp((now - e.born) / cfg.life, 0, 1);
+  const r = cfg.r * (0.3 + t * 0.7);
+  ctx.save();
+  ctx.globalAlpha = 1 - t;
+  const grad = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r);
+  grad.addColorStop(0, cfg.colors[0]);
+  grad.addColorStop(0.45, cfg.colors[1]);
+  grad.addColorStop(1, cfg.colors[2]);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawGround(ctx) {
+  const grad = ctx.createLinearGradient(0, GROUND_Y, 0, WORLD_H);
+  grad.addColorStop(0, '#2f7fb0');
+  grad.addColorStop(0.35, '#1f5f8f');
+  grad.addColorStop(1, '#0d3455');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(0, WORLD_H);
+  ctx.lineTo(0, GROUND_Y);
+  const step = 120;
+  for (let x = 0; x <= WORLD_W; x += step) {
+    const h = Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
+    ctx.lineTo(x, GROUND_Y + h);
+  }
+  ctx.lineTo(WORLD_W, GROUND_Y);
+  ctx.lineTo(WORLD_W, WORLD_H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Wave-line highlight along the surface
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  for (let x = 0; x <= WORLD_W; x += step) {
+    const h = Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
+    if (x === 0) ctx.moveTo(x, GROUND_Y + h); else ctx.lineTo(x, GROUND_Y + h);
+  }
+  ctx.stroke();
+
+  // A couple of fainter, slightly submerged wave lines for texture
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1.5;
+  [18, 40].forEach((depth, di) => {
+    ctx.beginPath();
+    for (let x = 0; x <= WORLD_W; x += step) {
+      const h = Math.sin(x / 260 + di + 1) * 5 + Math.sin(x / 100 + di * 2) * 3;
+      if (x === 0) ctx.moveTo(x, GROUND_Y + depth + h); else ctx.lineTo(x, GROUND_Y + depth + h);
+    }
+    ctx.stroke();
+  });
 }
 
 function render(now) {
@@ -739,9 +946,15 @@ function render(now) {
     ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
   });
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 6;
-  ctx.strokeRect(0, 0, WORLD_W, WORLD_H);
+  drawGround(ctx);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(0, WORLD_H);
+  ctx.moveTo(WORLD_W, 0); ctx.lineTo(WORLD_W, WORLD_H);
+  ctx.moveTo(0, 0); ctx.lineTo(WORLD_W, 0);
+  ctx.stroke();
 
   coins.forEach(c => drawCoin(ctx, c, now));
   flares.forEach(f => drawFlare(ctx, f, now));
@@ -755,26 +968,31 @@ function render(now) {
   });
   drawPlane(ctx, myState, true, now);
 
+  explosions.forEach(e => drawExplosion(ctx, e, now));
+
   ctx.restore();
+
   drawMinimap(now);
 }
 
 function drawMinimap(now) {
-  const ctx = miniCtx, S = miniCanvas.width;
-  ctx.clearRect(0, 0, S, S);
+  const ctx = miniCtx, W = miniCanvas.width, H = miniCanvas.height;
+  const scaleX = W / WORLD_W, scaleY = H / WORLD_H;
+  ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(20,30,50,0.4)';
-  ctx.fillRect(0, 0, S, S);
-  const scale = S / WORLD_W;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(31,95,143,0.7)';
+  ctx.fillRect(0, GROUND_Y * scaleY, W, H - GROUND_Y * scaleY);
 
   coins.forEach(c => {
     ctx.fillStyle = '#ffd166';
-    ctx.fillRect(c.x * scale - 1, c.y * scale - 1, 2, 2);
+    ctx.fillRect(c.x * scaleX - 1, c.y * scaleY - 1, 2, 2);
   });
   Object.values(players).forEach(p => {
     if (p.connected === false || p.alive === false) return;
     ctx.fillStyle = p.id === myId ? '#fff' : (p.color || colorFor(p.id));
     ctx.beginPath();
-    ctx.arc(p.x * scale, p.y * scale, p.id === myId ? 3.5 : 2.5, 0, Math.PI * 2);
+    ctx.arc(p.x * scaleX, p.y * scaleY, p.id === myId ? 3 : 2.2, 0, Math.PI * 2);
     ctx.fill();
   });
 }
@@ -809,7 +1027,10 @@ function loop(ts) {
   const dtSec = dt / 1000;
 
   updateLocalPlane(dtSec, keysHeld);
-  updateWeapons(dtSec);
+  updateBullets(dtSec);
+  updateMissiles(dtSec);
+  pruneFlares(ts);
+  pruneExplosions(ts);
   interpolateRemotePlayers(dtSec);
   hostMaybeSpawnCoin(ts);
 
@@ -824,6 +1045,12 @@ function loop(ts) {
   heatFillEl.classList.toggle('overheat', myState.overheated);
   scoreValEl.textContent = myState.score || 0;
   killsValEl.textContent = myState.kills || 0;
+  missileCountEl.textContent = '🚀 ' + myState.missiles + '/' + MISSILE_MAX;
+  flareCountEl.textContent = '🔥 ' + myState.flares + '/' + FLARE_MAX;
+
+  const incomingLock = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
+  lockWarningEl.style.display = incomingLock ? 'block' : 'none';
+  gameArea.classList.toggle('missile-lock', incomingLock);
 
   if (!myState.alive && myState.respawnAt) {
     const remain = Math.max(0, myState.respawnAt - performance.now());
@@ -855,6 +1082,9 @@ window.addEventListener('DOMContentLoaded', () => {
   heatFillEl = document.getElementById('heatFill');
   scoreValEl = document.getElementById('scoreVal');
   killsValEl = document.getElementById('killsVal');
+  missileCountEl = document.getElementById('missileCount');
+  flareCountEl = document.getElementById('flareCount');
+  lockWarningEl = document.getElementById('lockWarning');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');

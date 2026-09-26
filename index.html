@@ -10,7 +10,7 @@
 
   <div id="menu">
     <h1>Wings Arena</h1>
-    <p class="tagline">Free-for-all biplane dogfights. Host a match, share the code, take off.</p>
+    <p class="tagline">Free-for-all F-16 dogfights. Host a match, share the code, take off.</p>
 
     <div id="chooseRole">
       <input id="nameInput" maxlength="14" placeholder="Your callsign" />
@@ -53,6 +53,13 @@
         <div>Kills: <span id="killsVal">0</span></div>
       </div>
 
+      <div id="weaponPanel">
+        <div id="missileCount">🚀 4/4</div>
+        <div id="flareCount">🔥 3/3</div>
+      </div>
+
+      <div id="lockWarning" style="display:none;">⚠ MISSILE LOCK — PRESS F TO FLARE!</div>
+
       <div id="leaderboard">
         <h4>Leaderboard</h4>
         <ol id="lbList"></ol>
@@ -60,7 +67,7 @@
 
       <div id="killFeed"></div>
 
-      <canvas id="minimap" width="140" height="140"></canvas>
+      <canvas id="minimap" width="180" height="75"></canvas>
 
       <div id="respawnOverlay" style="display:none;">
         <div id="respawnMsg">Shot down!</div>
@@ -69,7 +76,7 @@
     </div>
   </div>
 
-  <p class="controls">Controls: Mouse steer · ↑ / W boost · Click/Space fire · Right-Click/Shift missile · F flare</p>
+  <p class="controls">Controls: Move mouse to steer · ↑ / W boost (harder to turn while boosting) · Click or Space to fire the gun · Right-click or Q to fire a missile · F to flare</p>
 
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="game.js"></script>
