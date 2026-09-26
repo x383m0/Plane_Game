@@ -1383,9 +1383,9 @@ function drawExplosion(ctx, e, now) {
 
 function drawGround(ctx) {
   const grad = ctx.createLinearGradient(0, GROUND_Y, 0, WORLD_H);
-  grad.addColorStop(0, '#2f7fb0');
-  grad.addColorStop(0.35, '#1f5f8f');
-  grad.addColorStop(1, '#0d3455');
+  grad.addColorStop(0, '#3f8c91');
+  grad.addColorStop(.35, '#246875');
+  grad.addColorStop(1, '#102f42');
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.moveTo(0, WORLD_H);
@@ -1401,8 +1401,8 @@ function drawGround(ctx) {
   ctx.fill();
 
   // Wave-line highlight along the surface
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = 'rgba(173,238,226,0.30)';
+  ctx.lineWidth = 2;
   ctx.beginPath();
   for (let x = 0; x <= WORLD_W; x += step) {
     const h = Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
@@ -1411,7 +1411,7 @@ function drawGround(ctx) {
   ctx.stroke();
 
   // A couple of fainter, slightly submerged wave lines for texture
-  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.strokeStyle = 'rgba(173,238,226,0.11)';
   ctx.lineWidth = 1.5;
   [18, 40].forEach((depth, di) => {
     ctx.beginPath();
@@ -1443,9 +1443,9 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
     }
     ctx.lineTo(end, WORLD_H); ctx.closePath(); ctx.fill();
   };
-  drawRange(horizon + 250, 'rgba(29,71,102,.55)', .65, .5);
-  drawRange(horizon + 330, 'rgba(21,52,78,.72)', .9, 1.8);
-  ctx.fillStyle = 'rgba(172,225,231,.12)'; ctx.fillRect(start, horizon + 280, end - start, 180);
+  drawRange(horizon + 250, 'rgba(38,88,99,.48)', .65, .5);
+  drawRange(horizon + 330, 'rgba(18,50,60,.78)', .9, 1.8);
+  ctx.fillStyle = 'rgba(188,232,226,.10)'; ctx.fillRect(start, horizon + 280, end - start, 180);
 }
 
 function drawSpeedLines(ctx, now) {
@@ -1570,13 +1570,13 @@ function render(now) {
   ctx.clearRect(0, 0, W, H);
 
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, '#071828'); grad.addColorStop(0.42, '#15506d'); grad.addColorStop(1, '#8dc4d4');
+  grad.addColorStop(0, '#07131d'); grad.addColorStop(.46, '#173f4c'); grad.addColorStop(1, '#78afb1');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
   // Atmospheric bands make the arena feel deeper before the camera moves.
   const glow = ctx.createRadialGradient(W * .7, H * .25, 0, W * .7, H * .25, H * .75);
-  glow.addColorStop(0, 'rgba(108,224,239,.18)'); glow.addColorStop(1, 'rgba(108,224,239,0)');
+  glow.addColorStop(0, 'rgba(115,224,210,.13)'); glow.addColorStop(1, 'rgba(115,224,210,0)');
   ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
 
   const shakeX = (Math.random() - .5) * screenShake;
