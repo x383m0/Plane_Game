@@ -13,6 +13,7 @@ const BOOST_MAX = 100, BOOST_DRAIN = 55, BOOST_REGEN = 22; // per second
 const TURN_RATE = 2.1;            // rad/s the plane turns to face the mouse cursor — deliberately sluggish
 const BOOST_TURN_MULT = 0.55;     // turning gets noticeably harder while boosting (speed vs. agility trade-off)
 const AIRBRAKE_MULT = 0.58;
+const AIRBRAKE_TURN_MULT = 0.82;  // Shift slows turning instead of making air-braking over-agile
 const GRAVITY_ACCEL = 180;        // very forgiving climb penalty; diving still gains speed
 const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
 const TOP_BOUNDARY_DEPTH = 260;
@@ -44,12 +45,14 @@ const MISSILE_INITIAL_SPEED = 760;
 const MISSILE_MAX_SPEED = 1120;
 const MISSILE_ACCELERATION = 145;
 const MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
-const MISSILE_LOCK_DELAY = 2000;  // continuous facing time required for a lock
-const MISSILE_LOCK_HOLD_MS = 3000; // completed lock remains usable this long
-const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
+const MISSILE_LOCK_DELAY = 1000;  // continuous facing time required for a lock
+const MISSILE_LOCK_HOLD_MS = 2000; // completed lock remains usable this long
+const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = Infinity, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
 const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS = 42;
+const BOMB_PROXIMITY_RADIUS = 108, SHRAPNEL_COUNT = 14, SHRAPNEL_SPEED = 430;
+const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 850, SHRAPNEL_DAMAGE = 14, SHRAPNEL_HIT_RADIUS = 18;
 
 // Flares: a limited-charge countermeasure that redirects a locked missile
 // within FLARE_BREAK_RADIUS onto the actual moving flare.
@@ -97,6 +100,7 @@ let coins = [];                   // {id,x,y}
 let bullets = [];                 // {id,ownerId,x,y,angle,born}
 let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
 let bombs = [];                   // {id,ownerId,x,y,vx,vy,born}
+let shrapnels = [];               // short-lived radial bomb fragments
 let flares = [];                  // {x,y,born} — cosmetic + decoy trigger
 let explosions = [];              // {x,y,born,kind} — see FX above
 let specialEffects = [];           // imported impact/death/water effects
@@ -700,7 +704,7 @@ function checkFallingHits() {
     const b = bombs[i];
     if (b.ownerId === myId) continue;
     if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
-      removeProjectileLocal('bomb', b.id); spawnExplosion(b.x, b.y, 'blast');
+      detonateBomb(b);
       sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
       finishDeath(b.ownerId, 'Aircraft destroyed'); return;
     }
@@ -742,7 +746,7 @@ function updateLocalPlane(dtSec, keys) {
   const diff = angleDiff(myState.angle, targetAngle);
   const speedRatio = clamp(myState.speed / HIGH_SPEED_MAX_SPEED, .2, 1);
   const speedTurnPenalty = .72 + (1 - speedRatio) * .52;
-  const turnAuthority = airbraking ? 1.28 : boosting ? BOOST_TURN_MULT : 1;
+  const turnAuthority = airbraking ? AIRBRAKE_TURN_MULT : boosting ? BOOST_TURN_MULT : 1;
   const desiredTurn = clamp(diff * 5.5, -TURN_RATE, TURN_RATE) * speedTurnPenalty * turnAuthority;
   myState.turnVelocity += (desiredTurn - myState.turnVelocity) * clamp(TURN_ACCEL * dtSec, 0, 1);
   myState.turnVelocity *= Math.max(0, 1 - TURN_DAMPING * dtSec);
@@ -882,8 +886,7 @@ function updateLocalPlane(dtSec, keys) {
       const b = bombs[i];
       if (b.ownerId === myId) continue;
       if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
-        removeProjectileLocal('bomb', b.id);
-        spawnExplosion(b.x, b.y, 'blast');
+        detonateBomb(b);
         sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
         myState.health -= BOMB_DAMAGE;
         if (myState.health <= 0) {
@@ -1000,32 +1003,99 @@ function updateBullets(dtSec) {
   }
 }
 
+function spawnBombShrapnel(x, y, ownerId) {
+  const born = performance.now();
+  for (let i = 0; i < SHRAPNEL_COUNT; i++) {
+    const angle = (Math.PI * 2 * i) / SHRAPNEL_COUNT + rand(-.12, .12);
+    const speed = SHRAPNEL_SPEED * rand(.78, 1.12);
+    shrapnels.push({
+      id: ownerId + '-s' + (nextBulletId++), ownerId, x, y, prevX: x, prevY: y,
+      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, born
+    });
+  }
+}
+
+function detonateBomb(b) {
+  if (!b) return;
+  spawnExplosion(b.x, Math.min(b.y, GROUND_Y - 8), 'blast');
+  spawnBombShrapnel(b.x, Math.min(b.y, GROUND_Y - 8), b.ownerId);
+  removeProjectileLocal('bomb', b.id);
+}
+
 function updateBombs(dtSec) {
   const now = performance.now();
   for (let i = bombs.length - 1; i >= 0; i--) {
     const b = bombs[i];
     if (now - b.born > BOMB_LIFE || b.y >= GROUND_Y - 8) {
-      spawnExplosion(b.x, Math.min(b.y, GROUND_Y - 8), 'blast');
-      removeProjectileLocal('bomb', b.id);
+      detonateBomb(b);
       continue;
     }
     b.vy += BOMB_GRAVITY * dtSec;
     b.x += b.vx * dtSec;
     b.y += b.vy * dtSec;
+
+    // Proximity detonation makes the bomb useful against moving aircraft
+    // without turning it into a homing weapon.
+    const nearTarget = Object.values(players).some(p => p.id !== b.ownerId &&
+      p.connected !== false && p.alive !== false && !p.falling &&
+      dist(p.x, p.y, b.x, b.y) <= BOMB_PROXIMITY_RADIUS);
+    if (nearTarget) detonateBomb(b);
+  }
+}
+
+function updateShrapnels(dtSec) {
+  const now = performance.now();
+  for (let i = shrapnels.length - 1; i >= 0; i--) {
+    const s = shrapnels[i];
+    if (now - s.born > SHRAPNEL_LIFE || s.y >= GROUND_Y - 8) {
+      shrapnels.splice(i, 1);
+      continue;
+    }
+    s.prevX = s.x; s.prevY = s.y;
+    s.vy += SHrapnel_GRAVITY * dtSec;
+    s.x += s.vx * dtSec; s.y += s.vy * dtSec;
+
+    if (s.ownerId !== myId && myState && myState.alive && !myState.falling &&
+        performance.now() >= (myState.invulnUntil || 0) &&
+        pointSegmentDistance(myState.x, myState.y, s.prevX, s.prevY, s.x, s.y) < SHRAPNEL_HIT_RADIUS) {
+      shrapnels.splice(i, 1);
+      spawnExplosion(s.x, s.y, 'spark', Math.atan2(s.vy, s.vx));
+      myState.health -= SHrapnel_DAMAGE;
+      if (myState.health <= 0) beginDeathFall(s.ownerId, 'Aircraft disabled');
+      continue;
+    }
+
+    let hitBot = false;
+    Object.values(players).forEach(p => {
+      if (hitBot || !p.isBot || p.id === s.ownerId || !p.alive || p.falling ||
+          performance.now() < (p.invulnUntil || 0)) return;
+      if (pointSegmentDistance(p.x, p.y, s.prevX, s.prevY, s.x, s.y) >= SHRAPNEL_HIT_RADIUS) return;
+      hitBot = true;
+      spawnExplosion(s.x, s.y, 'spark', Math.atan2(s.vy, s.vx));
+      damageBot(p, SHrapnel_DAMAGE, s.ownerId);
+    });
+    if (hitBot) shrapnels.splice(i, 1);
   }
 }
 
 // ================= Missiles & flares =================
-function findMissileLockTarget() {
+function isInPlayerVision(p) {
+  const halfW = window.innerWidth * currentCameraFovMult * .5;
+  const halfH = window.innerHeight * currentCameraFovMult * .5;
+  return Math.abs(p.x - myState.x) <= halfW && Math.abs(p.y - myState.y) <= halfH;
+}
+
+function findMissileLockTarget(requireFacing = true) {
   let bestId = null, bestDist = MISSILE_LOCK_RANGE;
   Object.values(players).forEach(p => {
     if (p.id === myId || p.connected === false || p.alive === false) return;
     if (isInCloudBank(p.x, p.y)) return;
+    if (!isInPlayerVision(p)) return;
     const dx = p.x - myState.x, dy = p.y - myState.y;
     const d = Math.hypot(dx, dy);
     if (d > bestDist) return;
     const angToTarget = Math.atan2(dy, dx);
-    if (Math.abs(angleDiff(myState.angle, angToTarget)) > MISSILE_LOCK_CONE) return;
+    if (requireFacing && Math.abs(angleDiff(myState.angle, angToTarget)) > MISSILE_LOCK_CONE) return;
     bestDist = d; bestId = p.id;
   });
   return bestId;
@@ -1034,7 +1104,8 @@ function findMissileLockTarget() {
 function updateMissileLock(dtSec) {
   const now = performance.now();
   if (!myState || !myState.alive || myState.falling || myState.missiles <= 0) {
-    missileLockTargetId = null; missileLockAcquireId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
+    missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
+    missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
     return;
   }
 
@@ -1053,7 +1124,10 @@ function updateMissileLock(dtSec) {
     missileLockTargetId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
   }
 
-  const targetId = findMissileLockTarget();
+  const hintId = findMissileLockTarget(false);
+  const targetId = findMissileLockTarget(true);
+  missileLockCandidateId = hintId;
+  missileLockCandidateAligned = targetId != null && targetId === hintId;
   if (targetId == null) {
     missileLockAcquireId = null;
     missileLockProgress = 0;
@@ -1294,7 +1368,7 @@ function botThink(bot, now) {
       bot.botLockTargetId = null;
     } else if (targetDistance <= BOT_MISSILE_RANGE && bot.missiles > 0 && bot.missileCooldown <= 0 && Math.random() < .08) {
       // Bots occasionally release early, creating the same dumb-fire threat
-      // a human creates by firing before the two-second lock completes.
+      // a human creates by firing before the one-second lock completes.
       fireMissileFor(bot, bot.id, null, false);
       bot.botLockProgress = 0;
     }
@@ -1441,7 +1515,7 @@ function updateBotHits() {
     for (let i = bombs.length - 1; i >= 0; i--) {
       const b = bombs[i];
       if (b.ownerId === bot.id || dist(bot.x, bot.y, b.x, b.y) >= BOMB_HIT_RADIUS) continue;
-      removeProjectileLocal('bomb', b.id); spawnExplosion(b.x, b.y, 'blast');
+      detonateBomb(b);
       sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
       if (bot.falling) finishBotDeath(bot); else damageBot(bot, BOMB_DAMAGE, b.ownerId);
       break;
@@ -1631,8 +1705,14 @@ function handleSonicBoom(fromId, data) {
 // at the same moment, instead of lingering until it times out on its own.
 function handleImpact(fromId, data) {
   if (fromId !== myId) {
-    removeProjectileLocal(data.kind, data.id);
-    spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+    if (data.kind === 'bomb') {
+      const bomb = bombs.find(b => b.id === data.id);
+      if (bomb) detonateBomb(bomb);
+      else { spawnExplosion(data.x, data.y, 'blast'); spawnBombShrapnel(data.x, data.y, fromId); }
+    } else {
+      removeProjectileLocal(data.kind, data.id);
+      spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+    }
   }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'impact', from: fromId, kind: data.kind, id: data.id, x: data.x, y: data.y });
@@ -1837,7 +1917,8 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp
 
 // ================= Input =================
 const keysHeld = { boost: false, airbrake: false, shoot: false };
-let missileLockTargetId = null, missileLockAcquireId = null, missileLockProgress = 0, missileLockExpiresAt = 0;
+let missileLockTargetId = null, missileLockAcquireId = null, missileLockCandidateId = null;
+let missileLockCandidateAligned = false, missileLockProgress = 0, missileLockExpiresAt = 0;
 let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // aim point; steering targets this each frame
 
 function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; }
@@ -1917,6 +1998,17 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = 
     ctx.fillStyle = falling ? 'rgba(55,58,62,.42)' : 'rgba(55,58,62,.25)';
     ctx.beginPath(); ctx.arc(-length * .72, -7, 4 + pulse * 3, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(-length * .86, 6, 3 + pulse * 2, 0, Math.PI * 2); ctx.fill();
+  }
+  if (alive && onFire && !falling) {
+    // Critical-health fire is attached to the engine bay and flickers around
+    // the fuselage, while the longer trail above is reserved for a crash.
+    const t = performance.now() / 52;
+    ctx.fillStyle = 'rgba(255,247,190,.95)';
+    ctx.beginPath(); ctx.moveTo(-16,-3); ctx.lineTo(-31, Math.sin(t) * 4 - 5); ctx.lineTo(-24,0); ctx.lineTo(-31, Math.cos(t * .8) * 4 + 5); ctx.lineTo(-16,3); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,92,27,.72)';
+    ctx.beginPath(); ctx.moveTo(-21,-2); ctx.lineTo(-39, Math.sin(t * .72) * 7); ctx.lineTo(-24,3); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(55,58,62,.3)';
+    ctx.beginPath(); ctx.arc(-38, -7 + Math.sin(t * .6) * 3, 4.5, 0, Math.PI * 2); ctx.arc(-45, 5 + Math.cos(t * .5) * 3, 3.2, 0, Math.PI * 2); ctx.fill();
   }
   // Visual-only exhaust trail; the matching engine/boost audio is managed by
   // updateEngineAudio() so it remains separate from rendering.
@@ -2057,7 +2149,7 @@ function drawMissile(ctx, m) {
   for (let i = 0; i < m.trail.length; i++) {
     const t = m.trail[i];
     const frac = (i + 1) / (m.trail.length + 1);
-    ctx.fillStyle = `rgba(255,${Math.round(110 + frac * 110)},${Math.round(45 + frac * 80)},${frac * .55})`;
+    ctx.fillStyle = `rgba(255,${Math.round(125 + frac * 100)},${Math.round(55 + frac * 80)},${frac * .55})`;
     ctx.beginPath();
     ctx.arc(t.x, t.y, 2 + frac * 4, 0, Math.PI * 2);
     ctx.fill();
@@ -2066,21 +2158,40 @@ function drawMissile(ctx, m) {
   ctx.save();
   ctx.translate(m.x, m.y);
   ctx.rotate(m.angle);
-  ctx.shadowColor = m.decoyed ? '#9aa5b1' : '#ff6138'; ctx.shadowBlur = 16;
-  ctx.fillStyle = m.decoyed ? '#9aa5b1' : '#eef1f5';
+  ctx.shadowColor = m.decoyed ? '#9aa5b1' : '#ff9d5c'; ctx.shadowBlur = 14;
+  ctx.fillStyle = m.decoyed ? '#9aa5b1' : '#1b2934';
+  ctx.strokeStyle = m.decoyed ? '#d6e0e5' : '#d3e7ed'; ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.ellipse(0, 0, 11, 3.2, 0, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.ellipse(1, 0, 12, 4.1, 0, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
   ctx.shadowBlur = 0;
-  ctx.fillStyle = '#ff4f2e';
+  // Bomb-like orange nose and rear fins, plus a center stripe for a more
+  // readable high-speed silhouette.
+  ctx.fillStyle = m.decoyed ? '#b9c3ca' : '#ff9d5c';
   ctx.beginPath(); ctx.moveTo(-8,-3); ctx.lineTo(-22,0); ctx.lineTo(-8,3); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#ffb347';
+  ctx.fillStyle = m.decoyed ? '#87949d' : '#ffd08a';
   ctx.beginPath();
-  ctx.moveTo(-7, -1.6);
-  ctx.lineTo(-12, 0);
-  ctx.lineTo(-7, 1.6);
+  ctx.moveTo(4, -3); ctx.lineTo(-2, -8); ctx.lineTo(-5, -3); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(4, 3); ctx.lineTo(-2, 8); ctx.lineTo(-5, 3); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,226,160,.72)'; ctx.lineWidth = 1.1;
+  ctx.beginPath(); ctx.moveTo(-1, -2.2); ctx.lineTo(8, -2.2); ctx.stroke();
+  ctx.fillStyle = m.decoyed ? '#b9c3ca' : '#ffb347';
+  ctx.beginPath(); ctx.moveTo(-7, -1.3); ctx.lineTo(-13, 0); ctx.lineTo(-7, 1.3);
   ctx.closePath();
   ctx.fill();
+  ctx.restore();
+}
+
+function drawShrapnel(ctx, s) {
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate(Math.atan2(s.vy, s.vx));
+  ctx.shadowColor = '#ffb45c'; ctx.shadowBlur = 7;
+  ctx.fillStyle = '#ffd58a'; ctx.strokeStyle = '#fff0c2'; ctx.lineWidth = .8;
+  ctx.beginPath();
+  ctx.moveTo(7, 0); ctx.lineTo(-4, -2.2); ctx.lineTo(-7, 0); ctx.lineTo(-4, 2.2); ctx.closePath();
+  ctx.fill(); ctx.stroke();
   ctx.restore();
 }
 
@@ -2242,17 +2353,17 @@ function drawSpeedLines(ctx, now) {
   ctx.restore();
 }
 
-function drawLockReticle(ctx, x, y, progress, locked, now, label) {
+function drawLockReticle(ctx, x, y, progress, locked, now, label, hint = false) {
   const pulse = 1 + Math.sin(now / (locked ? 105 : 150)) * (locked ? .08 : .035);
-  const outer = (locked ? 30 : 68 - progress * 38) * pulse;
-  const inner = (locked ? 14 : 30 - progress * 14) * pulse;
-  const color = '#ff4d5d';
+  const outer = (locked ? 30 : hint ? 54 : 68 - progress * 38) * pulse;
+  const inner = (locked ? 14 : hint ? 25 : 30 - progress * 14) * pulse;
+  const color = hint ? '#ffc45d' : '#ff4d5d';
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(locked ? now / 1800 : -now / 2400);
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
-  ctx.shadowColor = 'rgba(255,45,70,.9)';
+  ctx.shadowColor = hint ? 'rgba(255,184,70,.8)' : 'rgba(255,45,70,.9)';
   ctx.shadowBlur = locked ? 18 : 12;
   ctx.lineWidth = locked ? 2 : 1.7;
   ctx.lineCap = 'round';
@@ -2266,7 +2377,7 @@ function drawLockReticle(ctx, x, y, progress, locked, now, label) {
   ctx.moveTo(-outer + bracket, outer); ctx.lineTo(-outer, outer); ctx.lineTo(-outer, outer - bracket);
   ctx.stroke();
 
-  ctx.setLineDash(locked ? [5, 4] : [3, 6]);
+  ctx.setLineDash(locked ? [5, 4] : hint ? [2, 5] : [3, 6]);
   ctx.beginPath(); ctx.arc(0, 0, inner, 0, Math.PI * 2); ctx.stroke();
   ctx.setLineDash([]);
   ctx.lineWidth = locked ? 2.4 : 1.4;
@@ -2284,7 +2395,7 @@ function drawLockReticle(ctx, x, y, progress, locked, now, label) {
 function drawCrosshair(ctx, now, camX, camY, viewScale) {
   if (!started || !myState || !myState.alive) return;
   const hasLock = missileLockTargetId != null && missileLockExpiresAt > now;
-  const targetId = hasLock ? missileLockTargetId : missileLockAcquireId;
+  const targetId = hasLock ? missileLockTargetId : (missileLockAcquireId ?? missileLockCandidateId);
   const target = targetId == null ? null : players[targetId];
   if (target && target.alive !== false && target.connected !== false) {
     const W = skyCanvas.width, H = skyCanvas.height;
@@ -2294,10 +2405,11 @@ function drawCrosshair(ctx, now, camX, camY, viewScale) {
     const x = clamp(rawX, margin, W - margin);
     const y = clamp(rawY, margin, H - margin);
     const progress = hasLock ? 1 : clamp(missileLockProgress, 0, 1);
+    const hint = !hasLock && missileLockAcquireId == null && !missileLockCandidateAligned;
     const label = hasLock
       ? 'LOCKED ' + Math.max(0, (missileLockExpiresAt - now) / 1000).toFixed(1) + 's'
-      : 'LOCKING ' + Math.round(progress * 100) + '%';
-    drawLockReticle(ctx, x, y, progress, hasLock, now, label);
+      : hint ? 'ALIGN TO LOCK' : 'LOCKING ' + Math.round(progress * 100) + '%';
+    drawLockReticle(ctx, x, y, progress, hasLock, now, label, hint);
     return;
   }
 
@@ -2454,6 +2566,7 @@ function render(now) {
   bullets.forEach(b => drawBullet(ctx, b));
   missiles.forEach(m => drawMissile(ctx, m));
   bombs.forEach(b => drawBomb(ctx, b));
+  shrapnels.forEach(s => drawShrapnel(ctx, s));
 
   Object.values(players).forEach(p => {
     if (p.id === myId) return;
@@ -2543,6 +2656,7 @@ function loop(ts) {
   updateBullets(dtSec);
   updateMissiles(dtSec);
   updateBombs(dtSec);
+  updateShrapnels(dtSec);
   updateFlares(dtSec);
   updateBotHits();
   updateSpecialEffects(dtSec);
