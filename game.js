@@ -86,6 +86,8 @@ const SONIC_WAVE_MIN_AMPLITUDE = 18;
 const SONIC_WAVE_MAX_AMPLITUDE = 60;
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
+const NETWORK_INPUT_TIMEOUT_MS = 900; // tolerate short WebRTC jitter without dropping steering
+const NETWORK_SNAPSHOT_BUFFER_LIMIT = 180000;
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;
 const CLOUD_BANK_COUNT = 4;
@@ -145,6 +147,7 @@ let cloudBanks = [];
 let started = false, nextBulletId = 0, nextMissileId = 0;
 let keyboardWired = false, mouseWired = false, resizeWired = false;
 let lastClientInputSend = 0, clientInputSeq = 0, clientActionSeq = 0;
+let lastInputSendErrorAt = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
@@ -208,10 +211,18 @@ function angleDiff(from, to) {
   if (d < -Math.PI) d += Math.PI * 2;
   return d;
 }
-function straightFlightPropulsion(turnVelocity, airbraking) {
-  if (airbraking || !Number.isFinite(turnVelocity)) return 0;
+function straightFlightPropulsion(turnVelocity, airbraking, angle = 0) {
+  if (airbraking || !Number.isFinite(turnVelocity) || !Number.isFinite(angle)) return 0;
   const stability = 1 - clamp(Math.abs(turnVelocity) / STRAIGHT_FLIGHT_TURN_LIMIT, 0, 1);
-  return STRAIGHT_FLIGHT_PROPULSION * stability;
+  // Propulsion is for a straight, level run. Without this levelness factor,
+  // pointing straight up still counts as "stable" and receives the full
+  // forward assist, which feels like an unexplained vertical speed boost.
+  const levelness = clamp(Math.abs(Math.cos(angle)), 0, 1);
+  return STRAIGHT_FLIGHT_PROPULSION * stability * levelness;
+}
+function highSpeedPropulsion(angle, speed) {
+  if (!Number.isFinite(angle) || !Number.isFinite(speed) || speed < HIGH_SPEED_THRESHOLD) return 0;
+  return HIGH_SPEED_ACCELERATION * clamp(Math.abs(Math.cos(angle)), 0, 1);
 }
 function waterSurfaceY(x) {
   // Keep the ocean surface level. It is also the crash boundary and the
@@ -1374,7 +1385,7 @@ function updateStalledFlight(dtSec, keys) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : 0;
-  const straightPropulsion = straightFlightPropulsion(myState.turnVelocity, false);
+  const straightPropulsion = straightFlightPropulsion(myState.turnVelocity, false, myState.angle);
   myState.speed = clamp(myState.speed + (thrust + straightPropulsion + gravityAlongFlight - drag) * dtSec, 0, MAX_FLIGHT_SPEED);
   myState.boosting = boosting && myState.speed > 0;
 
@@ -1500,8 +1511,8 @@ function updateLocalPlane(dtSec, keys) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
-  const straightPropulsion = straightFlightPropulsion(myState.turnVelocity, airbraking);
-  const highSpeedAssist = myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
+  const straightPropulsion = straightFlightPropulsion(myState.turnVelocity, airbraking, myState.angle);
+  const highSpeedAssist = highSpeedPropulsion(myState.angle, myState.speed);
   myState.speed = clamp(myState.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, MIN_FLIGHT_SPEED, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = myState.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !myState.highSpeedActive && performance.now() >= (myState.sonicBoomReadyAt || 0)) {
@@ -2258,8 +2269,8 @@ function updateOneBot(bot, dtSec, now) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(bot.angle);
   const drag = (bot.speed - PLANE_SPEED) * .82;
   const thrust = bot.boosting ? 250 : bot.airbraking ? -300 : 0;
-  const straightPropulsion = straightFlightPropulsion(bot.turnVelocity, bot.airbraking);
-  const highSpeedAssist = bot.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
+  const straightPropulsion = straightFlightPropulsion(bot.turnVelocity, bot.airbraking, bot.angle);
+  const highSpeedAssist = highSpeedPropulsion(bot.angle, bot.speed);
   bot.speed = clamp(bot.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = bot.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !bot.highSpeedActive && now >= bot.sonicBoomReadyAt) {
@@ -2471,7 +2482,7 @@ function updateOneNetworkPlayer(p, dtSec, now) {
     return;
   }
   if (p.falling) { updateRemoteDeathFall(p, dtSec); return; }
-  const inputFresh = now - (p.networkInputAt || 0) < 350;
+  const inputFresh = now - (p.networkInputAt || 0) < NETWORK_INPUT_TIMEOUT_MS;
   if (p.debugInputFresh !== inputFresh) {
     p.debugInputFresh = inputFresh;
     debugLog('INPUT', inputFresh ? 'Client input resumed' : 'Client input became stale', { id: p.id, seq: p.networkInputSeq || 0 });
@@ -2500,8 +2511,8 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(p.angle);
   const drag = (p.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
-  const straightPropulsion = straightFlightPropulsion(p.turnVelocity, airbraking);
-  const highSpeedAssist = p.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
+  const straightPropulsion = straightFlightPropulsion(p.turnVelocity, airbraking, p.angle);
+  const highSpeedAssist = highSpeedPropulsion(p.angle, p.speed);
   p.speed = clamp(p.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = p.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !p.highSpeedActive && now >= (p.sonicBoomReadyAt || 0)) {
@@ -2634,7 +2645,7 @@ function resetForNewSession() {
   missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
   missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
   currentCameraFovMult = CAMERA_FOV_MULT;
-  lastClientInputSend = 0; clientInputSeq = 0; clientActionSeq = 0;
+  lastClientInputSend = 0; clientInputSeq = 0; clientActionSeq = 0; lastInputSendErrorAt = 0;
   lastTime = 0; lastBroadcast = 0; lastRuntimeErrorAt = 0;
   lastIncomingLock = false;
   if (engineCruiseAudio) { engineCruiseAudio.pause(); engineCruiseAudio.currentTime = 0; }
@@ -2739,7 +2750,19 @@ function nextFreeId() {
 }
 
 function broadcast(msg) {
-  Object.values(connections).forEach(c => { if (c.open) c.send(msg); });
+  const isSnapshot = msg?.type === 'state' || msg?.type === 'projectiles';
+  Object.values(connections).forEach(c => {
+    if (!c?.open) return;
+    // PeerJS exposes the underlying RTCDataChannel on current builds. When
+    // its outbound queue grows, skip only replaceable snapshots; this lets
+    // the channel drain instead of making reliable steering packets wait
+    // behind stale world-state packets.
+    const buffered = Number(c?.dataChannel?.bufferedAmount);
+    if (isSnapshot && Number.isFinite(buffered) && buffered > NETWORK_SNAPSHOT_BUFFER_LIMIT) return;
+    try { c.send(msg); } catch (error) {
+      debugLog('PEER', 'Broadcast send failed', { type: msg?.type, message: error?.message || String(error) });
+    }
+  });
 }
 
 function removePlayerArtifacts(ownerId) {
@@ -2768,6 +2791,17 @@ function broadcastRoster() {
 function handleHostReceive(fromId, data) {
   lastNetworkActivityAt = performance.now();
   if (!data || typeof data.type !== 'string') return;
+  // Input is sent on the same reliable data channel as snapshots. A roster
+  // update can briefly mark a player stale before its next packet arrives;
+  // never discard a valid steering packet for that reason. The connection was
+  // reserved by the host, so a packet from this `fromId` is already scoped to
+  // the correct player.
+  if (data.type === 'input') {
+    if (!players[fromId]) players[fromId] = freshPlayerState(fromId, 'Player ' + (Number(fromId) + 1));
+    players[fromId].connected = true;
+    handleClientInput(fromId, data);
+    return;
+  }
   if (!samePlayerId(fromId, myId) && (!players[fromId] || players[fromId].connected === false)) return;
   // A client may submit only input/actions. World state, projectile spawns,
   // impacts, deaths, and effects are host-owned and cannot be claimed by a
@@ -2787,19 +2821,20 @@ function handleHostReceive(fromId, data) {
 }
 
 function validNetworkInput(data) {
-  return data && Number.isInteger(data.seq) && Number.isFinite(data.aimX) && Number.isFinite(data.aimY) &&
+  return data && Number.isSafeInteger(Number(data.seq)) && Number.isFinite(data.aimX) && Number.isFinite(data.aimY) &&
     Math.abs(data.aimX) < 10000 && Math.abs(data.aimY) < 10000;
 }
 
 function handleClientInput(fromId, data) {
   const p = players[fromId];
-  if (!p || samePlayerId(fromId, myId) || !validNetworkInput(data) || data.seq <= (p.networkInputSeq || 0)) return;
+  const seq = Number(data?.seq);
+  if (!p || samePlayerId(fromId, myId) || !validNetworkInput(data) || seq <= (p.networkInputSeq || 0)) return;
   ensureNetworkPlayerState(p);
-  p.networkInputSeq = data.seq;
+  p.networkInputSeq = seq;
   p.networkInputAt = performance.now();
   if (!p.debugInputSeen) {
     p.debugInputSeen = true;
-    debugLog('INPUT', 'First input received from client', { id: fromId, seq: data.seq, aimX: Math.round(data.aimX), aimY: Math.round(data.aimY) });
+    debugLog('INPUT', 'First input received from client', { id: fromId, seq, aimX: Math.round(data.aimX), aimY: Math.round(data.aimY) });
   }
   p.networkInput = {
     aimX: clamp(data.aimX, -window.innerWidth * 2, window.innerWidth * 2),
@@ -3301,16 +3336,27 @@ function sendClientAction(action) {
 function sendClientInput(ts) {
   if (!isNetworkClient() || !connections.host || !connections.host.open) return;
   if (ts - lastClientInputSend < 50) return;
-  lastClientInputSend = ts;
-  clientInputSeq++;
   const aimX = mouseX - window.innerWidth / 2;
   const aimY = mouseY - window.innerHeight / 2;
-  connections.host.send({
-    type: 'input', seq: clientInputSeq,
+  const packet = {
+    type: 'input', seq: clientInputSeq + 1,
     aimX: Number.isFinite(aimX) ? aimX : 1,
     aimY: Number.isFinite(aimY) ? aimY : 0,
     boost: !!keysHeld.boost, airbrake: !!keysHeld.airbrake, shoot: !!keysHeld.shoot
-  });
+  };
+  try {
+    connections.host.send(packet);
+    clientInputSeq = packet.seq;
+    lastClientInputSend = ts;
+  } catch (error) {
+    // PeerJS can report `open` for a short period after its data channel has
+    // become unusable. Retry on the next frame instead of advancing the
+    // sequence and falsely reporting that input was transmitted.
+    if (ts - lastInputSendErrorAt > 2000) {
+      lastInputSendErrorAt = ts;
+      debugLog('PEER', 'Input send failed; retrying', { message: error?.message || String(error) });
+    }
+  }
 }
 window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });

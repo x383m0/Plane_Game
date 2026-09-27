@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.48.5 (near-water sonic wave pass)
+Current build: v1.48.6 (multiplayer input and vertical-speed fix)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -182,6 +182,17 @@ damage once and clients only render the replicated impact.
   reference effect.
 - The effect is triggered consistently for the local plane, host-simulated
   joiners, skirmish bots, and replicated sonic-boom events.
+
+### v1.48.6 multiplayer input and vertical-speed fix
+
+- Host input packets are now accepted even if a brief roster update marked the
+  remote player stale. Input sequence numbers are normalized safely, and the
+  host tolerates short WebRTC jitter before falling back to neutral steering.
+- Client input sends now advance their sequence only after `send()` succeeds,
+  with retry diagnostics when PeerJS reports a temporarily unusable channel.
+- Straight-flight propulsion and sonic-speed acceleration now scale with the
+  aircraft's horizontal flight component. Pointing straight up no longer
+  receives the level-flight speed assist.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics
