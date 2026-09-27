@@ -135,6 +135,10 @@ const COLORS = ['#ff6b6b', '#4dd0e1', '#ffd166', '#9d7bff', '#6fe08a', '#ff9f43'
 // ================= Shared state =================
 let peer = null, isHost = false, botMode = false, myId = null, myName = 'Player';
 let connections = {};             // host: {id -> DataConnection}; client: {host -> DataConnection}
+let realtimeConnections = {};     // host: fast channel for replaceable input and state
+let realtimeRetryTimer = null, nextStateSeq = 0;
+const lastStateSeqByPlayer = new Map();
+let lastRealtimeRxAt = 0, lastRealtimeOpenAt = 0;
 let players = {};                 // id -> {id,name,connected,alive,x,y,angle,health,score,kills,color}
 let bullets = [];                 // {id,ownerId,x,y,angle,born}
 let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
@@ -899,6 +903,7 @@ function debugSummaryText() {
   } else {
     const backlog = Number(connections.host?.dataChannel?.bufferedAmount);
     lines.push(`HOST SNAPSHOT: ${myState ? 'received' : 'waiting'}   input ack=${lastHostInputAck}/${clientInputSeq}   action ack=${lastHostActionAck}/${clientActionSeq}`);
+    lines.push(`FLIGHT LINK: ${connections.realtime?.open ? 'fast connected' : 'reliable fallback'}   last fast RX=${lastRealtimeRxAt ? Math.round(now - lastRealtimeRxAt) + 'ms ago' : 'never'}`);
     if (Number.isFinite(backlog)) lines.push(`OUTBOUND QUEUE: ${Math.round(backlog / 1024)} KiB`);
   }
   return lines.join('\n');
@@ -2633,16 +2638,46 @@ function updateHostCombat() {
 }
 
 // ================= Networking: host side =================
+function acceptRealtimeConnection(c) {
+  let ownerId = null;
+  c.on('open', () => {
+    // Bind the second channel to the existing reliable connection's PeerJS
+    // identity. It never reserves a new pilot ID or creates a player.
+    ownerId = Object.keys(connections).find(id =>
+      connections[id]?.open && connections[id]?.peer === c.peer
+    );
+    if (ownerId == null) { c.close(); return; }
+    const old = realtimeConnections[ownerId];
+    realtimeConnections[ownerId] = c;
+    if (old?.open && old !== c) old.close();
+    debugLog('PEER', 'Fast flight channel opened', { id: ownerId });
+  });
+  c.on('data', data => {
+    if (ownerId == null || realtimeConnections[ownerId] !== c || !connections[ownerId]?.open) return;
+    if (data?.type === 'input') handleHostReceive(Number(ownerId), data);
+  });
+  const close = () => {
+    if (ownerId != null && realtimeConnections[ownerId] === c) {
+      delete realtimeConnections[ownerId];
+      debugLog('PEER', 'Fast flight channel closed; reliable fallback', { id: ownerId });
+    }
+  };
+  c.on('close', close);
+  c.on('error', close);
+}
+
 function resetForNewSession() {
   resetAllInput();
   if (clientInputTimer) { clearInterval(clientInputTimer); clientInputTimer = null; }
+  if (realtimeRetryTimer) { clearTimeout(realtimeRetryTimer); realtimeRetryTimer = null; }
   const stalePeer = peer;
   peer = null;
   if (stalePeer && !stalePeer.destroyed) {
     try { stalePeer.destroy(); } catch (_) { /* an already-closed peer is harmless */ }
   }
   started = false; isHost = false; botMode = false; myId = null; myState = null;
-  players = {}; connections = {};
+  players = {}; connections = {}; realtimeConnections = {};
+  nextStateSeq = 0; lastStateSeqByPlayer.clear(); lastRealtimeRxAt = 0; lastRealtimeOpenAt = 0;
   bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; seenImpactKeys.clear();
   highSpeedWake.reset();
@@ -2696,6 +2731,7 @@ function startHost() {
     renderLobby();
   });
   peer.on('connection', c => {
+    if (c.label === 'flight-state') { acceptRealtimeConnection(c); return; }
     const id = nextFreeId();
     debugLog('PEER', 'Incoming connection reserved', { id: id ?? 'full' });
     if (id === null) { c.on('open', () => c.send({ type: 'full' })); return; }
@@ -2711,12 +2747,14 @@ function startHost() {
     c.on('data', data => handleHostReceive(id, data));
     c.on('close', () => {
       debugLog('PEER', 'Client connection closed', { id });
+      if (realtimeConnections[id]) realtimeConnections[id].close();
       if (players[id]) players[id].connected = false;
       removePlayerArtifacts(id);
       broadcastRoster();
     });
     c.on('error', () => {
       debugLog('PEER', 'Client connection error', { id });
+      if (realtimeConnections[id]) realtimeConnections[id].close();
       if (players[id]) players[id].connected = false;
       removePlayerArtifacts(id);
       broadcastRoster();
@@ -2758,8 +2796,19 @@ function nextFreeId() {
 
 function broadcast(msg) {
   const isSnapshot = msg?.type === 'state' || msg?.type === 'projectiles';
-  Object.values(connections).forEach(c => {
+  Object.entries(connections).forEach(([id, c]) => {
     if (!c?.open) return;
+    const fast = msg?.type === 'state' ? realtimeConnections[id] : null;
+    if (fast?.open) {
+      // Flight state is replaceable. When the fast channel is backed up,
+      // drop this frame and let the next snapshot supersede it.
+      if ((fast.dataChannel?.bufferedAmount || 0) < 8192) {
+        try { fast.send(msg); } catch (error) {
+          debugLog('PEER', 'Fast state send failed', { id, message: error?.message || String(error) });
+        }
+      }
+      return;
+    }
     // PeerJS exposes the underlying RTCDataChannel on current builds. When
     // its outbound queue grows, skip only replaceable snapshots; this lets
     // the channel drain instead of making reliable steering packets wait
@@ -2895,19 +2944,17 @@ function applyRemoteState(p, data) {
     return;
   }
   ensureNetworkPlayerState(p);
-  if (!p.synced) {
+  if (!p.synced || (samePlayerId(p.id, myId) && p.alive === false && data.alive === true)) {
     // First update we've ever gotten for this player: snap immediately so
     // it doesn't visibly slide in from its placeholder spawn point.
     p.x = data.x; p.y = data.y; p.angle = data.angle;
+    p.turnVelocity = 0; p.verticalVelocity = 0;
     p.synced = true;
   }
-  if (samePlayerId(p.id, myId)) {
-    // The local network player is rendered directly from the host snapshot;
-    // remote pilots use interpolation below. Leaving this branch out makes
-    // the player's camera remain at the spawn point while the minimap moves.
-    p.x = data.x; p.y = data.y; p.angle = data.angle;
-  }
+  // The joiner's local plane predicts its visible movement between host
+  // snapshots. The host position is stored as a correction target below.
   p.tx = data.x; p.ty = data.y; p.tangle = data.angle;
+  p.lastStateAt = performance.now();
   p.health = data.health; p.alive = data.alive;
   p.falling = !!data.falling;
   p.stalled = !!data.stalled;
@@ -2942,6 +2989,52 @@ function applyRemoteState(p, data) {
   }
 }
 
+function updateClientVisualPlane(dtSec) {
+  const p = myState;
+  if (!p?.synced) return;
+  const now = performance.now();
+  const age = Math.max(0, now - (p.lastStateAt || now)) / 1000;
+  if (p.alive && !p.falling && !p.stalled) {
+    // Predict only the picture/camera. No position or damage from this path
+    // is sent to the host; the next authoritative snapshot corrects it.
+    const boosting = keysHeld.boost && !keysHeld.airbrake;
+    const airbraking = keysHeld.airbrake && !boosting;
+    const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
+    const speedRatio = clamp(p.speed / HIGH_SPEED_MAX_SPEED, .2, 1);
+    const speedTurnPenalty = .72 + (1 - speedRatio) * .52;
+    const turnAuthority = airbraking ? AIRBRAKE_TURN_MULT : boosting ? BOOST_TURN_MULT : 1;
+    const desiredTurn = clamp(angleDiff(p.angle, targetAngle) * 5.5, -TURN_RATE, TURN_RATE) * speedTurnPenalty * turnAuthority;
+    p.turnVelocity += (desiredTurn - p.turnVelocity) * clamp(TURN_ACCEL * dtSec, 0, 1);
+    p.turnVelocity *= Math.max(0, 1 - TURN_DAMPING * dtSec);
+    p.turnVelocity = clamp(p.turnVelocity, -TURN_RATE * 1.15, TURN_RATE * 1.15);
+    p.angle += p.turnVelocity * dtSec;
+    const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(p.angle);
+    const drag = (p.speed - PLANE_SPEED) * .82;
+    const thrust = boosting ? 250 : airbraking ? -300 : 0;
+    p.speed = clamp(p.speed + (thrust + straightFlightPropulsion(p.turnVelocity, airbraking, p.angle) +
+      gravityAlongFlight + highSpeedPropulsion(p.angle, p.speed) - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
+    p.x += Math.cos(p.angle) * p.speed * dtSec;
+    p.y += Math.sin(p.angle) * p.speed * dtSec;
+  } else if (p.falling) {
+    p.verticalVelocity += FALL_GRAVITY * dtSec;
+    p.y += p.verticalVelocity * dtSec;
+  }
+
+  if (age < .65 && Number.isFinite(p.tx) && Number.isFinite(p.ty) && Number.isFinite(p.tangle)) {
+    // Advance the last host position toward 'now' before correcting. Pulling
+    // toward its old location every frame would make the joiner crawl.
+    const horizon = Math.min(.24, age + .05);
+    const projectedX = p.tx + (p.falling ? 0 : Math.cos(p.tangle) * p.speed * horizon);
+    const projectedY = p.ty + (p.falling ? p.verticalVelocity * horizon : Math.sin(p.tangle) * p.speed * horizon);
+    const blend = clamp(dtSec * 4.5, 0, .28);
+    p.x += (projectedX - p.x) * blend;
+    p.y += (projectedY - p.y) * blend;
+    if (!p.falling) p.angle += angleDiff(p.angle, p.tangle + p.turnVelocity * horizon) * clamp(dtSec * 3, 0, .2);
+  }
+  p.x = clamp(p.x, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
+  p.y = clamp(p.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
+}
+
 function handleState(fromId, data) {
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle) ||
       !Number.isFinite(data.health)) return;
@@ -2954,9 +3047,10 @@ function handleState(fromId, data) {
 
 function broadcastAuthoritativeSnapshot() {
   if (!isHost) return;
+  const stateSeq = ++nextStateSeq;
   Object.values(players).forEach(p => {
     broadcast({
-      type: 'state', from: p.id, x: p.x, y: p.y, angle: p.angle,
+      type: 'state', stateSeq, from: p.id, x: p.x, y: p.y, angle: p.angle,
       health: p.health, alive: p.alive, falling: p.falling, stalled: p.stalled,
       boosting: p.boosting, roll: p.roll, speed: p.speed, heat: p.heat,
       overheated: p.overheated, boost: p.boost, missiles: p.missiles,
@@ -3111,6 +3205,55 @@ function handleDied(fromId, killerId) {
 }
 
 // ================= Networking: client side =================
+function scheduleRealtimeRetry(hostId) {
+  if (realtimeRetryTimer || !peer || !connections.host?.open) return;
+  const sessionPeer = peer;
+  realtimeRetryTimer = setTimeout(() => {
+    realtimeRetryTimer = null;
+    if (peer === sessionPeer && connections.host?.open && !connections.realtime?.open) openRealtimeLink(hostId);
+  }, 2500);
+}
+
+function openRealtimeLink(hostId) {
+  if (!peer || !connections.host?.open || connections.realtime?.open) return;
+  const sessionPeer = peer;
+  let c;
+  try { c = peer.connect(hostId, { label: 'flight-state', serialization: 'json', reliable: false }); }
+  catch (error) {
+    debugLog('PEER', 'Fast flight channel unavailable', { message: error?.message || String(error) });
+    scheduleRealtimeRetry(hostId);
+    return;
+  }
+  connections.realtime = c;
+  c.on('open', () => {
+    if (peer !== sessionPeer || connections.realtime !== c) { c.close(); return; }
+    lastRealtimeOpenAt = performance.now();
+    lastRealtimeRxAt = 0;
+    debugLog('PEER', 'Fast flight channel connected');
+    lastClientInputSend = 0;
+    sendClientInput(performance.now());
+  });
+  c.on('data', data => {
+    if (peer !== sessionPeer || connections.realtime !== c || data?.type !== 'state') return;
+    lastRealtimeRxAt = performance.now();
+    handleClientReceive(data);
+  });
+  const fallback = () => {
+    if (connections.realtime !== c) return;
+    connections.realtime = null;
+    debugLog('PEER', 'Fast flight channel lost; using reliable fallback');
+    scheduleRealtimeRetry(hostId);
+  };
+  c.on('close', fallback);
+  c.on('error', fallback);
+  setTimeout(() => {
+    if (peer === sessionPeer && connections.realtime === c && !c.open) {
+      c.close();
+      fallback();
+    }
+  }, 5000);
+}
+
 function startJoin() {
   resetForNewSession();
   unlockAudio();
@@ -3187,6 +3330,7 @@ function handleClientReceive(data) {
     debugLog('SESSION', 'Received player assignment', { id: myId });
     players[myId] = freshPlayerState(myId, myName);
     connections.host.send({ type: 'name', name: myName });
+    openRealtimeLink(connections.host.peer);
   }
   else if (data.type === 'roster') {
     if (!Array.isArray(data.roster)) return;
@@ -3214,6 +3358,10 @@ function handleClientReceive(data) {
   else if (data.type === 'state') {
     const id = Number(data.from);
     if (!Number.isInteger(id) || id < 0 || id >= MAX_PLAYERS) return;
+    if (Number.isSafeInteger(data.stateSeq)) {
+      if (data.stateSeq <= (lastStateSeqByPlayer.get(id) || 0)) return;
+      lastStateSeqByPlayer.set(id, data.stateSeq);
+    }
     const p = players[id] = players[id] || freshPlayerState(id, 'Player ' + (id + 1));
     applyRemoteState(p, data);
   }
@@ -3364,8 +3512,25 @@ function sendClientInput(ts) {
     aimY: Number.isFinite(aimY) ? aimY : 0,
     boost: !!keysHeld.boost, airbrake: !!keysHeld.airbrake, shoot: !!keysHeld.shoot
   };
+  let fast = connections.realtime;
+  if (fast?.open && myState && lastRealtimeOpenAt &&
+      ts - (lastRealtimeRxAt || lastRealtimeOpenAt) > 3000) {
+    // RTCDataChannel.open can remain true after incoming packets stop. Avoid
+    // feeding input into a silent link indefinitely; the reliable connection
+    // still carries the game while we establish another fast channel.
+    debugLog('PEER', 'Fast flight channel stopped receiving states; reconnecting');
+    connections.realtime = null;
+    try { fast.close(); } catch (_) { /* the connection may already be gone */ }
+    scheduleRealtimeRetry(connections.host.peer);
+    fast = null;
+  }
+  // Skip a congested replaceable input packet. The next 50 ms sample holds
+  // the latest cursor position; sending old input on the reliable channel
+  // would reintroduce the multi-second steering delay.
+  if (fast?.open && (fast.dataChannel?.bufferedAmount || 0) >= 8192) return;
+  const channel = fast?.open ? fast : connections.host;
   try {
-    connections.host.send(packet);
+    channel.send(packet);
     clientInputSeq = packet.seq;
     lastClientInputSend = ts;
   } catch (error) {
@@ -3374,7 +3539,7 @@ function sendClientInput(ts) {
     // sequence and falsely reporting that input was transmitted.
     if (ts - lastInputSendErrorAt > 2000) {
       lastInputSendErrorAt = ts;
-      debugLog('PEER', 'Input send failed; retrying', { message: error?.message || String(error) });
+      debugLog('PEER', 'Input send failed; retrying', { channel: fast?.open ? 'fast' : 'reliable', message: error?.message || String(error) });
     }
   }
 }
@@ -4186,6 +4351,9 @@ function beginLocalGame() {
   // pilot from waiting for the next animation/input interval before the host
   // starts simulating its aircraft.
   if (isNetworkClient()) {
+    // A channel opened in the lobby has no snapshots until the match starts.
+    // Start its liveness clock with the first playable frame.
+    if (connections.realtime?.open) lastRealtimeOpenAt = performance.now();
     lastClientInputSend = 0;
     sendClientInput(performance.now());
     // Input must not depend on the render frame rate. In a busy tab the
@@ -4226,6 +4394,7 @@ function loopFrame(ts) {
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
   if (isHost || botMode) updateLocalPlane(dtSec, keysHeld);
   // Joiner input is sent by its own timer, independent of rendering.
+  if (isNetworkClient()) updateClientVisualPlane(dtSec);
   updateNetworkPlayers(dtSec, ts);
   updateBots(dtSec, ts);
   const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
