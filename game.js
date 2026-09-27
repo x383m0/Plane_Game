@@ -65,6 +65,18 @@ const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes cat
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;           // lighter background coverage; easy to tune
 const CLOUD_BANK_COUNT = 4;       // fewer dense concealment zones
+const MAP_THEMES = {
+  city: { label: 'NEON CITY', cloudBanks: 4 },
+  canyon: { label: 'RED CANYON', cloudBanks: 2 },
+  storm: { label: 'STORM FRONT', cloudBanks: 5 },
+  islands: { label: 'ISLAND CHAIN', cloudBanks: 3 }
+};
+const MAP_PALETTES = {
+  city: ['#07131d', '#173f4c', '#78afb1'],
+  canyon: ['#1a1720', '#70464a', '#c28769'],
+  storm: ['#050b18', '#152a43', '#466f86'],
+  islands: ['#082031', '#1b6173', '#80c4bd']
+};
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
 // fixed lifetime, used for gun/missile impacts, launches, and kills.
@@ -113,13 +125,15 @@ let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
 let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
-let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, networkStatusEl, chooseRole, lobby, menu, gameArea, waitHint;
+let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, mapSelectEl, networkStatusEl, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let audioCtx = null, masterGain = null;
 let audioBank = {}, audioAssetsStarted = false;
 let engineCruiseAudio = null, engineBoostAudio = null;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 let currentCameraFovMult = CAMERA_FOV_MULT;
+let selectedMapId = 'city';
+let activeMapId = 'city';
 let localFlareScheduleGeneration = 0;
 const seenImpactKeys = new Set();
 let lastNetworkActivityAt = 0;
@@ -480,7 +494,10 @@ function buildClouds() {
     [.16, .20, 300, 180], [.38, .31, 350, 220],
     [.62, .18, 280, 170], [.82, .36, 330, 210]
   ];
-  cloudBanks = bankLayout.slice(0, CLOUD_BANK_COUNT).map(([nx, ny, rx, ry], i) => ({
+  const bankCount = MAP_THEMES[activeMapId]?.cloudBanks || CLOUD_BANK_COUNT;
+  cloudBanks = bankLayout.concat([
+    [.52, .45, 300, 180], [.72, .52, 260, 160]
+  ]).slice(0, bankCount).map(([nx, ny, rx, ry], i) => ({
     x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180, rx, ry, alpha: .72 + (i % 3) * .07
   }));
 }
@@ -528,6 +545,7 @@ function createLocalState() {
 }
 
 function isNetworkClient() { return started && !botMode && !isHost; }
+function validMapId(id) { return Object.prototype.hasOwnProperty.call(MAP_THEMES, id) ? id : 'city'; }
 
 function createBotState(id, name, skill = .7) {
   const base = freshPlayerState(id, name);
@@ -1848,7 +1866,7 @@ function startHost() {
     players[id].connected = true;
     c.on('open', () => {
       c.send({ type: 'welcome', id });
-      if (started) c.send({ type: 'start' });
+      if (started) c.send({ type: 'start', mapId: activeMapId });
       broadcastRoster();
     });
     c.on('data', data => handleHostReceive(id, data));
@@ -1860,8 +1878,9 @@ function startHost() {
   });
   startBtn.onclick = () => {
     if (started) return;
+    activeMapId = validMapId(mapSelectEl?.value || selectedMapId);
     started = true; buildClouds();
-    broadcast({ type: 'start' });
+    broadcast({ type: 'start', mapId: activeMapId });
     beginLocalGame();
   };
 }
@@ -1876,6 +1895,7 @@ function startBotMode() {
   players = {}; bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; started = true;
   players[0] = freshPlayerState(0, myName);
+  activeMapId = validMapId(mapSelectEl?.value || selectedMapId);
   botCount = clamp(Number.parseInt(botCountInputEl?.value, 10) || DEFAULT_BOT_COUNT, 1, MAX_PLAYERS - 1);
   buildClouds(); spawnBotSquadron(botCount);
   renderLeaderboard();
@@ -2231,7 +2251,10 @@ function handleClientReceive(data) {
     if (started && !botMode) setNetworkStatus('P2P // ' + data.roster.filter(p => p.connected !== false).length + ' PILOTS', 'ok');
     renderLobby(); renderLeaderboard();
   }
-  else if (data.type === 'start') { started = true; buildClouds(); beginLocalGame(); }
+  else if (data.type === 'start') {
+    activeMapId = validMapId(data.mapId);
+    started = true; buildClouds(); beginLocalGame();
+  }
   else if (data.type === 'projectiles') {
     reconcileAuthoritativeProjectiles(data);
   }
@@ -2724,6 +2747,75 @@ function drawGround(ctx) {
     }
     ctx.stroke();
   });
+
+  if (activeMapId === 'city') drawCityEdgeStructures(ctx);
+  else if (activeMapId === 'canyon') drawCanyonEdgeWalls(ctx);
+  else if (activeMapId === 'islands') drawIslandSilhouettes(ctx);
+}
+
+function drawCityEdgeStructures(ctx) {
+  const towers = [
+    [70, 520, 270], [190, 380, 210], [330, 610, 330], [495, 450, 250],
+    [WORLD_W - 565, 470, 250], [WORLD_W - 390, 650, 360], [WORLD_W - 220, 390, 230], [WORLD_W - 70, 540, 290]
+  ];
+  towers.forEach(([x, width, height], index) => {
+    const y = GROUND_Y - height;
+    ctx.fillStyle = index % 2 ? 'rgba(8,27,42,.92)' : 'rgba(12,39,55,.94)';
+    ctx.fillRect(x - width / 2, y, width, height + 155);
+    ctx.fillStyle = 'rgba(110,224,220,.18)';
+    ctx.fillRect(x - width / 2 + 8, y + 12, 3, height - 20);
+    ctx.fillRect(x + width / 2 - 11, y + 12, 3, height - 20);
+    ctx.fillStyle = 'rgba(255,205,108,.42)';
+    for (let row = 0; row < Math.floor(height / 32); row++) {
+      for (let col = 0; col < Math.max(2, Math.floor(width / 38)); col++) {
+        if ((row * 7 + col * 3 + index) % 5 < 2) {
+          ctx.fillRect(x - width / 2 + 18 + col * 38, y + 20 + row * 32, 9, 5);
+        }
+      }
+    }
+    if (index % 3 === 0) {
+      ctx.strokeStyle = 'rgba(105,235,255,.5)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y - 58); ctx.stroke();
+      ctx.fillStyle = '#ff6e7a'; ctx.beginPath(); ctx.arc(x, y - 62, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  });
+}
+
+function drawCanyonEdgeWalls(ctx) {
+  const wallColor = 'rgba(76,39,43,.92)';
+  ctx.fillStyle = wallColor;
+  ctx.beginPath(); ctx.moveTo(0, GROUND_Y); ctx.lineTo(0, 850); ctx.lineTo(150, 1080); ctx.lineTo(310, 900); ctx.lineTo(470, 1180); ctx.lineTo(650, 980); ctx.lineTo(820, GROUND_Y); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(WORLD_W, GROUND_Y); ctx.lineTo(WORLD_W, 850); ctx.lineTo(WORLD_W - 150, 1080); ctx.lineTo(WORLD_W - 310, 900); ctx.lineTo(WORLD_W - 470, 1180); ctx.lineTo(WORLD_W - 650, 980); ctx.lineTo(WORLD_W - 820, GROUND_Y); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(230,157,105,.24)'; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(0, 850); ctx.lineTo(150, 1080); ctx.lineTo(310, 900); ctx.lineTo(470, 1180); ctx.lineTo(650, 980); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(WORLD_W, 850); ctx.lineTo(WORLD_W - 150, 1080); ctx.lineTo(WORLD_W - 310, 900); ctx.lineTo(WORLD_W - 470, 1180); ctx.lineTo(WORLD_W - 650, 980); ctx.stroke();
+}
+
+function drawIslandSilhouettes(ctx) {
+  const islands = [[820, 1260, 360, 120], [WORLD_W * .5, 980, 430, 145], [WORLD_W - 920, 1360, 390, 130]];
+  islands.forEach(([x, y, rx, ry], index) => {
+    ctx.fillStyle = index % 2 ? 'rgba(20,71,67,.76)' : 'rgba(14,57,62,.82)';
+    ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, Math.PI, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(92,180,137,.36)';
+    ctx.beginPath(); ctx.ellipse(x - rx * .16, y - ry * .38, rx * .38, ry * .28, -.15, 0, Math.PI * 2); ctx.fill();
+  });
+}
+
+function drawCitySkyline(ctx, start, end, base, color, scale, layer) {
+  ctx.fillStyle = color;
+  for (let x = start; x <= end; x += 86) {
+    const wave = Math.abs(Math.sin(x / 173 + layer * 1.7));
+    const h = (70 + wave * 210 + Math.abs(Math.sin(x / 61)) * 80) * scale;
+    const w = 50 + Math.abs(Math.sin(x / 47 + layer)) * 26;
+    ctx.fillRect(x, base - h, w, h + 40);
+    if (layer > .5) {
+      ctx.fillStyle = 'rgba(105,224,221,.16)';
+      for (let row = 0; row < h / 34; row++) {
+        if ((Math.floor(x / 86) + row) % 3 !== 0) ctx.fillRect(x + 10, base - h + 18 + row * 34, Math.max(4, w - 22), 4);
+      }
+      ctx.fillStyle = color;
+    }
+  }
 }
 
 function drawSkyBackdrop(ctx, camX, camY, W, H) {
@@ -2749,6 +2841,24 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
   drawRange(horizon + 250, 'rgba(38,88,99,.48)', .65, .5);
   drawRange(horizon + 330, 'rgba(18,50,60,.78)', .9, 1.8);
   ctx.fillStyle = 'rgba(188,232,226,.10)'; ctx.fillRect(start, horizon + 280, end - start, 180);
+
+  if (activeMapId === 'city') {
+    drawCitySkyline(ctx, start, end, horizon + 320, 'rgba(11,37,53,.64)', .55, .2);
+    drawCitySkyline(ctx, start, end, horizon + 390, 'rgba(6,23,36,.88)', .85, 1.1);
+  } else if (activeMapId === 'canyon') {
+    ctx.fillStyle = 'rgba(111,57,52,.55)';
+    ctx.beginPath(); ctx.moveTo(start, horizon + 420); for (let x = start; x <= end; x += 120) ctx.lineTo(x, horizon + 170 + Math.abs(Math.sin(x / 240)) * 170); ctx.lineTo(end, WORLD_H); ctx.lineTo(start, WORLD_H); ctx.closePath(); ctx.fill();
+  } else if (activeMapId === 'storm') {
+    ctx.fillStyle = 'rgba(4,11,26,.34)'; ctx.fillRect(start, camY - 80, end - start, H + 160);
+    ctx.strokeStyle = 'rgba(168,211,238,.13)'; ctx.lineWidth = 2;
+    const rainStart = Math.floor(start / 70) * 70;
+    for (let x = rainStart; x < end; x += 70) { ctx.beginPath(); ctx.moveTo(x, camY + 60); ctx.lineTo(x - 42, camY + 210); ctx.stroke(); }
+    const lightning = Math.sin(performance.now() / 1700);
+    if (lightning > .985) { ctx.strokeStyle = 'rgba(218,242,255,.8)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(WORLD_W * .3, horizon + 100); ctx.lineTo(WORLD_W * .27, horizon + 220); ctx.lineTo(WORLD_W * .33, horizon + 185); ctx.lineTo(WORLD_W * .3, horizon + 330); ctx.stroke(); }
+  } else if (activeMapId === 'islands') {
+    ctx.fillStyle = 'rgba(10,71,76,.5)';
+    ctx.beginPath(); ctx.moveTo(start, horizon + 360); for (let x = start; x <= end; x += 140) ctx.lineTo(x, horizon + 315 + Math.sin(x / 230) * 38); ctx.lineTo(end, WORLD_H); ctx.lineTo(start, WORLD_H); ctx.closePath(); ctx.fill();
+  }
 }
 
 function drawCloudBanks(ctx, now, camX, camY, viewW, viewH) {
@@ -2955,14 +3065,15 @@ function render(now) {
   ctx.globalCompositeOperation = 'source-over';
   ctx.clearRect(0, 0, W, H);
 
+  const palette = MAP_PALETTES[activeMapId] || MAP_PALETTES.city;
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, '#07131d'); grad.addColorStop(.46, '#173f4c'); grad.addColorStop(1, '#78afb1');
+  grad.addColorStop(0, palette[0]); grad.addColorStop(.46, palette[1]); grad.addColorStop(1, palette[2]);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
   // Atmospheric bands make the arena feel deeper before the camera moves.
   const glow = ctx.createRadialGradient(W * .7, H * .25, 0, W * .7, H * .25, H * .75);
-  glow.addColorStop(0, 'rgba(115,224,210,.13)'); glow.addColorStop(1, 'rgba(115,224,210,0)');
+  glow.addColorStop(0, activeMapId === 'storm' ? 'rgba(100,150,255,.12)' : 'rgba(115,224,210,.13)'); glow.addColorStop(1, 'rgba(115,224,210,0)');
   ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
 
   const shakeX = (Math.random() - .5) * screenShake;
@@ -3153,6 +3264,8 @@ window.addEventListener('DOMContentLoaded', () => {
   botsBtn = document.getElementById('botsBtn');
   botCountInputEl = document.getElementById('botCountInput');
   botCountValueEl = document.getElementById('botCountValue');
+  mapSelectEl = document.getElementById('mapSelect');
+  mapSelectEl.addEventListener('change', () => { selectedMapId = validMapId(mapSelectEl.value); });
   waitHint = document.getElementById('waitHint');
 
   skyCanvas = document.getElementById('sky');
