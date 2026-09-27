@@ -67,7 +67,7 @@ const CLOUD_COUNT = 45;           // lighter background coverage; easy to tune
 const CLOUD_BANK_COUNT = 4;       // fewer dense concealment zones
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
-// fixed lifetime, used for gun/missile impacts, launches, kills, and pickups.
+// fixed lifetime, used for gun/missile impacts, launches, and kills.
 const FX = {
   spark:  { life: 220, r: 16, colors: ['rgba(255,255,255,0.98)',  'rgba(255,150,60,0.9)', 'rgba(255,55,25,0)'] },
   blast:  { life: 620, r: 88, colors: ['rgba(255,255,255,1)', 'rgba(255,150,35,0.95)', 'rgba(255,35,10,0)'] },
@@ -76,7 +76,6 @@ const FX = {
   launch: { life: 420, r: 34, colors: ['rgba(255,255,255,0.95)', 'rgba(110,220,255,0.7)', 'rgba(25,95,150,0)'] },
   shock:  { life: 360, r: 72, colors: ['rgba(255,225,140,0.9)', 'rgba(255,90,30,0.5)', 'rgba(255,30,10,0)'] },
   bomb:   { life: 420, r: 82, colors: ['rgba(255,248,205,1)', 'rgba(255,140,45,0.92)', 'rgba(105,25,10,0)'] },
-  coin:   { life: 320, r: 14, colors: ['rgba(255,250,210,0.95)', 'rgba(255,209,102,0.85)','rgba(255,190,60,0)'] }
 };
 
 const MAX_HEALTH = 100, RESPAWN_DELAY = 2200, INVULN_TIME = 1500;
@@ -90,7 +89,6 @@ const BOT_FIRE_COOLDOWN = 85; // keeps five local pilots readable and prevents p
 const BOT_MISSILE_RANGE = 950;
 const BOT_BOMB_RANGE = 520;
 const BOT_AI_TICK_MS = 90;
-const COIN_CAP = 16, COIN_VALUE = 10, COIN_PICKUP_RADIUS = 30, COIN_SPAWN_EVERY = 1800;
 const KILL_SCORE = 50;
 
 const COLORS = ['#ff6b6b', '#4dd0e1', '#ffd166', '#9d7bff', '#6fe08a', '#ff9f43', '#5ea8ff', '#f472b6'];
@@ -99,7 +97,6 @@ const COLORS = ['#ff6b6b', '#4dd0e1', '#ffd166', '#9d7bff', '#6fe08a', '#ff9f43'
 let peer = null, isHost = false, botMode = false, myId = null, myName = 'Player';
 let connections = {};             // host: {id -> DataConnection}; client: {host -> DataConnection}
 let players = {};                 // id -> {id,name,connected,alive,x,y,angle,health,score,kills,color}
-let coins = [];                   // {id,x,y}
 let bullets = [];                 // {id,ownerId,x,y,angle,born}
 let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
 let bombs = [];                   // {id,ownerId,x,y,vx,vy,born}
@@ -109,21 +106,23 @@ let explosions = [];              // {x,y,born,kind} — see FX above
 let specialEffects = [];           // imported impact/death/water effects
 let clouds = [];
 let cloudBanks = [];
-let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
+let started = false, nextBulletId = 0, nextMissileId = 0;
+let lastClientInputSend = 0, clientInputSeq = 0, clientActionSeq = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
 let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
-let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, chooseRole, lobby, menu, gameArea, waitHint;
+let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, networkStatusEl, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
-let lastSpawnTick = 0;
 let audioCtx = null, masterGain = null;
 let audioBank = {}, audioAssetsStarted = false;
 let engineCruiseAudio = null, engineBoostAudio = null;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 let currentCameraFovMult = CAMERA_FOV_MULT;
 let localFlareScheduleGeneration = 0;
+const seenImpactKeys = new Set();
+let lastNetworkActivityAt = 0;
 
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
@@ -347,6 +346,30 @@ function removeProjectileLocal(kind, id) {
   }
 }
 
+function projectileExists(kind, id) {
+  const arr = kind === 'missile' ? missiles : kind === 'bomb' ? bombs : bullets;
+  return arr.some(p => p.id === id);
+}
+
+function rememberImpact(kind, id) {
+  const key = String(kind) + ':' + String(id);
+  if (seenImpactKeys.has(key)) return false;
+  seenImpactKeys.add(key);
+  // Keep the dedupe set bounded during long multiplayer sessions.
+  if (seenImpactKeys.size > 1200) {
+    const first = seenImpactKeys.values().next().value;
+    seenImpactKeys.delete(first);
+  }
+  return true;
+}
+
+function setNetworkStatus(text, tone = 'ok') {
+  if (!networkStatusEl) return;
+  if (networkStatusEl.textContent === text && networkStatusEl.dataset.tone === tone) return;
+  networkStatusEl.textContent = text;
+  networkStatusEl.dataset.tone = tone;
+}
+
 // ================= Imported impact effects =================
 // These effects are world-space versions of the five effects supplied in
 // explosion-effect.html. They intentionally own their particles and lifetime
@@ -497,9 +520,14 @@ function createLocalState() {
     highSpeedActive: false, sonicBoomReadyAt: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
-    flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
+    flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0,
+    networkInput: { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false },
+    networkInputSeq: 0, networkActionSeq: 0,
+    hostLockTargetId: null, hostLockProgress: 0, hostLockExpiresAt: 0
   });
 }
+
+function isNetworkClient() { return started && !botMode && !isHost; }
 
 function createBotState(id, name, skill = .7) {
   const base = freshPlayerState(id, name);
@@ -853,15 +881,6 @@ function updateLocalPlane(dtSec, keys) {
     myState.bombs++;
   }
 
-  // coin pickup (optimistic local removal + tell host)
-  for (let i = coins.length - 1; i >= 0; i--) {
-    const c = coins[i];
-    if (dist(myState.x, myState.y, c.x, c.y) < COIN_PICKUP_RADIUS) {
-      coins.splice(i, 1);
-      sendEvent({ type: 'collect', id: c.id });
-    }
-  }
-
   // incoming bullet damage (only bullets NOT owned by me)
   const invuln = now < myState.invulnUntil;
   if (!invuln) {
@@ -936,18 +955,24 @@ function fireBulletFor(state, ownerId, replicate = false) {
   spawnExplosion(b.x, b.y, 'muzzle');
   playCannonSound(ownerId === myId ? null : b.x, ownerId === myId ? null : b.y);
   if (ownerId === myId) recoilKick = Math.min(10, recoilKick + 3.2);
-  if (replicate) sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
+  if (replicate) {
+    const packet = { type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle };
+    if (isHost && ownerId !== myId) broadcast({ ...packet, from: ownerId });
+    else sendEvent(packet);
+  }
   return b;
 }
 
 function fireBullet() {
   if (!myState) return;
+  if (isNetworkClient()) { sendClientAction({ type: 'shootOnce' }); return; }
   unlockAudio();
   fireBulletFor(myState, myId, true);
 }
 
 function tryBarrelRoll(direction = 1) {
   if (!myState || !myState.alive || myState.falling || myState.stalled || myState.barrelRollCooldown > 0) return;
+  if (isNetworkClient()) { sendClientAction({ type: 'roll', direction: direction < 0 ? -1 : 1 }); return; }
   myState.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
   myState.barrelRollUntil = performance.now() + BARREL_ROLL_DURATION;
   myState.barrelRollDirection = direction < 0 ? -1 : 1;
@@ -955,6 +980,7 @@ function tryBarrelRoll(direction = 1) {
 
 function testDeathOrReset() {
   if (!myState) return;
+  if (isNetworkClient()) { sendClientAction({ type: 'testReset' }); return; }
   if (myState.alive) {
     beginDeathFall(null, 'TEST — uncontrolled fall');
   } else if (myState.respawnAt) {
@@ -976,12 +1002,17 @@ function dropBombFor(state, ownerId, replicate = false) {
   };
   bombs.push(b);
   spawnExplosion(b.x, b.y, 'launch');
-  if (replicate) sendEvent({ type: 'bomb', id: b.id, x: b.x, y: b.y, vx: b.vx, vy: b.vy });
+  if (replicate) {
+    const packet = { type: 'bomb', id: b.id, x: b.x, y: b.y, vx: b.vx, vy: b.vy };
+    if (isHost && ownerId !== myId) broadcast({ ...packet, from: ownerId });
+    else sendEvent(packet);
+  }
   return b;
 }
 
 function tryDropBomb() {
   if (!myState) return;
+  if (isNetworkClient()) { sendClientAction({ type: 'bomb' }); return; }
   unlockAudio();
   dropBombFor(myState, myId, true);
 }
@@ -992,7 +1023,9 @@ function updateBullets(dtSec) {
     const b = bullets[i];
     // Rounds persist indefinitely and are removed only when they reach the sea.
     if (b.y >= GROUND_Y - 8) {
-      spawnExplosion(b.x, GROUND_Y - 8, 'water'); removeProjectileLocal('bullet', b.id); continue;
+      spawnExplosion(b.x, GROUND_Y - 8, 'water');
+      if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: GROUND_Y - 8 });
+      removeProjectileLocal('bullet', b.id); continue;
     }
     b.prevX = b.x; b.prevY = b.y;
     if (b.vx == null) {
@@ -1028,20 +1061,29 @@ function detonateBomb(b) {
   playExplosionSound('blast', b.x, burstY);
   screenShake = Math.max(screenShake, 5);
   spawnBombShrapnel(b.x, burstY, b.ownerId);
+  if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY });
   removeProjectileLocal('bomb', b.id);
 }
 
 function updateBombs(dtSec) {
   const now = performance.now();
+  const authoritative = isHost || botMode;
   for (let i = bombs.length - 1; i >= 0; i--) {
     const b = bombs[i];
-    if (now - b.born > BOMB_LIFE || b.y >= GROUND_Y - 8) {
+    if (authoritative && (now - b.born > BOMB_LIFE || b.y >= GROUND_Y - 8)) {
       detonateBomb(b);
+      continue;
+    }
+    if (!authoritative && now - b.born > BOMB_LIFE + 900) {
+      // The host owns detonation. This only removes a stale visual copy if a
+      // packet was lost for an unusually long time, without inventing FX.
+      bombs.splice(i, 1);
       continue;
     }
     b.vy += BOMB_GRAVITY * dtSec;
     b.x += b.vx * dtSec;
     b.y += b.vy * dtSec;
+    if (!authoritative) continue;
 
     // Proximity detonation makes the bomb useful against moving aircraft
     // without turning it into a homing weapon.
@@ -1051,7 +1093,7 @@ function updateBombs(dtSec) {
       const dx = p.x - b.x, dy = p.y - b.y;
       return dx * dx + dy * dy <= proximitySq;
     });
-    if (nearTarget) detonateBomb(b);
+    if (authoritative && nearTarget) detonateBomb(b);
   }
 }
 
@@ -1064,15 +1106,15 @@ function updateShrapnels(dtSec) {
       continue;
     }
     s.prevX = s.x; s.prevY = s.y;
-    s.vy += SHrapnel_GRAVITY * dtSec;
+    s.vy += SHRAPNEL_GRAVITY * dtSec;
     s.x += s.vx * dtSec; s.y += s.vy * dtSec;
 
-    if (s.ownerId !== myId && myState && myState.alive && !myState.falling &&
+    if ((isHost || botMode) && s.ownerId !== myId && myState && myState.alive && !myState.falling &&
         performance.now() >= (myState.invulnUntil || 0) &&
         pointSegmentDistance(myState.x, myState.y, s.prevX, s.prevY, s.x, s.y) < SHRAPNEL_HIT_RADIUS) {
       shrapnels.splice(i, 1);
       spawnExplosion(s.x, s.y, 'spark', Math.atan2(s.vy, s.vx));
-      myState.health -= SHrapnel_DAMAGE;
+      myState.health -= SHRAPNEL_DAMAGE;
       if (myState.health <= 0) beginDeathFall(s.ownerId, 'Aircraft disabled');
       continue;
     }
@@ -1084,7 +1126,7 @@ function updateShrapnels(dtSec) {
       if (pointSegmentDistance(p.x, p.y, s.prevX, s.prevY, s.x, s.y) >= SHRAPNEL_HIT_RADIUS) return;
       hitBot = true;
       spawnExplosion(s.x, s.y, 'spark', Math.atan2(s.vy, s.vx));
-      damageBot(p, SHrapnel_DAMAGE, s.ownerId);
+      damageBot(p, SHRAPNEL_DAMAGE, s.ownerId);
     });
     if (hitBot) shrapnels.splice(i, 1);
   }
@@ -1118,6 +1160,24 @@ function updateMissileLock(dtSec) {
   if (!myState || !myState.alive || myState.falling || myState.missiles <= 0) {
     missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
     missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
+    return;
+  }
+
+  if (isNetworkClient()) {
+    const hostTarget = myState.hostLockTargetId;
+    const remaining = Math.max(0, (myState.hostLockRemaining || 0) - (now - (myState.hostLockUpdatedAt || now)));
+    missileLockCandidateId = hostTarget;
+    missileLockCandidateAligned = hostTarget != null;
+    missileLockAcquireId = hostTarget;
+    missileLockProgress = clamp((myState.hostLockProgress || 0) / MISSILE_LOCK_DELAY, 0, 1);
+    if (hostTarget != null && remaining > 0) {
+      missileLockTargetId = hostTarget;
+      missileLockProgress = 1;
+      missileLockExpiresAt = now + remaining;
+    } else {
+      missileLockTargetId = null;
+      missileLockExpiresAt = 0;
+    }
     return;
   }
 
@@ -1172,12 +1232,17 @@ function fireMissileFor(state, ownerId, targetId = null, replicate = false) {
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
   playMissileLaunchSound(m.x, m.y); screenShake = Math.max(screenShake, ownerId === myId ? 7 : 3);
-  if (replicate) sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, locked: true });
+  if (replicate) {
+    const packet = { type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, locked: targetId != null };
+    if (isHost && ownerId !== myId) broadcast({ ...packet, from: ownerId });
+    else sendEvent(packet);
+  }
   return m;
 }
 
 function tryFireMissile() {
   if (!myState) return;
+  if (isNetworkClient()) { sendClientAction({ type: 'missile' }); return; }
   unlockAudio();
   // Releasing before the lock completes still fires, but the missile is
   // dumb/unguided. A completed facing lock is the only thing that grants a
@@ -1193,12 +1258,17 @@ function deployFlareFor(state, ownerId, replicate = false) {
   const volume = ownerId === myId ? .34 : proximityVolume(state.x, state.y, .34);
   if (volume > .005) playAsset('chaff', volume, 1);
   spawnFlareSalvo(state.x, state.y, state.angle, ownerId);
-  if (replicate) sendEvent({ type: 'flare', x: state.x, y: state.y, angle: state.angle });
+  if (replicate) {
+    const packet = { type: 'flare', x: state.x, y: state.y, angle: state.angle };
+    if (isHost && ownerId !== myId) broadcast({ ...packet, from: ownerId });
+    else sendEvent(packet);
+  }
   return true;
 }
 
 function tryDeployFlare() {
   if (!myState) return;
+  if (isNetworkClient()) { sendClientAction({ type: 'flare' }); return; }
   unlockAudio();
   deployFlareFor(myState, myId, true);
 }
@@ -1260,14 +1330,22 @@ function resolveFlare(fromId, fx, fy, flare = null) {
 
 function updateMissiles(dtSec) {
   const now = performance.now();
+  const authoritative = isHost || botMode;
   for (let i = missiles.length - 1; i >= 0; i--) {
     const m = missiles[i];
     if (now - m.born > MISSILE_LIFE) {
       // Used to just vanish here with no feedback at all if it never caught
       // its target — now it detonates in place so a miss is at least visible.
-      spawnExplosion(m.x, m.y, 'blast');
-      removeProjectileLocal('missile', m.id);
-      continue;
+      if (authoritative) {
+        spawnExplosion(m.x, m.y, 'blast');
+        if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.x, y: m.y });
+        removeProjectileLocal('missile', m.id);
+      } else if (now - m.born > MISSILE_LIFE + 900) {
+        // Wait for the host's impact packet instead of inventing a second FX
+        // event locally. This is only a silent stale-copy fallback.
+        removeProjectileLocal('missile', m.id);
+        continue;
+      }
     }
 
     if (!m.decoyTarget && m.targetId != null) {
@@ -1283,8 +1361,9 @@ function updateMissiles(dtSec) {
     // active until it physically reaches that flare, then explodes there.
     if (m.decoyTarget) {
       const decoyDistance = dist(m.x, m.y, m.decoyTarget.x, m.decoyTarget.y);
-      if (decoyDistance < MISSILE_HIT_RADIUS) {
+      if (decoyDistance < MISSILE_HIT_RADIUS && authoritative) {
         spawnExplosion(m.decoyTarget.x, m.decoyTarget.y, 'blast');
+        if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.decoyTarget.x, y: m.decoyTarget.y });
         removeProjectileLocal('missile', m.id);
         continue;
       }
@@ -1489,12 +1568,6 @@ function updateOneBot(bot, dtSec, now) {
   bot.bombRegenTimer += dtSec * 1000;
   if (bot.bombs < BOMB_MAX && bot.bombRegenTimer >= BOMB_REGEN_MS) { bot.bombs++; bot.bombRegenTimer = 0; }
 
-  for (let i = coins.length - 1; i >= 0; i--) {
-    if (dist(bot.x, bot.y, coins[i].x, coins[i].y) < COIN_PICKUP_RADIUS) {
-      const coinId = coins[i].id;
-      handleCollect(bot.id, coinId);
-    }
-  }
 }
 
 function updateBots(dtSec, now) {
@@ -1551,9 +1624,199 @@ function updateBotHits() {
   });
 }
 
+// ================= Host-authoritative player simulation =================
+// Network clients never decide their world position, projectile creation, or
+// damage. They submit input and one-shot actions; the host advances these
+// states and broadcasts the result.
+function respawnNetworkPlayer(p) {
+  const point = randomSpawnPoint();
+  p.x = point.x; p.y = point.y; p.angle = rand(0, Math.PI * 2);
+  p.health = MAX_HEALTH; p.alive = true; p.connected = true;
+  p.falling = false; p.stalled = false; p.deathKiller = null;
+  p.speed = PLANE_SPEED; p.verticalVelocity = 0; p.turnVelocity = 0;
+  p.stallTime = 0; p.stallRecoverTime = 0; p.roll = 0;
+  p.barrelRollUntil = 0; p.barrelRollCooldown = 0; p.barrelRollDirection = 1;
+  p.highSpeedActive = false; p.sonicBoomReadyAt = 0;
+  p.heat = 0; p.overheated = false; p.fireTimer = 0;
+  p.missiles = MISSILE_MAX; p.missileCooldown = 0; p.missileRegenTimer = 0;
+  p.bombs = BOMB_MAX; p.bombCooldown = 0; p.bombRegenTimer = 0;
+  p.flares = FLARE_MAX; p.flareCooldown = 0; p.flareRegenTimer = 0;
+  p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
+  p.respawnAt = 0; p.invulnUntil = performance.now() + INVULN_TIME;
+}
+
+function beginRemoteDeathFall(p, killerId, message = 'Aircraft disabled') {
+  if (!p || !p.alive || p.falling) return;
+  p.health = 0; p.falling = true; p.stalled = false; p.boosting = false;
+  p.deathKiller = killerId; p.speed = 0; p.turnVelocity = 0;
+  p.verticalVelocity = Math.max(45, p.verticalVelocity);
+  p.fallSpinVelocity = STALL_SPIN_SPEED * (p.id % 2 ? 1 : -1);
+  p.deathMessage = message;
+}
+
+function finishRemoteDeath(p) {
+  if (!p || !p.alive) return;
+  p.alive = false; p.falling = false; p.boosting = false;
+  p.respawnAt = performance.now() + RESPAWN_DELAY;
+  handleDied(p.id, p.deathKiller);
+}
+
+function updateRemoteDeathFall(p, dtSec) {
+  p.verticalVelocity += FALL_GRAVITY * dtSec;
+  p.speed = 0; p.turnVelocity = 0;
+  p.roll += p.fallSpinVelocity * dtSec;
+  p.y += p.verticalVelocity * dtSec;
+  if (p.y >= GROUND_Y - 12) finishRemoteDeath(p);
+}
+
+function findHostLockTarget(p) {
+  let best = null, bestDistance = Infinity;
+  Object.values(players).forEach(target => {
+    if (target.id === p.id || target.connected === false || target.alive === false || target.falling) return;
+    if (isInCloudBank(target.x, target.y)) return;
+    const d = dist(p.x, p.y, target.x, target.y);
+    const targetAngle = Math.atan2(target.y - p.y, target.x - p.x);
+    if (d >= bestDistance || Math.abs(angleDiff(p.angle, targetAngle)) > MISSILE_LOCK_CONE) return;
+    best = target; bestDistance = d;
+  });
+  return best ? best.id : null;
+}
+
+function updateHostLock(p, dtSec) {
+  const targetId = findHostLockTarget(p);
+  if (targetId == null) {
+    p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
+    return;
+  }
+  if (p.hostLockTargetId !== targetId) {
+    p.hostLockTargetId = targetId; p.hostLockProgress = 0;
+  }
+  p.hostLockProgress = clamp(p.hostLockProgress + dtSec * 1000, 0, MISSILE_LOCK_DELAY);
+  if (p.hostLockProgress >= MISSILE_LOCK_DELAY) p.hostLockExpiresAt = performance.now() + MISSILE_LOCK_HOLD_MS;
+}
+
+function updateOneNetworkPlayer(p, dtSec, now) {
+  if (!p || p.isBot || p.id === myId || p.connected === false) return;
+  if (!p.alive) {
+    if (p.respawnAt && now >= p.respawnAt) respawnNetworkPlayer(p);
+    return;
+  }
+  if (p.falling) { updateRemoteDeathFall(p, dtSec); return; }
+  const input = p.networkInput || { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false };
+  const targetAngle = Math.atan2(input.aimY || 0, input.aimX || 1);
+  const diff = angleDiff(p.angle, targetAngle);
+  const boosting = !!input.boost && !input.airbrake;
+  const airbraking = !!input.airbrake && !boosting;
+  const speedRatio = clamp(p.speed / HIGH_SPEED_MAX_SPEED, .2, 1);
+  const speedTurnPenalty = .72 + (1 - speedRatio) * .52;
+  const turnAuthority = airbraking ? AIRBRAKE_TURN_MULT : boosting ? BOOST_TURN_MULT : 1;
+  const desiredTurn = clamp(diff * 5.5, -TURN_RATE, TURN_RATE) * speedTurnPenalty * turnAuthority;
+  p.turnVelocity += (desiredTurn - p.turnVelocity) * clamp(TURN_ACCEL * dtSec, 0, 1);
+  p.turnVelocity *= Math.max(0, 1 - TURN_DAMPING * dtSec);
+  p.turnVelocity = clamp(p.turnVelocity, -TURN_RATE * 1.15, TURN_RATE * 1.15);
+  p.angle += p.turnVelocity * dtSec;
+  p.boosting = boosting;
+  p.boost = BOOST_MAX;
+  p.barrelRollCooldown = Math.max(0, p.barrelRollCooldown - dtSec * 1000);
+  if (now < p.barrelRollUntil) p.roll += p.barrelRollDirection * BARREL_ROLL_SPEED * dtSec;
+  else p.roll *= Math.max(0, 1 - 7 * dtSec);
+
+  const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(p.angle);
+  const drag = (p.speed - PLANE_SPEED) * .82;
+  const thrust = boosting ? 250 : airbraking ? -300 : 0;
+  const highSpeedAssist = p.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
+  p.speed = clamp(p.speed + (thrust + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
+  const atHighSpeed = p.speed >= HIGH_SPEED_THRESHOLD;
+  if (atHighSpeed && !p.highSpeedActive && now >= (p.sonicBoomReadyAt || 0)) {
+    triggerSonicBoom(p.x, p.y, p.angle);
+    broadcast({ type: 'sonicBoom', from: p.id, x: p.x, y: p.y, angle: p.angle });
+    p.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
+  }
+  p.highSpeedActive = atHighSpeed;
+  if (p.y < 0) p.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-p.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
+  else p.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
+  p.x = clamp(p.x + Math.cos(p.angle) * Math.max(0, p.speed) * dtSec, 30, WORLD_W - 30);
+  p.y += Math.sin(p.angle) * Math.max(0, p.speed) * dtSec + p.verticalVelocity * dtSec;
+  if (p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
+
+  if (p.overheated) {
+    p.heat = Math.max(0, p.heat - HEAT_DECAY_OVERHEAT * dtSec);
+    if (p.heat <= HEAT_MAX * OVERHEAT_RESET_FRAC) p.overheated = false;
+  } else if (!input.shoot) p.heat = Math.max(0, p.heat - HEAT_DECAY * dtSec);
+  p.fireTimer = Math.max(0, p.fireTimer - dtSec * 1000);
+  if (input.shoot && !p.overheated && p.fireTimer <= 0) {
+    p.fireTimer = FIRE_COOLDOWN;
+    fireBulletFor(p, p.id, true);
+    p.heat = Math.min(HEAT_MAX, p.heat + HEAT_PER_SHOT);
+    if (p.heat >= HEAT_MAX) p.overheated = true;
+  }
+  p.missileCooldown = Math.max(0, p.missileCooldown - dtSec * 1000);
+  p.missileRegenTimer += dtSec * 1000;
+  if (p.missiles < MISSILE_MAX && p.missileRegenTimer >= MISSILE_REGEN_MS) { p.missiles++; p.missileRegenTimer = 0; }
+  p.flareCooldown = Math.max(0, p.flareCooldown - dtSec * 1000);
+  p.flareRegenTimer += dtSec * 1000;
+  if (p.flares < FLARE_MAX && p.flareRegenTimer >= FLARE_REGEN_MS) { p.flares++; p.flareRegenTimer = 0; }
+  p.bombCooldown = Math.max(0, p.bombCooldown - dtSec * 1000);
+  p.bombRegenTimer += dtSec * 1000;
+  if (p.bombs < BOMB_MAX && p.bombRegenTimer >= BOMB_REGEN_MS) { p.bombs++; p.bombRegenTimer = 0; }
+  updateHostLock(p, dtSec);
+}
+
+function updateNetworkPlayers(dtSec, now) {
+  if (!isHost || botMode) return;
+  Object.values(players).forEach(p => updateOneNetworkPlayer(p, dtSec, now));
+}
+
+function applyHostDamage(target, amount, killerId) {
+  if (!target || !target.alive || target.falling || performance.now() < (target.invulnUntil || 0)) return;
+  target.health -= amount;
+  if (target.health <= 0) beginRemoteDeathFall(target, killerId);
+}
+
+function updateHostCombat() {
+  if (!isHost || botMode || !started) return;
+  const now = performance.now();
+  Object.values(players).forEach(target => {
+    if (!target.alive || target.falling || now < (target.invulnUntil || 0)) return;
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      if (b.ownerId === target.id) continue;
+      if (pointSegmentDistance(target.x, target.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) >= HIT_RADIUS) continue;
+      removeProjectileLocal('bullet', b.id); spawnExplosion(b.x, b.y, 'spark', b.angle);
+      broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: b.y });
+      const rearHit = Math.abs(angleDiff(target.angle, b.angle)) < Math.PI / 3;
+      applyHostDamage(target, BULLET_DAMAGE * (rearHit ? 1.35 : 1), b.ownerId);
+      break;
+    }
+    if (!target.alive || target.falling) return;
+    for (let i = missiles.length - 1; i >= 0; i--) {
+      const m = missiles[i];
+      if (m.ownerId === target.id || (m.targetId != null && m.targetId !== target.id)) continue;
+      if (dist(target.x, target.y, m.x, m.y) >= MISSILE_HIT_RADIUS) continue;
+      removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
+      broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.x, y: m.y });
+      applyHostDamage(target, MISSILE_DAMAGE, m.ownerId);
+      break;
+    }
+  });
+  for (let i = shrapnels.length - 1; i >= 0; i--) {
+    const s = shrapnels[i];
+    let hit = false;
+    Object.values(players).forEach(target => {
+      if (hit || target.id === s.ownerId || !target.alive || target.falling || now < (target.invulnUntil || 0)) return;
+      if (pointSegmentDistance(target.x, target.y, s.prevX ?? s.x, s.prevY ?? s.y, s.x, s.y) >= SHRAPNEL_HIT_RADIUS) return;
+      hit = true; spawnExplosion(s.x, s.y, 'spark', Math.atan2(s.vy, s.vx));
+      applyHostDamage(target, SHRAPNEL_DAMAGE, s.ownerId);
+    });
+    if (hit) shrapnels.splice(i, 1);
+  }
+}
+
 // ================= Networking: host side =================
 function startHost() {
   unlockAudio();
+  seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
+  setNetworkStatus('P2P // HOSTING', 'ok');
   isHost = true; botMode = false; myId = 0;
   players[0] = freshPlayerState(0, myName);
   peer = new Peer();
@@ -1562,14 +1825,17 @@ function startHost() {
       ? 'That room code is unavailable. Try hosting again.'
       : 'Network error — check the connection and try again.';
     statusEl.textContent = message;
+    setNetworkStatus('P2P // ERROR', 'bad');
     startBtn.style.display = 'none'; waitHint.style.display = 'block';
   });
   peer.on('disconnected', () => {
     statusEl.textContent = 'Disconnected from the signaling server.';
+    setNetworkStatus('P2P // SIGNAL LOST', 'bad');
     startBtn.style.display = 'none'; waitHint.style.display = 'block';
   });
   peer.on('open', id => {
     statusEl.textContent = 'Share this code: ' + id;
+    setNetworkStatus('HOST // ' + id.slice(0, 8), 'ok');
     chooseRole.style.display = 'none'; lobby.style.display = 'flex';
     startBtn.style.display = 'inline-block'; waitHint.style.display = 'none';
     renderLobby();
@@ -1582,7 +1848,6 @@ function startHost() {
     players[id].connected = true;
     c.on('open', () => {
       c.send({ type: 'welcome', id });
-      c.send({ type: 'coins', list: coins });
       if (started) c.send({ type: 'start' });
       broadcastRoster();
     });
@@ -1595,23 +1860,24 @@ function startHost() {
   });
   startBtn.onclick = () => {
     if (started) return;
-    started = true; buildClouds(); spawnInitialCoins();
+    started = true; buildClouds();
     broadcast({ type: 'start' });
-    broadcast({ type: 'coins', list: coins });
     beginLocalGame();
   };
 }
 
 function startBotMode() {
   unlockAudio();
+  setNetworkStatus('SKIRMISH // LOCAL', 'ok');
   // Bots run locally as a private host-like sortie. No PeerJS connection is
   // created, so starting this mode never interferes with room multiplayer.
   isHost = true; botMode = true; myId = 0; peer = null; connections = {};
-  players = {}; coins = []; bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
+  seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
+  players = {}; bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; started = true;
   players[0] = freshPlayerState(0, myName);
   botCount = clamp(Number.parseInt(botCountInputEl?.value, 10) || DEFAULT_BOT_COUNT, 1, MAX_PLAYERS - 1);
-  buildClouds(); spawnInitialCoins(); spawnBotSquadron(botCount);
+  buildClouds(); spawnBotSquadron(botCount);
   renderLeaderboard();
   beginLocalGame();
 }
@@ -1627,6 +1893,10 @@ function broadcast(msg) {
 
 function broadcastRoster() {
   renderLobby(); renderLeaderboard();
+  if (started && !botMode && isHost) {
+    const linked = Object.values(connections).filter(c => c.open).length;
+    setNetworkStatus('HOST // ' + linked + ' LINKED', 'ok');
+  }
   broadcast({
     type: 'roster',
     roster: Object.values(players).map(p => ({
@@ -1637,16 +1907,72 @@ function broadcastRoster() {
 }
 
 function handleHostReceive(fromId, data) {
-  if (data.type === 'state') handleState(fromId, data);
+  lastNetworkActivityAt = performance.now();
+  if (!data || typeof data.type !== 'string') return;
+  if (fromId !== myId && (!players[fromId] || players[fromId].connected === false)) return;
+  // A client may submit only input/actions. World state, projectile spawns,
+  // impacts, deaths, and effects are host-owned and cannot be claimed by a
+  // remote packet.
+  if (fromId !== myId && ['state', 'shoot', 'missile', 'bomb', 'flare', 'sonicBoom', 'impact', 'died'].includes(data.type)) return;
+  if (data.type === 'input') handleClientInput(fromId, data);
+  else if (data.type === 'action') handleClientAction(fromId, data);
+  else if (data.type === 'state') { if (fromId === myId) handleState(fromId, data); }
   else if (data.type === 'shoot') handleShoot(fromId, data);
   else if (data.type === 'missile') handleMissile(fromId, data);
   else if (data.type === 'bomb') handleBomb(fromId, data);
   else if (data.type === 'flare') handleFlare(fromId, data);
   else if (data.type === 'sonicBoom') handleSonicBoom(fromId, data);
   else if (data.type === 'impact') handleImpact(fromId, data);
-  else if (data.type === 'collect') handleCollect(fromId, data.id);
   else if (data.type === 'died') handleDied(fromId, data.by);
   else if (data.type === 'name') { if (players[fromId]) { players[fromId].name = data.name; broadcastRoster(); } }
+}
+
+function validNetworkInput(data) {
+  return data && Number.isInteger(data.seq) && Number.isFinite(data.aimX) && Number.isFinite(data.aimY) &&
+    Math.abs(data.aimX) < 10000 && Math.abs(data.aimY) < 10000;
+}
+
+function handleClientInput(fromId, data) {
+  const p = players[fromId];
+  if (!p || fromId === myId || !validNetworkInput(data) || data.seq <= (p.networkInputSeq || 0)) return;
+  p.networkInputSeq = data.seq;
+  p.networkInput = {
+    aimX: clamp(data.aimX, -window.innerWidth * 2, window.innerWidth * 2),
+    aimY: clamp(data.aimY, -window.innerHeight * 2, window.innerHeight * 2),
+    boost: !!data.boost, airbrake: !!data.airbrake, shoot: !!data.shoot
+  };
+}
+
+function handleClientAction(fromId, data) {
+  const p = players[fromId];
+  if (!p || fromId === myId || !Number.isInteger(data.seq) || data.seq <= (p.networkActionSeq || 0)) return;
+  p.networkActionSeq = data.seq;
+  const action = data.action || {};
+  if (!p.alive && action.type !== 'testReset') return;
+  if (action.type === 'roll') {
+    if (!p.falling && !p.stalled && p.barrelRollCooldown <= 0) {
+      p.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
+      p.barrelRollUntil = performance.now() + BARREL_ROLL_DURATION;
+      p.barrelRollDirection = action.direction < 0 ? -1 : 1;
+    }
+  } else if (action.type === 'shootOnce') {
+    if (!p.falling && p.alive && !p.overheated && p.fireTimer <= 0) {
+      p.fireTimer = FIRE_COOLDOWN;
+      fireBulletFor(p, p.id, true);
+      p.heat = Math.min(HEAT_MAX, p.heat + HEAT_PER_SHOT);
+      if (p.heat >= HEAT_MAX) p.overheated = true;
+    }
+  } else if (action.type === 'missile') {
+    const lockedTarget = p.hostLockExpiresAt > performance.now() ? p.hostLockTargetId : null;
+    fireMissileFor(p, p.id, lockedTarget, true);
+  } else if (action.type === 'bomb') {
+    dropBombFor(p, p.id, true);
+  } else if (action.type === 'flare') {
+    deployFlareFor(p, p.id, true);
+  } else if (action.type === 'testReset') {
+    if (p.alive) beginRemoteDeathFall(p, null, 'TEST — uncontrolled fall');
+    else if (p.respawnAt) respawnNetworkPlayer(p);
+  }
 }
 
 // Position/angle updates only arrive ~15 times/sec over the network. Instead
@@ -1654,11 +1980,18 @@ function handleHostReceive(fromId, data) {
 // like the game is running at 15fps), we store the update as a target and
 // glide the rendered plane toward it every frame in interpolateRemotePlayers().
 function applyRemoteState(p, data) {
+  if (!p || ![data.x, data.y, data.angle, data.health].every(Number.isFinite)) return;
   if (!p.synced) {
     // First update we've ever gotten for this player: snap immediately so
     // it doesn't visibly slide in from its placeholder spawn point.
     p.x = data.x; p.y = data.y; p.angle = data.angle;
     p.synced = true;
+  }
+  if (p.id === myId) {
+    // The local network player is rendered directly from the host snapshot;
+    // remote pilots use interpolation below. Leaving this branch out makes
+    // the player's camera remain at the spawn point while the minimap moves.
+    p.x = data.x; p.y = data.y; p.angle = data.angle;
   }
   p.tx = data.x; p.ty = data.y; p.tangle = data.angle;
   p.health = data.health; p.alive = data.alive;
@@ -1666,14 +1999,87 @@ function applyRemoteState(p, data) {
   p.stalled = !!data.stalled;
   p.boosting = !!data.boosting;
   if (data.roll != null) p.roll = data.roll;
+  ['speed', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'respawnAt'].forEach(key => {
+    if (data[key] !== undefined) p[key] = data[key];
+  });
+  if (data.lockTargetId !== undefined) {
+    p.hostLockTargetId = data.lockTargetId;
+    p.hostLockProgress = data.lockProgress || 0;
+    p.hostLockExpiresAt = data.lockExpiresAt || 0;
+    p.hostLockRemaining = data.lockRemaining || 0;
+    p.hostLockUpdatedAt = performance.now();
+  }
+  if (p.id === myId && respawnOverlay) {
+    if (p.alive === false) {
+      respawnOverlay.style.display = 'flex';
+      respawnMsgEl.textContent = 'AIRCRAFT LOST';
+    } else if (p.alive) {
+      respawnOverlay.style.display = 'none';
+    }
+  }
 }
 
 function handleState(fromId, data) {
+  if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle) ||
+      !Number.isFinite(data.health)) return;
   const p = players[fromId];
   if (p) applyRemoteState(p, data);
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, stalled: data.stalled, boosting: data.boosting, roll: data.roll });
   });
+}
+
+function broadcastAuthoritativeSnapshot() {
+  if (!isHost) return;
+  Object.values(players).forEach(p => {
+    broadcast({
+      type: 'state', from: p.id, x: p.x, y: p.y, angle: p.angle,
+      health: p.health, alive: p.alive, falling: p.falling, stalled: p.stalled,
+      boosting: p.boosting, roll: p.roll, speed: p.speed, heat: p.heat,
+      overheated: p.overheated, boost: p.boost, missiles: p.missiles,
+      bombs: p.bombs, flares: p.flares, score: p.score, kills: p.kills,
+      deaths: p.deaths, respawnAt: p.respawnAt || 0,
+      lockTargetId: p.hostLockTargetId, lockProgress: p.hostLockProgress || 0,
+      lockExpiresAt: p.hostLockExpiresAt || 0,
+      lockRemaining: Math.max(0, (p.hostLockExpiresAt || 0) - performance.now())
+    });
+  });
+  broadcastAuthoritativeProjectiles();
+}
+
+function broadcastAuthoritativeProjectiles() {
+  if (!isHost) return;
+  const now = performance.now();
+  const age = p => Math.max(0, now - (p.born || now));
+  broadcast({
+    type: 'projectiles',
+    bullets: bullets.map(b => ({ id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, prevX: b.prevX, prevY: b.prevY, angle: b.angle, vx: b.vx, vy: b.vy, age: age(b) })),
+    missiles: missiles.map(m => ({ id: m.id, ownerId: m.ownerId, targetId: m.targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, decoyed: !!m.decoyed, decoyTarget: m.decoyTarget ? { x: m.decoyTarget.x, y: m.decoyTarget.y } : null, age: age(m) })),
+    bombs: bombs.map(b => ({ id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, vx: b.vx, vy: b.vy, age: age(b) })),
+    shrapnels: shrapnels.map(s => ({ id: s.id, ownerId: s.ownerId, x: s.x, y: s.y, prevX: s.prevX, prevY: s.prevY, vx: s.vx, vy: s.vy, age: age(s) }))
+  });
+}
+
+function reconcileAuthoritativeProjectiles(data) {
+  const now = performance.now();
+  const valid = (p, required) => p && p.id != null && required.every(key => Number.isFinite(p[key]));
+  const sync = (kind, incoming, required, build) => {
+    if (!Array.isArray(incoming)) return;
+    const current = kind === 'bullet' ? bullets : kind === 'missile' ? missiles : kind === 'bomb' ? bombs : shrapnels;
+    const oldById = new Map(current.map(p => [String(p.id), p]));
+    const next = incoming.filter(p => valid(p, required)).map(p => build(p, oldById.get(String(p.id)), now));
+    if (kind === 'bullet') bullets = next;
+    else if (kind === 'missile') missiles = next;
+    else if (kind === 'bomb') bombs = next;
+    else shrapnels = next;
+  };
+  sync('bullet', data.bullets, ['x', 'y', 'angle', 'vx', 'vy'], (p, old, t) => ({ ...p, born: t - (p.age || 0) }));
+  sync('missile', data.missiles, ['x', 'y', 'angle', 'speed'], (p, old, t) => ({
+    ...p, born: t - (p.age || 0), lockReadyAt: t, trail: old?.trail || [], exhaust: 1,
+    decoyTarget: p.decoyTarget && Number.isFinite(p.decoyTarget.x) && Number.isFinite(p.decoyTarget.y) ? p.decoyTarget : null
+  }));
+  sync('bomb', data.bombs, ['x', 'y', 'vx', 'vy'], (p, old, t) => ({ ...p, born: t - (p.age || 0) }));
+  sync('shrapnel', data.shrapnels, ['x', 'y', 'vx', 'vy'], (p, old, t) => ({ ...p, born: t - (p.age || 0) }));
 }
 
 function handleShoot(fromId, data) {
@@ -1683,7 +2089,8 @@ function handleShoot(fromId, data) {
   // the host neither rendered it nor could take damage from it. Skip the push
   // when the host is the shooter (fromId === myId) since fireBullet() already
   // added it there.
-  if (fromId !== myId) {
+  if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle)) return;
+  if (fromId !== myId && data.id != null && !projectileExists('bullet', data.id)) {
     bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
     spawnExplosion(data.x, data.y, 'muzzle');
   }
@@ -1693,7 +2100,8 @@ function handleShoot(fromId, data) {
 }
 
 function handleMissile(fromId, data) {
-  if (fromId !== myId) {
+  if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle)) return;
+  if (fromId !== myId && data.id != null && !projectileExists('missile', data.id)) {
     missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
     spawnExplosion(data.x, data.y, 'launch');
     playMissileLaunchSound(data.x, data.y);
@@ -1704,7 +2112,8 @@ function handleMissile(fromId, data) {
 }
 
 function handleBomb(fromId, data) {
-  if (fromId !== myId) {
+  if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.vx) || !Number.isFinite(data.vy)) return;
+  if (fromId !== myId && data.id != null && !projectileExists('bomb', data.id)) {
     bombs.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
   }
   Object.entries(connections).forEach(([id, c]) => {
@@ -1733,6 +2142,8 @@ function handleSonicBoom(fromId, data) {
 // other client's copy of that same projectile disappears with an explosion
 // at the same moment, instead of lingering until it times out on its own.
 function handleImpact(fromId, data) {
+  if (!data || data.id == null || !['bullet', 'missile', 'bomb'].includes(data.kind) ||
+      !Number.isFinite(data.x) || !Number.isFinite(data.y) || !rememberImpact(data.kind, data.id)) return;
   if (fromId !== myId) {
     if (data.kind === 'bomb') {
       const bomb = bombs.find(b => b.id === data.id);
@@ -1752,17 +2163,6 @@ function handleImpact(fromId, data) {
   });
 }
 
-function handleCollect(fromId, coinId) {
-  const idx = coins.findIndex(c => c.id === coinId);
-  if (idx === -1) return;
-  const c = coins[idx];
-  coins.splice(idx, 1);
-  if (players[fromId]) players[fromId].score += COIN_VALUE;
-  spawnExplosion(c.x, c.y, 'coin');
-  broadcast({ type: 'coinRemove', id: coinId, x: c.x, y: c.y });
-  broadcastRoster();
-}
-
 function handleDied(fromId, killerId) {
   if (players[fromId]) { players[fromId].alive = false; players[fromId].deaths = (players[fromId].deaths || 0) + 1; }
   if (players[killerId] && killerId !== fromId) {
@@ -1774,29 +2174,11 @@ function handleDied(fromId, killerId) {
   broadcastRoster();
 }
 
-function spawnInitialCoins() {
-  coins = [];
-  for (let i = 0; i < COIN_CAP; i++) spawnOneCoin();
-}
-function spawnOneCoin() {
-  const p = randomSpawnPoint();
-  const coin = { id: 'c' + (coinCounter++), x: p.x, y: p.y };
-  coins.push(coin);
-  return coin;
-}
-function hostMaybeSpawnCoin(ts) {
-  if (!isHost || !started) return;
-  if (ts - lastSpawnTick < COIN_SPAWN_EVERY) return;
-  lastSpawnTick = ts;
-  if (coins.length < COIN_CAP) {
-    const coin = spawnOneCoin();
-    broadcast({ type: 'coinAdd', coin });
-  }
-}
-
 // ================= Networking: client side =================
 function startJoin() {
   unlockAudio();
+  seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
+  setNetworkStatus('P2P // CONNECTING', 'warn');
   botMode = false;
   const hostId = document.getElementById('hostIdInput').value.trim();
   if (!hostId) return;
@@ -1810,6 +2192,7 @@ function startJoin() {
   });
   peer.on('disconnected', () => {
     statusEl.textContent = 'Disconnected from the signaling server.';
+    setNetworkStatus('P2P // SIGNAL LOST', 'bad');
   });
   peer.on('open', () => {
     const conn = peer.connect(hostId, { reliable: true });
@@ -1817,21 +2200,26 @@ function startJoin() {
     conn.on('open', () => {
       chooseRole.style.display = 'none'; lobby.style.display = 'flex';
       statusEl.textContent = 'Connected — waiting for host...';
+      setNetworkStatus('P2P // CONNECTED', 'ok');
       startBtn.style.display = 'none'; waitHint.style.display = 'block';
     });
     conn.on('data', handleClientReceive);
     conn.on('error', () => {
       statusEl.textContent = 'Connection failed. Check the room code and try again.';
+      setNetworkStatus('P2P // ERROR', 'bad');
       chooseRole.style.display = 'flex'; lobby.style.display = 'none';
     });
     conn.on('close', () => {
       statusEl.textContent = 'Host connection closed.';
+      setNetworkStatus('P2P // HOST LOST', 'bad');
       if (!started) { chooseRole.style.display = 'flex'; lobby.style.display = 'none'; }
     });
   });
 }
 
 function handleClientReceive(data) {
+  lastNetworkActivityAt = performance.now();
+  if (!data || typeof data.type !== 'string') return;
   if (data.type === 'full') { statusEl.textContent = 'That lobby is full.'; }
   else if (data.type === 'welcome') {
     myId = data.id;
@@ -1840,34 +2228,34 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'roster') {
     data.roster.forEach(p => { players[p.id] = players[p.id] || {}; Object.assign(players[p.id], p); });
+    if (started && !botMode) setNetworkStatus('P2P // ' + data.roster.filter(p => p.connected !== false).length + ' PILOTS', 'ok');
     renderLobby(); renderLeaderboard();
   }
-  else if (data.type === 'coins') coins = data.list;
-  else if (data.type === 'coinAdd') coins.push(data.coin);
-  else if (data.type === 'coinRemove') {
-    coins = coins.filter(c => c.id !== data.id);
-    if (data.x != null) spawnExplosion(data.x, data.y, 'coin');
-  }
   else if (data.type === 'start') { started = true; buildClouds(); beginLocalGame(); }
+  else if (data.type === 'projectiles') {
+    reconcileAuthoritativeProjectiles(data);
+  }
   else if (data.type === 'state') {
     const p = players[data.from] = players[data.from] || freshPlayerState(data.from, 'Player ' + (data.from + 1));
     applyRemoteState(p, data);
   }
   else if (data.type === 'shoot') {
-    if (data.from !== myId) {
+    if (data.from !== myId && data.id != null && !projectileExists('bullet', data.id)) {
       bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
       spawnExplosion(data.x, data.y, 'muzzle');
     }
   }
   else if (data.type === 'missile') {
-    if (data.from !== myId) {
+    if (data.from !== myId && data.id != null && !projectileExists('missile', data.id)) {
       missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
   }
   else if (data.type === 'bomb') {
-    if (data.from !== myId) bombs.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
+    if (data.from !== myId && data.id != null && !projectileExists('bomb', data.id)) {
+      bombs.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
+    }
   }
   else if (data.type === 'flare') {
     if (data.from !== myId) {
@@ -1878,9 +2266,19 @@ function handleClientReceive(data) {
     if (data.from !== myId) triggerSonicBoom(data.x, data.y, data.angle || 0);
   }
   else if (data.type === 'impact') {
-    if (data.from !== myId) {
+    if (data.from !== myId && rememberImpact(data.kind, data.id)) {
+      if (data.kind === 'bomb') {
+        const bomb = bombs.find(b => b.id === data.id);
+        if (bomb) detonateBomb(bomb);
+        else {
+          spawnExplosion(data.x, data.y, 'bomb');
+          playExplosionSound('blast', data.x, data.y);
+          spawnBombShrapnel(data.x, data.y, data.from);
+        }
+      } else {
       removeProjectileLocal(data.kind, data.id);
       spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+      }
     }
   }
   else if (data.type === 'killed') onKilled(data.killer, data.victim);
@@ -1895,7 +2293,6 @@ function sendEvent(msg) {
     else if (msg.type === 'flare') handleFlare(0, msg);
     else if (msg.type === 'sonicBoom') handleSonicBoom(0, msg);
     else if (msg.type === 'impact') handleImpact(0, msg);
-    else if (msg.type === 'collect') handleCollect(0, msg.id);
     else if (msg.type === 'died') handleDied(0, msg.by);
   } else if (connections.host && connections.host.open) {
     connections.host.send(msg);
@@ -1955,6 +2352,26 @@ let missileLockCandidateAligned = false, missileLockProgress = 0, missileLockExp
 let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // aim point; steering targets this each frame
 
 function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; }
+function sendClientAction(action) {
+  if (!isNetworkClient() || !connections.host || !connections.host.open) return;
+  clientActionSeq++;
+  connections.host.send({ type: 'action', seq: clientActionSeq, action });
+}
+
+function sendClientInput(ts) {
+  if (!isNetworkClient() || !connections.host || !connections.host.open) return;
+  if (ts - lastClientInputSend < 50) return;
+  lastClientInputSend = ts;
+  clientInputSeq++;
+  const aimX = mouseX - window.innerWidth / 2;
+  const aimY = mouseY - window.innerHeight / 2;
+  connections.host.send({
+    type: 'input', seq: clientInputSeq,
+    aimX: Number.isFinite(aimX) ? aimX : 1,
+    aimY: Number.isFinite(aimY) ? aimY : 0,
+    boost: !!keysHeld.boost, airbrake: !!keysHeld.airbrake, shoot: !!keysHeld.shoot
+  });
+}
 window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });
 
@@ -2133,24 +2550,6 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.fillRect(p.x - w / 2, p.y - 28, w, h);
   ctx.fillStyle = frac > 0.4 ? '#6fe08a' : '#ff6b6b';
   ctx.fillRect(p.x - w / 2, p.y - 28, w * frac, h);
-}
-
-function drawCoin(ctx, c, now) {
-  const bob = Math.sin(now / 300 + c.x) * 2;
-  ctx.save();
-  ctx.translate(c.x, c.y + bob);
-  ctx.fillStyle = '#ffd166';
-  ctx.strokeStyle = '#a9700a';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  for (let i = 0; i < 5; i++) {
-    const a1 = (Math.PI * 2 * i) / 5 - Math.PI / 2;
-    const a2 = a1 + Math.PI / 5;
-    ctx.lineTo(Math.cos(a1) * 8, Math.sin(a1) * 8);
-    ctx.lineTo(Math.cos(a2) * 3.2, Math.sin(a2) * 3.2);
-  }
-  ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.restore();
 }
 
 function drawBullet(ctx, b) {
@@ -2594,7 +2993,6 @@ function render(now) {
   ctx.moveTo(0, 0); ctx.lineTo(WORLD_W, 0);
   ctx.stroke();
 
-  coins.forEach(c => drawCoin(ctx, c, now));
   flares.forEach(f => drawFlare(ctx, f, now));
   bullets.forEach(b => drawBullet(ctx, b));
   missiles.forEach(m => drawMissile(ctx, m));
@@ -2631,10 +3029,6 @@ function drawMinimap(now) {
   ctx.fillStyle = 'rgba(31,95,143,0.7)';
   ctx.fillRect(0, GROUND_Y * scaleY, W, H - GROUND_Y * scaleY);
 
-  coins.forEach(c => {
-    ctx.fillStyle = '#ffd166';
-    ctx.fillRect(c.x * scaleX - 1, c.y * scaleY - 1, 2, 2);
-  });
   Object.values(players).forEach(p => {
     if (p.connected === false || p.alive === false) return;
     ctx.fillStyle = p.id === myId ? '#fff' : (p.color || colorFor(p.id));
@@ -2691,7 +3085,9 @@ function loopFrame(ts) {
   const dtSec = dt / 1000;
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
-  updateLocalPlane(dtSec, keysHeld);
+  if (isHost || botMode) updateLocalPlane(dtSec, keysHeld);
+  else sendClientInput(ts);
+  updateNetworkPlayers(dtSec, ts);
   updateBots(dtSec, ts);
   const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
   currentCameraFovMult += (fovTarget - currentCameraFovMult) * clamp(dtSec * HIGH_SPEED_FOV_SMOOTHING, 0, 1);
@@ -2705,15 +3101,14 @@ function loopFrame(ts) {
   updateBombs(dtSec);
   updateShrapnels(dtSec);
   updateFlares(dtSec);
+  updateHostCombat();
   updateBotHits();
   updateSpecialEffects(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
-  hostMaybeSpawnCoin(ts);
-
   if (ts - lastBroadcast > 66) {
     lastBroadcast = ts;
-    sendEvent({ type: 'state', x: myState.x, y: myState.y, angle: myState.angle, health: myState.health, alive: myState.alive, falling: myState.falling, stalled: myState.stalled, boosting: myState.boosting, roll: myState.roll });
+    if (isHost) broadcastAuthoritativeSnapshot();
   }
 
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';
@@ -2778,6 +3173,7 @@ window.addEventListener('DOMContentLoaded', () => {
   bombCountEl = document.getElementById('bombCount');
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
+  networkStatusEl = document.getElementById('networkStatus');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');

@@ -1,6 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 :root{--cursor-hidden:1}
 .bot-count-setting{display:flex;justify-content:space-between;align-items:center;margin-top:7px;color:#8eb4c9;font:10px 'Space Mono',monospace;letter-spacing:1px}.bot-count-setting output{color:var(--cyan);font-size:12px}.bot-count-slider{width:100%;height:5px;padding:0;accent-color:var(--cyan);cursor:pointer;background:rgba(0,0,0,.35);border:0;box-shadow:none}.bot-count-slider:focus{box-shadow:0 0 0 3px rgba(110,231,255,.1)}
+#networkStatus{position:absolute;right:24px;bottom:124px;z-index:3;color:#9fc7c8;font:9px 'Space Mono',monospace;letter-spacing:1px;opacity:.72;pointer-events:none;text-shadow:0 0 8px rgba(115,224,210,.25)}#networkStatus[data-tone="warn"]{color:#ffc47a}#networkStatus[data-tone="bad"]{color:#ff887c}
 /* v1.15 vector-cockpit art direction: simple geometry, restrained glow,
    consistent borders, and one cyan system accent with amber weapons. */
 :root{--ink:#edf7f6;--muted:#8ca6ae;--cyan:#73e0d2;--orange:#f2b766;--panel:rgba(9,24,30,.84);--line:rgba(165,220,214,.22)}
