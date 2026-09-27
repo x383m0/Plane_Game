@@ -89,11 +89,16 @@ bursts beat holding the trigger. Heat drains when you let off fire and drains
 faster after overheating. In multiplayer the host owns each player's heat and
 fire cooldown.
 
-## Known limitations
-- Press **F2** during a sortie to open the local diagnostics console. It shows
+## Diagnostics and known limitations
+- Click **LOGS** at any time, or press **F2**, to open the local diagnostics
+  console. It shows
   the PeerJS connection, last network activity, input sequence/age, player
   coordinates, and runtime errors. **Copy Log** or **Download** can be used to
   send the report for troubleshooting; logs stay on the current device.
+- The host now repairs incomplete remote player state, advances joiners through
+  normal flight and gravity, and keeps the falling/crashing state authoritative.
+  Remote crashes can also be finished by a confirmed bullet hit instead of
+  becoming an immortal falling plane.
 - Fixed: shots fired by anyone other than the host used to be invisible to
   the host and couldn't damage it — the host relayed those shots to other
   clients but never added them to its own local bullet list. It now does.

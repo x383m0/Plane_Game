@@ -139,7 +139,7 @@ const seenImpactKeys = new Set();
 let lastNetworkActivityAt = 0;
 const DEBUG_LOG_LIMIT = 300;
 let debugLogs = [];
-let debugPanelEl, debugSummaryEl, debugLogEl, debugActionStatusEl;
+let debugPanelEl, debugSummaryEl, debugLogEl, debugActionStatusEl, debugToggleEl;
 let debugPanelOpen = false;
 let lastDebugRenderAt = 0;
 let lastDebugNoConnectionLogAt = 0;
@@ -170,6 +170,9 @@ function pointSegmentDistance(px, py, x1, y1, x2, y2) {
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 function colorFor(id) { return COLORS[id % COLORS.length]; }
+function samePlayerId(a, b) {
+  return a === b || (a != null && b != null && String(a) === String(b));
+}
 // Shortest signed angular distance from `from` to `to`, in (-PI, PI].
 function angleDiff(from, to) {
   let d = (to - from) % (Math.PI * 2);
@@ -432,7 +435,7 @@ function debugSummaryText() {
   ];
   if (isHost) {
     const remoteInputs = Object.values(players)
-      .filter(p => p.id !== myId && p.connected !== false)
+      .filter(p => !samePlayerId(p.id, myId) && p.connected !== false)
       .map(p => {
         const age = p.networkInputAt ? Math.round(now - p.networkInputAt) + 'ms' : 'never';
         const state = Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.speed)
@@ -656,6 +659,49 @@ function freshPlayerState(id, name) {
     hostLockTargetId: null, hostLockProgress: 0, hostLockExpiresAt: 0,
     color: colorFor(id), invulnUntil: performance.now() + INVULN_TIME
   };
+}
+
+// Roster packets from older builds only contained display fields. Keep the
+// host's simulation usable even if a player object was created before the
+// current room code was loaded or a partial roster arrived first.
+function ensureNetworkPlayerState(p) {
+  if (!p) return null;
+  if (p.connected == null) p.connected = true;
+  if (p.alive == null) p.alive = true;
+  if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+    const point = randomSpawnPoint();
+    p.x = point.x; p.y = point.y; p.tx = point.x; p.ty = point.y; p.synced = false;
+  }
+  if (!Number.isFinite(p.angle)) p.angle = 0;
+  if (!Number.isFinite(p.speed) || (p.alive !== false && !p.falling && p.speed < 1)) p.speed = PLANE_SPEED;
+  if (!Number.isFinite(p.verticalVelocity)) p.verticalVelocity = 0;
+  if (!Number.isFinite(p.turnVelocity)) p.turnVelocity = 0;
+  if (!Number.isFinite(p.health)) p.health = MAX_HEALTH;
+  if (!Number.isFinite(p.boost)) p.boost = BOOST_MAX;
+  if (!Number.isFinite(p.heat)) p.heat = 0;
+  if (!Number.isFinite(p.fireTimer)) p.fireTimer = 0;
+  if (!Number.isFinite(p.missileCooldown)) p.missileCooldown = 0;
+  if (!Number.isFinite(p.missileRegenTimer)) p.missileRegenTimer = 0;
+  if (!Number.isFinite(p.bombCooldown)) p.bombCooldown = 0;
+  if (!Number.isFinite(p.bombRegenTimer)) p.bombRegenTimer = 0;
+  if (!Number.isFinite(p.flareCooldown)) p.flareCooldown = 0;
+  if (!Number.isFinite(p.flareRegenTimer)) p.flareRegenTimer = 0;
+  if (!Number.isFinite(p.missiles)) p.missiles = MISSILE_MAX;
+  if (!Number.isFinite(p.bombs)) p.bombs = BOMB_MAX;
+  if (!Number.isFinite(p.flares)) p.flares = FLARE_MAX;
+  if (p.falling == null) p.falling = false;
+  if (p.stalled == null) p.stalled = false;
+  if (p.respawnAt == null) p.respawnAt = 0;
+  if (!Number.isFinite(p.barrelRollCooldown)) p.barrelRollCooldown = 0;
+  if (!Number.isFinite(p.barrelRollUntil)) p.barrelRollUntil = 0;
+  if (!Number.isFinite(p.barrelRollDirection)) p.barrelRollDirection = 1;
+  if (!p.networkInput || typeof p.networkInput !== 'object') {
+    p.networkInput = { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false };
+  }
+  if (!Number.isInteger(p.networkInputSeq)) p.networkInputSeq = 0;
+  if (!Number.isFinite(p.networkInputAt)) p.networkInputAt = performance.now();
+  if (!Number.isInteger(p.networkActionSeq)) p.networkActionSeq = 0;
+  return p;
 }
 
 // ================= Local plane simulation =================
@@ -1781,6 +1827,7 @@ function updateBotHits() {
 // damage. They submit input and one-shot actions; the host advances these
 // states and broadcasts the result.
 function respawnNetworkPlayer(p) {
+  ensureNetworkPlayerState(p);
   const point = randomSpawnPoint();
   p.x = point.x; p.y = point.y; p.angle = rand(0, Math.PI * 2);
   p.health = MAX_HEALTH; p.alive = true; p.connected = true;
@@ -1798,11 +1845,14 @@ function respawnNetworkPlayer(p) {
 }
 
 function beginRemoteDeathFall(p, killerId, message = 'Aircraft disabled') {
+  ensureNetworkPlayerState(p);
   if (!p || !p.alive || p.falling) return;
   p.health = 0; p.falling = true; p.stalled = false; p.boosting = false;
   p.deathKiller = killerId; p.speed = 0; p.turnVelocity = 0;
   p.verticalVelocity = Math.max(45, p.verticalVelocity);
   p.fallSpinVelocity = STALL_SPIN_SPEED * (p.id % 2 ? 1 : -1);
+  p.networkInput = { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false };
+  p.networkInputAt = 0;
   p.deathMessage = message;
 }
 
@@ -1814,9 +1864,12 @@ function finishRemoteDeath(p) {
 }
 
 function updateRemoteDeathFall(p, dtSec) {
+  ensureNetworkPlayerState(p);
+  if (!p || !p.alive || !p.falling) return;
   p.verticalVelocity += FALL_GRAVITY * dtSec;
   p.speed = 0; p.turnVelocity = 0;
   p.roll += p.fallSpinVelocity * dtSec;
+  p.x = clamp(p.x, 30, WORLD_W - 30);
   p.y += p.verticalVelocity * dtSec;
   if (p.y >= GROUND_Y - 12) finishRemoteDeath(p);
 }
@@ -1864,11 +1917,12 @@ function updateHostLock(p, dtSec) {
 }
 
 function updateOneNetworkPlayer(p, dtSec, now) {
-  if (!p || p.isBot || p.id === myId || p.connected === false) return;
+  if (!p || p.isBot || samePlayerId(p.id, myId) || p.connected === false) return;
+  ensureNetworkPlayerState(p);
   // Recover safely if a player object came from an older room/session or a
   // partially delivered roster. Without these defaults, undefined physics
   // values become NaN and the client rejects every authoritative position.
-  if (!Number.isFinite(p.speed)) p.speed = PLANE_SPEED;
+  if (!Number.isFinite(p.speed) || (p.alive !== false && !p.falling && p.speed < 1)) p.speed = PLANE_SPEED;
   if (!Number.isFinite(p.verticalVelocity)) p.verticalVelocity = 0;
   if (!Number.isFinite(p.turnVelocity)) p.turnVelocity = 0;
   if (!Number.isFinite(p.heat)) p.heat = 0;
@@ -1931,6 +1985,11 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   p.y += Math.sin(p.angle) * Math.max(0, p.speed) * dtSec + p.verticalVelocity * dtSec;
   if (p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
 
+  if (!p.debugSimulationSeen) {
+    p.debugSimulationSeen = true;
+    debugLog('SIM', 'Host advanced remote player', { id: p.id, x: Math.round(p.x), y: Math.round(p.y), speed: Math.round(p.speed) });
+  }
+
   if (p.overheated) {
     p.heat = Math.max(0, p.heat - HEAT_DECAY_OVERHEAT * dtSec);
     if (p.heat <= HEAT_MAX * OVERHEAT_RESET_FRAC) p.overheated = false;
@@ -1960,7 +2019,14 @@ function updateNetworkPlayers(dtSec, now) {
 }
 
 function applyHostDamage(target, amount, killerId) {
-  if (!target || !target.alive || target.falling || performance.now() < (target.invulnUntil || 0)) return;
+  if (!target || !target.alive || performance.now() < (target.invulnUntil || 0)) return;
+  if (target.falling) {
+    // A crashing remote aircraft must still be finishable. The old host path
+    // ignored all damage once `falling` was set, leaving joiners immortal if
+    // their fall state failed to reach the water.
+    finishRemoteDeath(target);
+    return;
+  }
   target.health -= amount;
   if (target.health <= 0) beginRemoteDeathFall(target, killerId);
 }
@@ -1969,10 +2035,14 @@ function updateHostCombat() {
   if (!isHost || botMode || !started) return;
   const now = performance.now();
   Object.values(players).forEach(target => {
-    if (!target.alive || target.falling || now < (target.invulnUntil || 0)) return;
+    ensureNetworkPlayerState(target);
+    // The local host is damaged by updateLocalPlane(). Host combat owns only
+    // connected remote pilots; handling the local plane here would double-hit
+    // it and makes the two authority paths disagree.
+    if (samePlayerId(target.id, myId) || target.connected === false || !target.alive || now < (target.invulnUntil || 0)) return;
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
-      if (b.ownerId === target.id) continue;
+      if (samePlayerId(b.ownerId, target.id)) continue;
       if (pointSegmentDistance(target.x, target.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) >= HIT_RADIUS) continue;
       removeProjectileLocal('bullet', b.id); spawnExplosion(b.x, b.y, 'spark', b.angle);
       broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: b.y });
@@ -1983,7 +2053,7 @@ function updateHostCombat() {
     if (!target.alive || target.falling) return;
     for (let i = missiles.length - 1; i >= 0; i--) {
       const m = missiles[i];
-      if (m.ownerId === target.id || (m.targetId != null && m.targetId !== target.id)) continue;
+      if (samePlayerId(m.ownerId, target.id) || (m.targetId != null && !samePlayerId(m.targetId, target.id))) continue;
       if (dist(target.x, target.y, m.x, m.y) >= MISSILE_HIT_RADIUS) continue;
       removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
       broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.x, y: m.y });
@@ -1995,7 +2065,8 @@ function updateHostCombat() {
     const s = shrapnels[i];
     let hit = false;
     Object.values(players).forEach(target => {
-      if (hit || target.id === s.ownerId || !target.alive || target.falling || now < (target.invulnUntil || 0)) return;
+      ensureNetworkPlayerState(target);
+      if (hit || samePlayerId(target.id, s.ownerId) || samePlayerId(target.id, myId) || !target.alive || target.connected === false || now < (target.invulnUntil || 0)) return;
       if (pointSegmentDistance(target.x, target.y, s.prevX ?? s.x, s.prevY ?? s.y, s.x, s.y) >= SHRAPNEL_HIT_RADIUS) return;
       hit = true;
       const hitAngle = Math.atan2(s.vy, s.vx);
@@ -2129,14 +2200,14 @@ function broadcastRoster() {
 function handleHostReceive(fromId, data) {
   lastNetworkActivityAt = performance.now();
   if (!data || typeof data.type !== 'string') return;
-  if (fromId !== myId && (!players[fromId] || players[fromId].connected === false)) return;
+  if (!samePlayerId(fromId, myId) && (!players[fromId] || players[fromId].connected === false)) return;
   // A client may submit only input/actions. World state, projectile spawns,
   // impacts, deaths, and effects are host-owned and cannot be claimed by a
   // remote packet.
-  if (fromId !== myId && ['state', 'shoot', 'missile', 'bomb', 'flare', 'sonicBoom', 'impact', 'died'].includes(data.type)) return;
+  if (!samePlayerId(fromId, myId) && ['state', 'shoot', 'missile', 'bomb', 'flare', 'sonicBoom', 'impact', 'died'].includes(data.type)) return;
   if (data.type === 'input') handleClientInput(fromId, data);
   else if (data.type === 'action') handleClientAction(fromId, data);
-  else if (data.type === 'state') { if (fromId === myId) handleState(fromId, data); }
+  else if (data.type === 'state') { if (samePlayerId(fromId, myId)) handleState(fromId, data); }
   else if (data.type === 'shoot') handleShoot(fromId, data);
   else if (data.type === 'missile') handleMissile(fromId, data);
   else if (data.type === 'bomb') handleBomb(fromId, data);
@@ -2154,7 +2225,8 @@ function validNetworkInput(data) {
 
 function handleClientInput(fromId, data) {
   const p = players[fromId];
-  if (!p || fromId === myId || !validNetworkInput(data) || data.seq <= (p.networkInputSeq || 0)) return;
+  if (!p || samePlayerId(fromId, myId) || !validNetworkInput(data) || data.seq <= (p.networkInputSeq || 0)) return;
+  ensureNetworkPlayerState(p);
   p.networkInputSeq = data.seq;
   p.networkInputAt = performance.now();
   if (!p.debugInputSeen) {
@@ -2170,7 +2242,8 @@ function handleClientInput(fromId, data) {
 
 function handleClientAction(fromId, data) {
   const p = players[fromId];
-  if (!p || fromId === myId || !Number.isInteger(data.seq) || data.seq <= (p.networkActionSeq || 0)) return;
+  if (!p || samePlayerId(fromId, myId) || !Number.isInteger(data.seq) || data.seq <= (p.networkActionSeq || 0)) return;
+  ensureNetworkPlayerState(p);
   p.networkActionSeq = data.seq;
   const action = data.action || {};
   if (!p.alive && action.type !== 'testReset') return;
@@ -2213,13 +2286,14 @@ function applyRemoteState(p, data) {
     }
     return;
   }
+  ensureNetworkPlayerState(p);
   if (!p.synced) {
     // First update we've ever gotten for this player: snap immediately so
     // it doesn't visibly slide in from its placeholder spawn point.
     p.x = data.x; p.y = data.y; p.angle = data.angle;
     p.synced = true;
   }
-  if (p.id === myId) {
+  if (samePlayerId(p.id, myId)) {
     // The local network player is rendered directly from the host snapshot;
     // remote pilots use interpolation below. Leaving this branch out makes
     // the player's camera remain at the spawn point while the minimap moves.
@@ -2241,7 +2315,7 @@ function applyRemoteState(p, data) {
     p.hostLockRemaining = data.lockRemaining || 0;
     p.hostLockUpdatedAt = performance.now();
   }
-  if (p.id === myId && respawnOverlay) {
+  if (samePlayerId(p.id, myId) && respawnOverlay) {
     if (p.alive === false) {
       respawnOverlay.style.display = 'flex';
       respawnMsgEl.textContent = 'AIRCRAFT LOST';
@@ -2322,7 +2396,7 @@ function handleShoot(fromId, data) {
   // when the host is the shooter (fromId === myId) since fireBullet() already
   // added it there.
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle)) return;
-  if (fromId !== myId && data.id != null && !projectileExists('bullet', data.id)) {
+  if (!samePlayerId(fromId, myId) && data.id != null && !projectileExists('bullet', data.id)) {
     bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
     spawnExplosion(data.x, data.y, 'muzzle');
   }
@@ -2333,7 +2407,7 @@ function handleShoot(fromId, data) {
 
 function handleMissile(fromId, data) {
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle)) return;
-  if (fromId !== myId && data.id != null && !projectileExists('missile', data.id)) {
+  if (!samePlayerId(fromId, myId) && data.id != null && !projectileExists('missile', data.id)) {
     missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
     spawnExplosion(data.x, data.y, 'launch');
     playMissileLaunchSound(data.x, data.y);
@@ -2345,7 +2419,7 @@ function handleMissile(fromId, data) {
 
 function handleBomb(fromId, data) {
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.vx) || !Number.isFinite(data.vy)) return;
-  if (fromId !== myId && data.id != null && !projectileExists('bomb', data.id)) {
+  if (!samePlayerId(fromId, myId) && data.id != null && !projectileExists('bomb', data.id)) {
     bombs.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
   }
   Object.entries(connections).forEach(([id, c]) => {
@@ -2354,7 +2428,7 @@ function handleBomb(fromId, data) {
 }
 
 function handleFlare(fromId, data) {
-  if (fromId !== myId) {
+  if (!samePlayerId(fromId, myId)) {
     spawnFlareSalvo(data.x, data.y, data.angle || 0, fromId);
   }
   Object.entries(connections).forEach(([id, c]) => {
@@ -2363,7 +2437,7 @@ function handleFlare(fromId, data) {
 }
 
 function handleSonicBoom(fromId, data) {
-  if (fromId !== myId) triggerSonicBoom(data.x, data.y, data.angle || 0);
+  if (!samePlayerId(fromId, myId)) triggerSonicBoom(data.x, data.y, data.angle || 0);
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'sonicBoom', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
   });
@@ -2381,7 +2455,7 @@ function handleRemoteEffect(data) {
 function handleImpact(fromId, data) {
   if (!data || data.id == null || !['bullet', 'missile', 'bomb'].includes(data.kind) ||
       !Number.isFinite(data.x) || !Number.isFinite(data.y) || !rememberImpact(data.kind, data.id)) return;
-  if (fromId !== myId) {
+  if (!samePlayerId(fromId, myId)) {
     if (data.kind === 'bomb') {
       const bomb = bombs.find(b => b.id === data.id);
       if (bomb) detonateBomb(bomb);
@@ -2655,11 +2729,6 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) reset
 function wireKeyboard() {
   document.addEventListener('keydown', e => {
     unlockAudio();
-    if (e.key === 'F2') {
-      e.preventDefault();
-      toggleDebugPanel();
-      return;
-    }
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
       case 'ArrowDown': case 's': case 'S': case 'Shift': keysHeld.airbrake = true; break;
@@ -3354,7 +3423,7 @@ function drawMinimap(now) {
 function interpolateRemotePlayers(dtSec) {
   const t = Math.min(1, REMOTE_SMOOTH * dtSec);
   Object.values(players).forEach(p => {
-    if (p.id === myId || p.isBot || p.connected === false || p.tx === undefined) return;
+    if (samePlayerId(p.id, myId) || p.isBot || p.connected === false || p.tx === undefined) return;
     p.x += (p.tx - p.x) * t;
     p.y += (p.ty - p.y) * t;
     p.angle += angleDiff(p.angle, p.tangle) * t;
@@ -3511,10 +3580,18 @@ window.addEventListener('DOMContentLoaded', () => {
   debugSummaryEl = document.getElementById('debugSummary');
   debugLogEl = document.getElementById('debugLog');
   debugActionStatusEl = document.getElementById('debugActionStatus');
+  debugToggleEl = document.getElementById('debugToggle');
   document.getElementById('debugClose').onclick = () => toggleDebugPanel(false);
   document.getElementById('debugCopy').onclick = copyDebugLogs;
   document.getElementById('debugDownload').onclick = downloadDebugLogs;
   document.getElementById('debugClear').onclick = clearDebugLogs;
+  debugToggleEl.onclick = () => toggleDebugPanel();
+  document.addEventListener('keydown', e => {
+    if (e.key === 'F2') {
+      e.preventDefault();
+      toggleDebugPanel();
+    }
+  });
   debugLog('BOOT', 'Diagnostics ready — press F2 during a match');
 
   document.getElementById('hostBtn').onclick = () => { captureName(); startHost(); };
