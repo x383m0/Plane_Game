@@ -20,8 +20,8 @@ const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
 // High-speed flight tuning. The assist only engages after the aircraft has
 // already reached the threshold, so ordinary handling stays unchanged.
 const HIGH_SPEED_THRESHOLD = 600;
-const HIGH_SPEED_ACCELERATION = 78;
-const HIGH_SPEED_MAX_SPEED = 820;
+const HIGH_SPEED_ACCELERATION = 88;
+const HIGH_SPEED_MAX_SPEED = 900;
 const HIGH_SPEED_FOV_MULT = 1.518;
 const HIGH_SPEED_FOV_SMOOTHING = 5.5;
 const SONIC_BOOM_COOLDOWN_MS = 1800;
@@ -40,7 +40,10 @@ const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firi
 
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
 // plane can (so out-turning one alone is hard) but can be decoyed by a flare.
-const MISSILE_SPEED = 920, MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
+const MISSILE_INITIAL_SPEED = 760;
+const MISSILE_MAX_SPEED = 1120;
+const MISSILE_ACCELERATION = 145;
+const MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
 const MISSILE_LOCK_DELAY = 2000;  // continuous facing time required for a lock
 const MISSILE_LOCK_HOLD_MS = 3000; // completed lock remains usable this long
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
@@ -103,7 +106,7 @@ let started = false, coinCounter = 0, nextBulletId = 0, nextMissileId = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
-let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, lockProgressEl, lockProgressFillEl, lockProgressTextEl, speedValueEl, speedNeedleEl, speedFillEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, botsBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -249,24 +252,28 @@ function playSonicBoomSound(x, y) {
   if (volume > .005) playAsset('sonicBoom', volume, .98);
 }
 
-// World-space adaptation of the supplied sonic-boom demo. It is deliberately
-// short and directional: the streaks and vapor trail extend behind the plane,
-// while the pressure wave expands across the flight path.
+// World-space port of the supplied sonic-boom demo. The effect is attached
+// to the aircraft's flight axis, so its shock rings, vapor, and streaks move
+// behind the plane instead of looking like a generic radial explosion.
 class SonicBoomEffect {
   constructor(x, y, angle) {
     this.x = x; this.y = y; this.angle = angle || 0; this.age = 0;
-    this.dead = false; this.maxLife = 1.1;
-    this.rings = [{ delay: 0, life: 0, maxLife: .75, maxR: 210 }, { delay: .09, life: 0, maxLife: .9, maxR: 275 }];
+    this.dead = false; this.maxLife = 1.1; this.shake = 24; this.shakeTime = .3;
+    this.rings = [0, .1].map((delay, i) => ({
+      delay, life: 0, maxLife: .85 + i * .15, maxR: 95 + i * 35
+    }));
     this.vapor = []; this.streaks = [];
     for (let i = 0; i < 22; i++) {
       const a = Math.random() * Math.PI * 2, speed = 30 + Math.random() * 70;
-      this.vapor.push({ x: 0, y: 0, vx: Math.cos(a) * speed - 55, vy: Math.sin(a) * speed * .5,
-        r: 9 + Math.random() * 20, life: 0, maxLife: .5 + Math.random() * .35 });
+      this.vapor.push({ x: 0, y: 0, vx: Math.cos(a) * speed - 55,
+        vy: Math.sin(a) * speed * .5, r: 9 + Math.random() * 20,
+        life: 0, maxLife: .5 + Math.random() * .35 });
     }
     for (let i = 0; i < 18; i++) {
       const a = Math.PI + (Math.random() - .5) * .5, speed = 320 + Math.random() * 260;
-      this.streaks.push({ x: -8, y: (Math.random() - .5) * 70, vx: Math.cos(a) * speed,
-        vy: Math.sin(a) * speed * .15, len: 18 + Math.random() * 30, life: 0, maxLife: .2 + Math.random() * .16 });
+      this.streaks.push({ x: 0, y: (Math.random() - .5) * 70, a,
+        vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * .15,
+        len: 18 + Math.random() * 30, life: 0, maxLife: .2 + Math.random() * .16 });
     }
   }
   update(dt) {
@@ -288,9 +295,9 @@ class SonicBoomEffect {
       g.addColorStop(0, '#fff'); g.addColorStop(.5, 'rgba(220,245,255,.7)'); g.addColorStop(1, 'rgba(220,245,255,0)');
       ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0, 0, 70, 42, 0, 0, Math.PI * 2); ctx.fill();
     }
-    this.streaks.forEach(s => { const t = s.life / s.maxLife; ctx.globalAlpha = 1 - t; ctx.strokeStyle = 'rgba(225,248,255,.9)'; ctx.lineWidth = 2 * (1 - t) + .4; ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx / Math.max(1, Math.abs(s.vx)) * s.len, s.y); ctx.stroke(); });
+    this.streaks.forEach(s => { const t = s.life / s.maxLife; ctx.globalAlpha = 1 - t; ctx.strokeStyle = 'rgba(225,248,255,.9)'; ctx.lineWidth = 2 * (1 - t) + .4; ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - Math.cos(s.a) * s.len, s.y - Math.sin(s.a) * s.len); ctx.stroke(); });
     this.vapor.forEach(v => { const t = v.life / v.maxLife; ctx.globalAlpha = (1 - t) * .55; const g = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, v.r); g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(1, 'rgba(255,255,255,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(v.x, v.y, v.r, 0, Math.PI * 2); ctx.fill(); });
-    this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife, eased = 1 - Math.pow(1 - t, 3), rad = eased * r.maxR; ctx.globalAlpha = (1 - t) * .65; ctx.strokeStyle = '#eafcff'; ctx.lineWidth = 5 * (1 - t) + 1; ctx.beginPath(); ctx.ellipse(0, 0, rad, rad * .55, 0, 0, Math.PI * 2); ctx.stroke(); });
+    this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife, eased = 1 - Math.pow(1 - t, 3), rad = 16 + eased * r.maxR; const cx = -(34 + t * 85); ctx.globalAlpha = (1 - t) * .7; ctx.strokeStyle = '#eafcff'; ctx.lineWidth = 5 * (1 - t) + 1; ctx.beginPath(); ctx.ellipse(cx, 0, rad, rad * .4, -.55, 0, Math.PI * 2); ctx.stroke(); });
     ctx.restore();
   }
 }
@@ -1073,12 +1080,13 @@ function fireMissileFor(state, ownerId, targetId = null, replicate = false) {
     id: ownerId + '-m' + (nextMissileId++), ownerId, targetId,
     x: state.x + Math.cos(state.angle) * nose,
     y: state.y + Math.sin(state.angle) * nose,
-    angle: state.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [], exhaust: 1
+    angle: state.angle, speed: MISSILE_INITIAL_SPEED, born: performance.now(),
+    lockReadyAt: performance.now(), trail: [], exhaust: 1
   };
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
   playMissileLaunchSound(m.x, m.y); screenShake = Math.max(screenShake, ownerId === myId ? 7 : 3);
-  if (replicate) sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, locked: true });
+  if (replicate) sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, locked: true });
   return m;
 }
 
@@ -1211,11 +1219,12 @@ function updateMissiles(dtSec) {
       }
     }
 
+    m.speed = Math.min(MISSILE_MAX_SPEED, (Number.isFinite(m.speed) ? m.speed : MISSILE_INITIAL_SPEED) + MISSILE_ACCELERATION * dtSec);
     m.trail.push({ x: m.x, y: m.y });
     if (m.trail.length > 20) m.trail.shift();
 
-    m.x += Math.cos(m.angle) * MISSILE_SPEED * dtSec;
-    m.y += Math.sin(m.angle) * MISSILE_SPEED * dtSec;
+    m.x += Math.cos(m.angle) * m.speed * dtSec;
+    m.y += Math.sin(m.angle) * m.speed * dtSec;
   }
 }
 
@@ -1582,12 +1591,12 @@ function handleShoot(fromId, data) {
 
 function handleMissile(fromId, data) {
   if (fromId !== myId) {
-    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
+    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
     spawnExplosion(data.x, data.y, 'launch');
     playMissileLaunchSound(data.x, data.y);
   }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, locked: true });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: data.speed, locked: true });
   });
 }
 
@@ -1739,7 +1748,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'missile') {
     if (data.from !== myId) {
-      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
+      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
@@ -2233,43 +2242,80 @@ function drawSpeedLines(ctx, now) {
   ctx.restore();
 }
 
-function drawCrosshair(ctx, now) {
-  if (!started || !myState || !myState.alive) return;
-  const x = clamp(mouseX, 18, window.innerWidth - 18);
-  const y = clamp(mouseY, 18, window.innerHeight - 18);
-  const locked = missiles.some(m => m.targetId === myId && m.ownerId !== myId);
-  const boosting = keysHeld.boost && myState.boost > 0;
-  const pulse = 1 + Math.sin(now / 160) * .06;
-  const color = locked ? '#ff6875' : boosting ? '#9cf3ed' : '#bcefff';
-  const glow = locked ? 'rgba(255,70,90,.75)' : boosting ? 'rgba(100,235,255,.65)' : 'rgba(150,235,255,.58)';
-  const gap = 8 * pulse, arm = 15 * pulse, radius = locked ? 23 + Math.sin(now / 100) * 2 : 19;
+function drawLockReticle(ctx, x, y, progress, locked, now, label) {
+  const pulse = 1 + Math.sin(now / (locked ? 105 : 150)) * (locked ? .08 : .035);
+  const outer = (locked ? 30 : 68 - progress * 38) * pulse;
+  const inner = (locked ? 14 : 30 - progress * 14) * pulse;
+  const color = '#ff4d5d';
   ctx.save();
   ctx.translate(x, y);
+  ctx.rotate(locked ? now / 1800 : -now / 2400);
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
-  ctx.shadowColor = glow;
-  ctx.shadowBlur = locked ? 12 : 8;
-  ctx.lineWidth = locked ? 1.8 : 1.35;
+  ctx.shadowColor = 'rgba(255,45,70,.9)';
+  ctx.shadowBlur = locked ? 18 : 12;
+  ctx.lineWidth = locked ? 2 : 1.7;
   ctx.lineCap = 'round';
+
+  // Four contracting brackets create the familiar game-style lock-on read.
+  const bracket = Math.max(7, outer * .27);
   ctx.beginPath();
-  ctx.moveTo(-gap - arm, 0); ctx.lineTo(-gap, 0);
-  ctx.moveTo(gap, 0); ctx.lineTo(gap + arm, 0);
-  ctx.moveTo(0, -gap - arm); ctx.lineTo(0, -gap);
-  ctx.moveTo(0, gap); ctx.lineTo(0, gap + arm);
+  ctx.moveTo(-outer, -outer + bracket); ctx.lineTo(-outer, -outer); ctx.lineTo(-outer + bracket, -outer);
+  ctx.moveTo(outer - bracket, -outer); ctx.lineTo(outer, -outer); ctx.lineTo(outer, -outer + bracket);
+  ctx.moveTo(outer, outer - bracket); ctx.lineTo(outer, outer); ctx.lineTo(outer - bracket, outer);
+  ctx.moveTo(-outer + bracket, outer); ctx.lineTo(-outer, outer); ctx.lineTo(-outer, outer - bracket);
   ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill();
-  if (locked) {
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath(); ctx.arc(0, 0, 31 + Math.sin(now / 90) * 2, 0, Math.PI * 2); ctx.stroke();
-    ctx.setLineDash([]);
-  }
+
+  ctx.setLineDash(locked ? [5, 4] : [3, 6]);
+  ctx.beginPath(); ctx.arc(0, 0, inner, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineWidth = locked ? 2.4 : 1.4;
+  ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0); ctx.moveTo(0, -7); ctx.lineTo(0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, locked ? 3 : 2.2, 0, Math.PI * 2); ctx.fill();
+
+  ctx.rotate(-(locked ? now / 1800 : -now / 2400));
   ctx.shadowBlur = 0;
   ctx.font = '8px Space Mono, monospace';
   ctx.textAlign = 'center';
-  ctx.fillStyle = color;
-  ctx.fillText('GO', 0, 34);
+  ctx.fillText(label, 0, outer + 15);
   ctx.restore();
+}
+
+function drawCrosshair(ctx, now, camX, camY, viewScale) {
+  if (!started || !myState || !myState.alive) return;
+  const hasLock = missileLockTargetId != null && missileLockExpiresAt > now;
+  const targetId = hasLock ? missileLockTargetId : missileLockAcquireId;
+  const target = targetId == null ? null : players[targetId];
+  if (target && target.alive !== false && target.connected !== false) {
+    const W = skyCanvas.width, H = skyCanvas.height;
+    const rawX = (target.x - camX) * viewScale;
+    const rawY = (target.y - camY) * viewScale;
+    const margin = 34;
+    const x = clamp(rawX, margin, W - margin);
+    const y = clamp(rawY, margin, H - margin);
+    const progress = hasLock ? 1 : clamp(missileLockProgress, 0, 1);
+    const label = hasLock
+      ? 'LOCKED ' + Math.max(0, (missileLockExpiresAt - now) / 1000).toFixed(1) + 's'
+      : 'LOCKING ' + Math.round(progress * 100) + '%';
+    drawLockReticle(ctx, x, y, progress, hasLock, now, label);
+    return;
+  }
+
+  // Normal steering crosshair remains visible when no target is being locked.
+  const x = clamp(mouseX, 18, window.innerWidth - 18);
+  const y = clamp(mouseY, 18, window.innerHeight - 18);
+  const boosting = keysHeld.boost && myState.boost > 0;
+  const pulse = 1 + Math.sin(now / 160) * .06;
+  const color = boosting ? '#9cf3ed' : '#bcefff';
+  const glow = boosting ? 'rgba(100,235,255,.65)' : 'rgba(150,235,255,.58)';
+  const gap = 8 * pulse, arm = 15 * pulse, radius = 19;
+  ctx.save(); ctx.translate(x, y); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.shadowColor = glow; ctx.shadowBlur = 8; ctx.lineWidth = 1.35; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-gap - arm, 0); ctx.lineTo(-gap, 0); ctx.moveTo(gap, 0); ctx.lineTo(gap + arm, 0);
+  ctx.moveTo(0, -gap - arm); ctx.lineTo(0, -gap); ctx.moveTo(0, gap); ctx.lineTo(0, gap + arm); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0; ctx.font = '8px Space Mono, monospace'; ctx.textAlign = 'center'; ctx.fillStyle = color; ctx.fillText('GO', 0, 34); ctx.restore();
 }
 
 function drawFlightReticles(ctx, now, camX, camY, viewScale) {
@@ -2353,20 +2399,6 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
   });
 }
 
-function updateLockProgress(now) {
-  if (!lockProgressEl || !myState) return;
-  const hasLock = missileLockTargetId != null && missileLockExpiresAt > now;
-  const hasAcquire = missileLockAcquireId != null;
-  if (!hasLock && !hasAcquire) { lockProgressEl.style.display = 'none'; return; }
-  const progress = hasLock ? 1 : missileLockProgress;
-  lockProgressEl.style.display = 'block';
-  lockProgressFillEl.style.width = (progress * 100) + '%';
-  lockProgressTextEl.textContent = hasLock
-    ? 'LOCKED ' + Math.max(0, (missileLockExpiresAt - now) / 1000).toFixed(1) + 's'
-    : 'LOCKING ' + Math.round(progress * 100) + '%';
-  lockProgressEl.classList.toggle('locked', hasLock);
-}
-
 function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
@@ -2441,7 +2473,7 @@ function render(now) {
   drawFlightReticles(ctx, now, camX, camY, viewScale);
   drawAimAssist(ctx, now, camX, camY, viewScale);
   drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale);
-  drawCrosshair(ctx, now);
+  drawCrosshair(ctx, now, camX, camY, viewScale);
 }
 
 function drawMinimap(now) {
@@ -2543,7 +2575,6 @@ function loop(ts) {
   lastIncomingLock = incomingLock;
   lockWarningEl.style.display = incomingLock ? 'block' : 'none';
   gameArea.classList.toggle('missile-lock', incomingLock);
-  updateLockProgress(ts);
 
   if (!myState.alive && myState.respawnAt) {
     const remain = Math.max(0, myState.respawnAt - performance.now());
@@ -2584,9 +2615,6 @@ window.addEventListener('DOMContentLoaded', () => {
   bombCountEl = document.getElementById('bombCount');
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
-  lockProgressEl = document.getElementById('lockProgress');
-  lockProgressFillEl = document.getElementById('lockProgressFill');
-  lockProgressTextEl = document.getElementById('lockProgressText');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');
