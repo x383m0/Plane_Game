@@ -137,6 +137,12 @@ let activeMapId = 'city';
 let localFlareScheduleGeneration = 0;
 const seenImpactKeys = new Set();
 let lastNetworkActivityAt = 0;
+const DEBUG_LOG_LIMIT = 300;
+let debugLogs = [];
+let debugPanelEl, debugSummaryEl, debugLogEl, debugActionStatusEl;
+let debugPanelOpen = false;
+let lastDebugRenderAt = 0;
+let lastDebugNoConnectionLogAt = 0;
 
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
@@ -383,6 +389,119 @@ function setNetworkStatus(text, tone = 'ok') {
   networkStatusEl.textContent = text;
   networkStatusEl.dataset.tone = tone;
 }
+
+// ================= In-game diagnostics =================
+// The diagnostics console is intentionally local-only. It never sends log
+// contents over PeerJS; it records enough connection/input state to explain
+// issues such as a joiner not sending input or the host rejecting snapshots.
+function debugDetails(details) {
+  if (details == null) return '';
+  if (typeof details === 'string') return ' // ' + details;
+  try { return ' // ' + JSON.stringify(details); } catch (_) { return ' // [details unavailable]'; }
+}
+
+function debugLog(category, message, details = null) {
+  const stamp = new Date().toISOString().slice(11, 23);
+  const line = `[${stamp}] ${String(category).toUpperCase()} ${message}${debugDetails(details)}`;
+  debugLogs.push(line);
+  if (debugLogs.length > DEBUG_LOG_LIMIT) debugLogs.splice(0, debugLogs.length - DEBUG_LOG_LIMIT);
+  console.info('[Wings Arena]', line);
+  if (debugPanelOpen) renderDebugPanel();
+}
+
+function debugConnectionState() {
+  if (isHost) {
+    const open = Object.values(connections).filter(c => c && c.open).length;
+    return `HOST // ${open} client connection(s)`;
+  }
+  const conn = connections.host;
+  return `CLIENT // ${conn && conn.open ? 'host connected' : 'host disconnected'}`;
+}
+
+function debugSummaryText() {
+  const now = performance.now();
+  const local = myState && Number.isFinite(myState.x) && Number.isFinite(myState.y)
+    ? `x=${Math.round(myState.x)} y=${Math.round(myState.y)} speed=${Math.round(myState.speed || 0)} hp=${Math.round(myState.health || 0)}`
+    : 'not spawned';
+  const lines = [
+    `ROLE: ${botMode ? 'SKIRMISH' : isHost ? 'HOST' : 'JOINER'}   ROOM: ${peer?.id || 'none'}`,
+    `LINK: ${debugConnectionState()}   LAST RX: ${lastNetworkActivityAt ? Math.round(now - lastNetworkActivityAt) + 'ms ago' : 'none'}`,
+    `LOCAL: ${local}`,
+    `INPUT TX: seq=${clientInputSeq} last=${lastClientInputSend ? Math.round(now - lastClientInputSend) + 'ms ago' : 'never'}`,
+    `OBJECTS: players=${Object.keys(players).length} bullets=${bullets.length} missiles=${missiles.length} bombs=${bombs.length}`
+  ];
+  if (isHost) {
+    const remoteInputs = Object.values(players)
+      .filter(p => p.id !== myId && p.connected !== false)
+      .map(p => {
+        const age = p.networkInputAt ? Math.round(now - p.networkInputAt) + 'ms' : 'never';
+        const state = Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.speed)
+          ? `x=${Math.round(p.x)} y=${Math.round(p.y)} v=${Math.round(p.speed)}` : 'INVALID STATE';
+        return `${p.name || 'Player ' + (p.id + 1)}#${p.id}: input=${p.networkInputSeq || 0} age=${age} ${state}`;
+      });
+    lines.push('REMOTE INPUTS: ' + (remoteInputs.length ? remoteInputs.join(' | ') : 'none'));
+  } else {
+    lines.push(`HOST SNAPSHOT: ${myState ? 'received' : 'waiting'}   actions=${clientActionSeq}`);
+  }
+  return lines.join('\n');
+}
+
+function renderDebugPanel() {
+  if (!debugPanelEl || !debugSummaryEl || !debugLogEl) return;
+  debugSummaryEl.textContent = debugSummaryText();
+  debugLogEl.textContent = debugLogs.length ? debugLogs.join('\n') : 'No diagnostic events yet.';
+  debugLogEl.scrollTop = debugLogEl.scrollHeight;
+}
+
+function toggleDebugPanel(force) {
+  debugPanelOpen = force == null ? !debugPanelOpen : !!force;
+  if (debugPanelEl) {
+    debugPanelEl.classList.toggle('open', debugPanelOpen);
+    debugPanelEl.setAttribute('aria-hidden', String(!debugPanelOpen));
+  }
+  if (debugPanelOpen) renderDebugPanel();
+}
+
+async function copyDebugLogs() {
+  const text = debugSummaryText() + '\n\n' + (debugLogs.join('\n') || 'No diagnostic events yet.');
+  try {
+    await navigator.clipboard.writeText(text);
+    if (debugActionStatusEl) debugActionStatusEl.textContent = 'Copied';
+  } catch (_) {
+    if (debugActionStatusEl) debugActionStatusEl.textContent = 'Copy blocked — use Download';
+  }
+}
+
+function downloadDebugLogs() {
+  const text = debugSummaryText() + '\n\n' + (debugLogs.join('\n') || 'No diagnostic events yet.');
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = 'wings-arena-log-' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
+  document.body.appendChild(link); link.click(); link.remove();
+  URL.revokeObjectURL(url);
+  if (debugActionStatusEl) debugActionStatusEl.textContent = 'Downloaded';
+}
+
+function clearDebugLogs() {
+  debugLogs = [];
+  if (debugActionStatusEl) debugActionStatusEl.textContent = 'Cleared';
+  renderDebugPanel();
+}
+
+function updateDebugPanel(ts) {
+  if (!debugPanelOpen || ts - lastDebugRenderAt < 250) return;
+  lastDebugRenderAt = ts;
+  renderDebugPanel();
+}
+
+window.addEventListener('error', event => {
+  debugLog('RUNTIME', 'Unhandled window error', { message: event.message, file: event.filename, line: event.lineno });
+});
+window.addEventListener('unhandledrejection', event => {
+  const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
+  debugLog('RUNTIME', 'Unhandled promise rejection', { reason });
+});
 
 // ================= Imported impact effects =================
 // These effects are world-space versions of the five effects supplied in
@@ -1769,6 +1888,10 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   }
   if (p.falling) { updateRemoteDeathFall(p, dtSec); return; }
   const inputFresh = now - (p.networkInputAt || 0) < 350;
+  if (p.debugInputFresh !== inputFresh) {
+    p.debugInputFresh = inputFresh;
+    debugLog('INPUT', inputFresh ? 'Client input resumed' : 'Client input became stale', { id: p.id, seq: p.networkInputSeq || 0 });
+  }
   const input = inputFresh
     ? (p.networkInput || { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false })
     : { aimX: Math.cos(p.angle), aimY: Math.sin(p.angle), boost: false, airbrake: false, shoot: false };
@@ -1888,11 +2011,13 @@ function updateHostCombat() {
 function startHost() {
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
+  debugLog('SESSION', 'Starting host', { name: myName, map: validMapId(mapSelectEl?.value || selectedMapId) });
   setNetworkStatus('P2P // HOSTING', 'ok');
   isHost = true; botMode = false; myId = 0;
   players[0] = freshPlayerState(0, myName);
   peer = new Peer();
   peer.on('error', err => {
+    debugLog('PEER', 'Host peer error', { type: err?.type, message: err?.message });
     const message = err && err.type === 'unavailable-id'
       ? 'That room code is unavailable. Try hosting again.'
       : 'Network error — check the connection and try again.';
@@ -1901,11 +2026,13 @@ function startHost() {
     startBtn.style.display = 'none'; waitHint.style.display = 'block';
   });
   peer.on('disconnected', () => {
+    debugLog('PEER', 'Host signaling disconnected');
     statusEl.textContent = 'Disconnected from the signaling server.';
     setNetworkStatus('P2P // SIGNAL LOST', 'bad');
     startBtn.style.display = 'none'; waitHint.style.display = 'block';
   });
   peer.on('open', id => {
+    debugLog('PEER', 'Host room opened', { id });
     statusEl.textContent = 'Share this code: ' + id;
     setNetworkStatus('HOST // ' + id.slice(0, 8), 'ok');
     chooseRole.style.display = 'none'; lobby.style.display = 'flex';
@@ -1914,22 +2041,26 @@ function startHost() {
   });
   peer.on('connection', c => {
     const id = nextFreeId();
+    debugLog('PEER', 'Incoming connection reserved', { id: id ?? 'full' });
     if (id === null) { c.on('open', () => c.send({ type: 'full' })); return; }
     connections[id] = c;
     players[id] = freshPlayerState(id, 'Player ' + (id + 1));
     players[id].connected = true;
     c.on('open', () => {
+      debugLog('PEER', 'Client connection opened', { id });
       c.send({ type: 'welcome', id });
       if (started) c.send({ type: 'start', mapId: activeMapId });
       broadcastRoster();
     });
     c.on('data', data => handleHostReceive(id, data));
     c.on('close', () => {
+      debugLog('PEER', 'Client connection closed', { id });
       if (players[id]) players[id].connected = false;
       removePlayerArtifacts(id);
       broadcastRoster();
     });
     c.on('error', () => {
+      debugLog('PEER', 'Client connection error', { id });
       if (players[id]) players[id].connected = false;
       removePlayerArtifacts(id);
       broadcastRoster();
@@ -1938,6 +2069,7 @@ function startHost() {
   startBtn.onclick = () => {
     if (started) return;
     activeMapId = validMapId(mapSelectEl?.value || selectedMapId);
+    debugLog('SESSION', 'Host launched match', { map: activeMapId, players: Object.keys(players).length });
     started = true; buildClouds();
     broadcast({ type: 'start', mapId: activeMapId });
     beginLocalGame();
@@ -1946,6 +2078,7 @@ function startHost() {
 
 function startBotMode() {
   unlockAudio();
+  debugLog('SESSION', 'Starting skirmish', { bots: botCountInputEl?.value, map: validMapId(mapSelectEl?.value || selectedMapId) });
   setNetworkStatus('SKIRMISH // LOCAL', 'ok');
   // Bots run locally as a private host-like sortie. No PeerJS connection is
   // created, so starting this mode never interferes with room multiplayer.
@@ -2024,6 +2157,10 @@ function handleClientInput(fromId, data) {
   if (!p || fromId === myId || !validNetworkInput(data) || data.seq <= (p.networkInputSeq || 0)) return;
   p.networkInputSeq = data.seq;
   p.networkInputAt = performance.now();
+  if (!p.debugInputSeen) {
+    p.debugInputSeen = true;
+    debugLog('INPUT', 'First input received from client', { id: fromId, seq: data.seq, aimX: Math.round(data.aimX), aimY: Math.round(data.aimY) });
+  }
   p.networkInput = {
     aimX: clamp(data.aimX, -window.innerWidth * 2, window.innerWidth * 2),
     aimY: clamp(data.aimY, -window.innerHeight * 2, window.innerHeight * 2),
@@ -2068,7 +2205,14 @@ function handleClientAction(fromId, data) {
 // like the game is running at 15fps), we store the update as a target and
 // glide the rendered plane toward it every frame in interpolateRemotePlayers().
 function applyRemoteState(p, data) {
-  if (!p || ![data.x, data.y, data.angle, data.health].every(Number.isFinite)) return;
+  if (!p || ![data.x, data.y, data.angle, data.health].every(Number.isFinite)) {
+    const now = performance.now();
+    if (!p || !p.debugInvalidStateAt || now - p.debugInvalidStateAt > 2000) {
+      if (p) p.debugInvalidStateAt = now;
+      debugLog('STATE', 'Rejected invalid authoritative snapshot', { id: data?.from, x: data?.x, y: data?.y, angle: data?.angle, health: data?.health });
+    }
+    return;
+  }
   if (!p.synced) {
     // First update we've ever gotten for this player: snap immediately so
     // it doesn't visibly slide in from its placeholder spawn point.
@@ -2271,6 +2415,7 @@ function handleDied(fromId, killerId) {
 function startJoin() {
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
+  debugLog('SESSION', 'Starting join', { host: document.getElementById('hostIdInput').value.trim(), name: myName });
   setNetworkStatus('P2P // CONNECTING', 'warn');
   isHost = false;
   botMode = false;
@@ -2278,6 +2423,7 @@ function startJoin() {
   if (!hostId) return;
   peer = new Peer();
   peer.on('error', err => {
+    debugLog('PEER', 'Join peer error', { type: err?.type, message: err?.message });
     const message = err && err.type === 'peer-unavailable'
       ? 'Room not found. Check the room code.'
       : 'Unable to connect to the network.';
@@ -2285,13 +2431,16 @@ function startJoin() {
     chooseRole.style.display = 'flex'; lobby.style.display = 'none';
   });
   peer.on('disconnected', () => {
+    debugLog('PEER', 'Join signaling disconnected');
     statusEl.textContent = 'Disconnected from the signaling server.';
     setNetworkStatus('P2P // SIGNAL LOST', 'bad');
   });
   peer.on('open', () => {
+    debugLog('PEER', 'Join peer opened; connecting to host', { host: hostId });
     const conn = peer.connect(hostId, { reliable: true });
     connections.host = conn;
     conn.on('open', () => {
+      debugLog('PEER', 'Host connection opened');
       chooseRole.style.display = 'none'; lobby.style.display = 'flex';
       statusEl.textContent = 'Connected — waiting for host...';
       setNetworkStatus('P2P // CONNECTED', 'ok');
@@ -2299,11 +2448,13 @@ function startJoin() {
     });
     conn.on('data', handleClientReceive);
     conn.on('error', () => {
+      debugLog('PEER', 'Host connection error');
       statusEl.textContent = 'Connection failed. Check the room code and try again.';
       setNetworkStatus('P2P // ERROR', 'bad');
       chooseRole.style.display = 'flex'; lobby.style.display = 'none';
     });
     conn.on('close', () => {
+      debugLog('PEER', 'Host connection closed');
       if (started) returnToMenuAfterNetworkLoss('Host connection closed. Start or join another room.');
       else {
         statusEl.textContent = 'Host connection closed.';
@@ -2342,6 +2493,7 @@ function handleClientReceive(data) {
   if (data.type === 'full') { statusEl.textContent = 'That lobby is full.'; }
   else if (data.type === 'welcome') {
     myId = data.id;
+    debugLog('SESSION', 'Received player assignment', { id: myId });
     players[myId] = freshPlayerState(myId, myName);
     connections.host.send({ type: 'name', name: myName });
   }
@@ -2352,6 +2504,7 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'start') {
     activeMapId = validMapId(data.mapId);
+    debugLog('SESSION', 'Received match start', { map: activeMapId });
     started = true; buildClouds(); beginLocalGame();
   }
   else if (data.type === 'projectiles') {
@@ -2502,6 +2655,11 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) reset
 function wireKeyboard() {
   document.addEventListener('keydown', e => {
     unlockAudio();
+    if (e.key === 'F2') {
+      e.preventDefault();
+      toggleDebugPanel();
+      return;
+    }
     switch (e.key) {
       case 'ArrowUp': case 'w': case 'W': keysHeld.boost = true; break;
       case 'ArrowDown': case 's': case 'S': case 'Shift': keysHeld.airbrake = true; break;
@@ -3236,6 +3394,7 @@ function loop(ts) {
     if (ts - lastRuntimeErrorAt > 1000) {
       lastRuntimeErrorAt = ts;
       console.error('Wings Arena frame recovered:', error);
+      debugLog('RUNTIME', 'Frame recovered after error', { message: error?.message || String(error) });
     }
     requestAnimationFrame(loop);
   }
@@ -3246,6 +3405,7 @@ function loopFrame(ts) {
   // Exit before HUD/physics code touches the cleared state; a new match will
   // create a fresh animation loop through beginLocalGame().
   if (!started || !myState) return;
+  updateDebugPanel(ts);
   const dt = Math.min(lastTime ? ts - lastTime : 16, 60);
   lastTime = ts;
   const dtSec = dt / 1000;
@@ -3347,6 +3507,15 @@ window.addEventListener('DOMContentLoaded', () => {
   respawnOverlay = document.getElementById('respawnOverlay');
   respawnMsgEl = document.getElementById('respawnMsg');
   respawnTimerEl = document.getElementById('respawnTimer');
+  debugPanelEl = document.getElementById('debugPanel');
+  debugSummaryEl = document.getElementById('debugSummary');
+  debugLogEl = document.getElementById('debugLog');
+  debugActionStatusEl = document.getElementById('debugActionStatus');
+  document.getElementById('debugClose').onclick = () => toggleDebugPanel(false);
+  document.getElementById('debugCopy').onclick = copyDebugLogs;
+  document.getElementById('debugDownload').onclick = downloadDebugLogs;
+  document.getElementById('debugClear').onclick = clearDebugLogs;
+  debugLog('BOOT', 'Diagnostics ready — press F2 during a match');
 
   document.getElementById('hostBtn').onclick = () => { captureName(); startHost(); };
   document.getElementById('joinBtn').onclick = () => { captureName(); startJoin(); };
