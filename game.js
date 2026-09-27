@@ -14,6 +14,14 @@ const GRAVITY_ACCEL = 180;        // very forgiving climb penalty; diving still 
 const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
 const TOP_BOUNDARY_DEPTH = 260;
 const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
+// High-speed flight tuning. The assist only engages after the aircraft has
+// already reached the threshold, so ordinary handling stays unchanged.
+const HIGH_SPEED_THRESHOLD = 600;
+const HIGH_SPEED_ACCELERATION = 78;
+const HIGH_SPEED_MAX_SPEED = 820;
+const HIGH_SPEED_FOV_MULT = 1.32;
+const HIGH_SPEED_FOV_SMOOTHING = 5.5;
+const SONIC_BOOM_COOLDOWN_MS = 1800;
 const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
 const BARREL_ROLL_DURATION = 720, BARREL_ROLL_SPEED = Math.PI * 2.8, BARREL_ROLL_COOLDOWN = 900;
 const STALL_SPIN_SPEED = 5.2, FALL_GRAVITY = 420;
@@ -30,17 +38,18 @@ const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firi
 // Homing missiles: limited ammo, regenerates slowly, turns faster than a
 // plane can (so out-turning one alone is hard) but can be decoyed by a flare.
 const MISSILE_SPEED = 920, MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
-const MISSILE_LOCK_DELAY = 850;   // time facing a target before right-click can fire
+const MISSILE_LOCK_DELAY = 2000;  // continuous facing time required for a lock
+const MISSILE_LOCK_HOLD_MS = 3000; // completed lock remains usable this long
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = 800, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
 const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS = 42;
 
-// Flares: a limited-charge countermeasure that breaks a missile's lock if
-// it's fired within FLARE_BREAK_RADIUS of the missile at the moment of use.
+// Flares: a limited-charge countermeasure that redirects a locked missile
+// within FLARE_BREAK_RADIUS onto the actual moving flare.
 const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
 const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
-const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each flare wave; easy to tune
+const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each two-sided flare wave
 const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30% HP
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
@@ -90,7 +99,10 @@ let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let lastSpawnTick = 0;
 let audioCtx = null, masterGain = null;
 let audioBank = {}, audioAssetsStarted = false;
+let engineCruiseAudio = null, engineBoostAudio = null;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
+let currentCameraFovMult = CAMERA_FOV_MULT;
+let localFlareScheduleGeneration = 0;
 
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
@@ -102,6 +114,9 @@ const AUDIO_ASSETS = {
   flare: 'freesound_community-firecracker-104159.mp3',
   chaff: 'chaff_flare.mp3',
   lock: 'lock-alarm.ogg',
+  cruise: 'airplane-cruise.mp3',
+  boost: 'airplane-boost.mp3',
+  sonicBoom: 'sonic-boom.mp3',
 };
 
 // ================= World helpers =================
@@ -140,6 +155,32 @@ function unlockAudio() {
     Object.entries(AUDIO_ASSETS).forEach(([name, src]) => {
       const a = new Audio(src); a.preload = 'auto'; audioBank[name] = a;
     });
+  }
+}
+function ensureEngineAudio() {
+  if (!audioAssetsStarted || engineCruiseAudio || !audioBank.cruise) return;
+  engineCruiseAudio = audioBank.cruise.cloneNode();
+  engineCruiseAudio.loop = true; engineCruiseAudio.volume = 0;
+  engineBoostAudio = audioBank.boost.cloneNode();
+  engineBoostAudio.loop = true; engineBoostAudio.volume = 0;
+}
+function updateEngineAudio() {
+  if (!audioAssetsStarted) return;
+  ensureEngineAudio();
+  if (!engineCruiseAudio || !engineBoostAudio) return;
+  const active = !!(myState && myState.alive);
+  const boosting = active && !!myState.boosting;
+  const cruiseTarget = active ? (boosting ? .04 : .18) : 0;
+  const boostTarget = boosting ? .25 : 0;
+  // Smooth the mix so boost input does not create clicks or abrupt volume
+  // jumps when the player taps the key near the speed threshold.
+  engineCruiseAudio.volume += (cruiseTarget - engineCruiseAudio.volume) * .18;
+  engineBoostAudio.volume += (boostTarget - engineBoostAudio.volume) * .18;
+  if (active) {
+    if (engineCruiseAudio.paused) engineCruiseAudio.play().catch(() => {});
+    if (engineBoostAudio.paused) engineBoostAudio.play().catch(() => {});
+  } else {
+    engineCruiseAudio.pause(); engineBoostAudio.pause();
   }
 }
 function playAsset(name, volume = .65, rate = 1) {
@@ -188,6 +229,62 @@ function playExplosionSound(kind, x, y) {
   }
 }
 function playLockSound() { if (!playAsset('lock', .22, 1.15)) tone(880, .08, .045, 'square', -220); }
+function playSonicBoomSound(x, y) {
+  const volume = proximityVolume(x, y, .52);
+  if (volume > .005) playAsset('sonicBoom', volume, .98);
+}
+
+// World-space adaptation of the supplied sonic-boom demo. It is deliberately
+// short and directional: the streaks and vapor trail extend behind the plane,
+// while the pressure wave expands across the flight path.
+class SonicBoomEffect {
+  constructor(x, y, angle) {
+    this.x = x; this.y = y; this.angle = angle || 0; this.age = 0;
+    this.dead = false; this.maxLife = 1.1;
+    this.rings = [{ delay: 0, life: 0, maxLife: .75, maxR: 210 }, { delay: .09, life: 0, maxLife: .9, maxR: 275 }];
+    this.vapor = []; this.streaks = [];
+    for (let i = 0; i < 22; i++) {
+      const a = Math.random() * Math.PI * 2, speed = 30 + Math.random() * 70;
+      this.vapor.push({ x: 0, y: 0, vx: Math.cos(a) * speed - 55, vy: Math.sin(a) * speed * .5,
+        r: 9 + Math.random() * 20, life: 0, maxLife: .5 + Math.random() * .35 });
+    }
+    for (let i = 0; i < 18; i++) {
+      const a = Math.PI + (Math.random() - .5) * .5, speed = 320 + Math.random() * 260;
+      this.streaks.push({ x: -8, y: (Math.random() - .5) * 70, vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed * .15, len: 18 + Math.random() * 30, life: 0, maxLife: .2 + Math.random() * .16 });
+    }
+  }
+  update(dt) {
+    this.age += dt;
+    this.rings.forEach(r => { if (r.delay > 0) r.delay -= dt; else r.life += dt; });
+    this.vapor.forEach(v => { v.life += dt; v.x += v.vx * dt; v.y += v.vy * dt; v.vx *= .92; v.vy *= .9; v.r += dt * 26; });
+    this.streaks.forEach(s => { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= .88; s.vy *= .88; });
+    this.rings = this.rings.filter(r => r.life < r.maxLife);
+    this.vapor = this.vapor.filter(v => v.life < v.maxLife);
+    this.streaks = this.streaks.filter(s => s.life < s.maxLife);
+    if (this.age > this.maxLife && !this.rings.length && !this.vapor.length && !this.streaks.length) this.dead = true;
+  }
+  draw(ctx) {
+    ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+    const flashT = Math.min(1, this.age / .1);
+    if (flashT < 1) {
+      ctx.globalAlpha = 1 - flashT;
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 70);
+      g.addColorStop(0, '#fff'); g.addColorStop(.5, 'rgba(220,245,255,.7)'); g.addColorStop(1, 'rgba(220,245,255,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0, 0, 70, 42, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    this.streaks.forEach(s => { const t = s.life / s.maxLife; ctx.globalAlpha = 1 - t; ctx.strokeStyle = 'rgba(225,248,255,.9)'; ctx.lineWidth = 2 * (1 - t) + .4; ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx / Math.max(1, Math.abs(s.vx)) * s.len, s.y); ctx.stroke(); });
+    this.vapor.forEach(v => { const t = v.life / v.maxLife; ctx.globalAlpha = (1 - t) * .55; const g = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, v.r); g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(1, 'rgba(255,255,255,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(v.x, v.y, v.r, 0, Math.PI * 2); ctx.fill(); });
+    this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife, eased = 1 - Math.pow(1 - t, 3), rad = eased * r.maxR; ctx.globalAlpha = (1 - t) * .65; ctx.strokeStyle = '#eafcff'; ctx.lineWidth = 5 * (1 - t) + 1; ctx.beginPath(); ctx.ellipse(0, 0, rad, rad * .55, 0, 0, Math.PI * 2); ctx.stroke(); });
+    ctx.restore();
+  }
+}
+
+function triggerSonicBoom(x, y, angle) {
+  specialEffects.push(new SonicBoomEffect(x, y, angle));
+  screenShake = Math.max(screenShake, 12);
+  playSonicBoomSound(x, y);
+}
 
 function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
   if (kind === 'blast') specialEffects.push(new ImpactExplosion(x, y, 'missile'));
@@ -214,8 +311,11 @@ function updateSpecialEffects(dtSec) { specialEffects.forEach(e => e.update(dtSe
 // tracking locally, so our copy disappears (with an effect) at the same time.
 function removeProjectileLocal(kind, id) {
   const arr = kind === 'missile' ? missiles : kind === 'bomb' ? bombs : bullets;
-  const idx = arr.findIndex(p => p.id === id);
-  if (idx !== -1) arr.splice(idx, 1);
+  // Remove every local copy. This protects against a duplicated network shot
+  // leaving a visual ghost after one copy already caused the damage.
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i].id === id) arr.splice(i, 1);
+  }
 }
 
 // ================= Imported impact effects =================
@@ -365,6 +465,7 @@ function createLocalState() {
     stallTime: 0, stallRecoverTime: 0,
     roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
     falling: false, stalled: false, deathKiller: null, fallSpinVelocity: 0,
+    highSpeedActive: false, sonicBoomReadyAt: 0,
     missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
@@ -382,7 +483,11 @@ function respawnLocal() {
   myState.stallTime = 0;
   myState.roll = 0; myState.barrelRollUntil = 0; myState.barrelRollCooldown = 0; myState.barrelRollDirection = 1;
   myState.falling = false; myState.stalled = false; myState.stallRecoverTime = 0; myState.deathKiller = null; myState.fallSpinVelocity = 0;
+  myState.highSpeedActive = false;
+  myState.sonicBoomReadyAt = 0;
+  localFlareScheduleGeneration++;
   myState.boosting = false;
+  currentCameraFovMult = CAMERA_FOV_MULT;
   myState.missiles = MISSILE_MAX; myState.missileCooldown = 0; myState.missileRegenTimer = 0;
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
@@ -401,6 +506,7 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   myState.falling = true;
   myState.stalled = false;
   myState.boosting = false;
+  localFlareScheduleGeneration++;
   myState.deathKiller = killerId;
   // Once uncontrolled, forward flight physics and steering are disabled. The
   // aircraft must not drift toward the cursor, even if its previous speed was
@@ -486,7 +592,7 @@ function checkFallingHits() {
     const b = bullets[i];
     if (b.ownerId === myId) continue;
     if (pointSegmentDistance(myState.x, myState.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) < HIT_RADIUS) {
-      bullets.splice(i, 1); spawnExplosion(b.x, b.y, 'spark', b.angle);
+      removeProjectileLocal('bullet', b.id); spawnExplosion(b.x, b.y, 'spark', b.angle);
       sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
       finishDeath(b.ownerId, 'Aircraft destroyed'); return;
     }
@@ -495,7 +601,7 @@ function checkFallingHits() {
     const m = missiles[i];
     if (m.ownerId === myId || (m.targetId != null && m.targetId !== myId)) continue;
     if (dist(myState.x, myState.y, m.x, m.y) < MISSILE_HIT_RADIUS) {
-      missiles.splice(i, 1); spawnExplosion(m.x, m.y, 'blast');
+      removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
       sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
       finishDeath(m.ownerId, 'Aircraft destroyed'); return;
     }
@@ -504,7 +610,7 @@ function checkFallingHits() {
     const b = bombs[i];
     if (b.ownerId === myId) continue;
     if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
-      bombs.splice(i, 1); spawnExplosion(b.x, b.y, 'blast');
+      removeProjectileLocal('bomb', b.id); spawnExplosion(b.x, b.y, 'blast');
       sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
       finishDeath(b.ownerId, 'Aircraft destroyed'); return;
     }
@@ -544,7 +650,7 @@ function updateLocalPlane(dtSec, keys) {
   const airbraking = keys.airbrake && !boosting;
   const targetAngle = Math.atan2(mouseY - window.innerHeight / 2, mouseX - window.innerWidth / 2);
   const diff = angleDiff(myState.angle, targetAngle);
-  const speedRatio = clamp(myState.speed / MAX_FLIGHT_SPEED, .2, 1);
+  const speedRatio = clamp(myState.speed / HIGH_SPEED_MAX_SPEED, .2, 1);
   const speedTurnPenalty = .72 + (1 - speedRatio) * .52;
   const turnAuthority = airbraking ? 1.28 : boosting ? BOOST_TURN_MULT : 1;
   const desiredTurn = clamp(diff * 5.5, -TURN_RATE, TURN_RATE) * speedTurnPenalty * turnAuthority;
@@ -573,7 +679,15 @@ function updateLocalPlane(dtSec, keys) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
-  myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight - drag) * dtSec, MIN_FLIGHT_SPEED, MAX_FLIGHT_SPEED);
+  const highSpeedAssist = myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
+  myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight + highSpeedAssist - drag) * dtSec, MIN_FLIGHT_SPEED, HIGH_SPEED_MAX_SPEED);
+  const atHighSpeed = myState.speed >= HIGH_SPEED_THRESHOLD;
+  if (atHighSpeed && !myState.highSpeedActive && performance.now() >= (myState.sonicBoomReadyAt || 0)) {
+    triggerSonicBoom(myState.x, myState.y, myState.angle);
+    sendEvent({ type: 'sonicBoom', x: myState.x, y: myState.y, angle: myState.angle });
+    myState.sonicBoomReadyAt = performance.now() + SONIC_BOOM_COOLDOWN_MS;
+  }
+  myState.highSpeedActive = atHighSpeed;
   // A prolonged climb can push the simulated airspeed below zero. At that
   // point the aircraft is stalled and enters the same uncontrolled state as a
   // disabled plane; from here on, cursor input and negative speed are ignored.
@@ -658,7 +772,7 @@ function updateLocalPlane(dtSec, keys) {
       const b = bullets[i];
       if (b.ownerId === myId) continue;
       if (pointSegmentDistance(myState.x, myState.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) < HIT_RADIUS) {
-        bullets.splice(i, 1);
+        removeProjectileLocal('bullet', b.id);
         spawnExplosion(b.x, b.y, 'spark', b.angle);
         sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
         const rearHit = Math.abs(angleDiff(myState.angle, b.angle)) < Math.PI / 3;
@@ -678,7 +792,7 @@ function updateLocalPlane(dtSec, keys) {
       const b = bombs[i];
       if (b.ownerId === myId) continue;
       if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
-        bombs.splice(i, 1);
+        removeProjectileLocal('bomb', b.id);
         spawnExplosion(b.x, b.y, 'blast');
         sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
         myState.health -= BOMB_DAMAGE;
@@ -698,7 +812,7 @@ function updateLocalPlane(dtSec, keys) {
       if (m.ownerId === myId) continue;
       if (m.targetId != null && m.targetId !== myId) continue;
       if (dist(myState.x, myState.y, m.x, m.y) < MISSILE_HIT_RADIUS) {
-        missiles.splice(i, 1);
+        removeProjectileLocal('missile', m.id);
         spawnExplosion(m.x, m.y, 'blast');
         sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
         myState.health -= MISSILE_DAMAGE;
@@ -769,7 +883,7 @@ function updateBullets(dtSec) {
     const b = bullets[i];
     // Rounds persist indefinitely and are removed only when they reach the sea.
     if (b.y >= GROUND_Y - 8) {
-      spawnExplosion(b.x, GROUND_Y - 8, 'water'); bullets.splice(i, 1); continue;
+      spawnExplosion(b.x, GROUND_Y - 8, 'water'); removeProjectileLocal('bullet', b.id); continue;
     }
     b.prevX = b.x; b.prevY = b.y;
     if (b.vx == null) {
@@ -789,7 +903,7 @@ function updateBombs(dtSec) {
     const b = bombs[i];
     if (now - b.born > BOMB_LIFE || b.y >= GROUND_Y - 8) {
       spawnExplosion(b.x, Math.min(b.y, GROUND_Y - 8), 'blast');
-      bombs.splice(i, 1);
+      removeProjectileLocal('bomb', b.id);
       continue;
     }
     b.vy += BOMB_GRAVITY * dtSec;
@@ -815,22 +929,43 @@ function findMissileLockTarget() {
 }
 
 function updateMissileLock(dtSec) {
-  if (!missileLockHeld || !myState || !myState.alive || myState.falling || myState.missileCooldown > 0 || myState.missiles <= 0) {
-    missileLockTargetId = null;
-    missileLockProgress = 0;
+  const now = performance.now();
+  if (!myState || !myState.alive || myState.falling || myState.missiles <= 0) {
+    missileLockTargetId = null; missileLockAcquireId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
     return;
   }
+
+  // A completed lock remains valid for a short launch window, even if the
+  // player stops looking directly at the target.
+  if (missileLockTargetId != null && now < missileLockExpiresAt) {
+    const locked = players[missileLockTargetId];
+    if (!locked || locked.alive === false || locked.connected === false) {
+      missileLockTargetId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
+    } else {
+      missileLockProgress = 1;
+      return;
+    }
+  }
+  if (missileLockTargetId != null && now >= missileLockExpiresAt) {
+    missileLockTargetId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
+  }
+
   const targetId = findMissileLockTarget();
   if (targetId == null) {
-    missileLockTargetId = null;
+    missileLockAcquireId = null;
     missileLockProgress = 0;
     return;
   }
-  if (targetId !== missileLockTargetId) {
-    missileLockTargetId = targetId;
+  if (targetId !== missileLockAcquireId) {
+    missileLockAcquireId = targetId;
     missileLockProgress = 0;
   }
   missileLockProgress = clamp(missileLockProgress + dtSec * 1000 / MISSILE_LOCK_DELAY, 0, 1);
+  if (missileLockProgress >= 1) {
+    missileLockTargetId = targetId;
+    missileLockAcquireId = null;
+    missileLockExpiresAt = now + MISSILE_LOCK_HOLD_MS;
+  }
 }
 
 function tryFireMissile() {
@@ -842,7 +977,7 @@ function tryFireMissile() {
   // Releasing before the lock completes still fires, but the missile is
   // dumb/unguided. A completed facing lock is the only thing that grants a
   // target and homing behavior.
-  const targetId = missileLockProgress >= 1 ? missileLockTargetId : null;
+  const targetId = missileLockTargetId != null && missileLockExpiresAt > performance.now() ? missileLockTargetId : null;
   const nose = 22;
   const m = {
     id: myId + '-m' + (nextMissileId++), ownerId: myId, targetId,
@@ -854,8 +989,6 @@ function tryFireMissile() {
   spawnExplosion(m.x, m.y, 'launch');
   playMissileLaunchSound(); screenShake = Math.max(screenShake, 7);
   sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, locked: true });
-  missileLockTargetId = null;
-  missileLockProgress = 0;
 }
 
 function tryDeployFlare() {
@@ -869,14 +1002,13 @@ function tryDeployFlare() {
 }
 
 function spawnFlareSalvo(x, y, angle, ownerId = myId) {
-  const launchCount = FLARE_SALVO_COUNT * 2;
-  for (let launchIndex = 0; launchIndex < launchCount; launchIndex++) {
-    const side = launchIndex % 2 === 0 ? -1 : 1;
-    const flareNumber = Math.floor(launchIndex / 2);
+  const scheduleGeneration = ownerId === myId ? localFlareScheduleGeneration : null;
+  for (let flareNumber = 0; flareNumber < FLARE_SALVO_COUNT; flareNumber++) {
     // Only create the flare at its launch time. Previously all objects were
     // inserted immediately with future timestamps, which made the salvo look
     // like every flare spawned on top of the first one.
     setTimeout(() => {
+      if (ownerId === myId && scheduleGeneration !== localFlareScheduleGeneration) return;
       const born = performance.now();
       // Re-read the aircraft at launch time. This makes every flare originate
       // from the plane's current position, even while the plane is turning or
@@ -889,30 +1021,33 @@ function spawnFlareSalvo(x, y, angle, ownerId = myId) {
       const launchAngle = Number.isFinite(source.angle) ? source.angle : angle;
       const sideX = -Math.sin(launchAngle), sideY = Math.cos(launchAngle);
       const rearX = -Math.cos(launchAngle), rearY = -Math.sin(launchAngle);
-      const f = {
-        x: launchX + sideX * side * 10,
-        y: launchY + sideY * side * 10,
-        vx: sideX * side * (35 + flareNumber * 7) + rearX * 55,
-        vy: sideY * side * (35 + flareNumber * 7) + rearY * 55,
-        born
-      };
-      flares.push(f);
-      resolveFlare(ownerId, f.x, f.y);
-      const volume = proximityVolume(f.x, f.y, .18);
-      if (volume > .005) playAsset('flare', volume, 1.02 + flareNumber * .015);
-    }, launchIndex * FLARE_SPAWN_INTERVAL_MS);
+      [-1, 1].forEach(side => {
+        const f = {
+          ownerId,
+          x: launchX + sideX * side * 10,
+          y: launchY + sideY * side * 10,
+          vx: sideX * side * (35 + flareNumber * 7) + rearX * 55,
+          vy: sideY * side * (35 + flareNumber * 7) + rearY * 55,
+          born
+        };
+        flares.push(f);
+        resolveFlare(ownerId, f.x, f.y, f);
+        const volume = proximityVolume(f.x, f.y, .18);
+        if (volume > .005) playAsset('flare', volume, 1.02 + flareNumber * .015);
+      });
+    }, flareNumber * FLARE_SPAWN_INTERVAL_MS);
   }
 }
 
-// Detonates any missile (in our own local copy of the world) that's currently
-// homing on `fromId` and is close enough to this flare to be fooled by it —
-// it explodes on the flare right there rather than flying past it.
-function resolveFlare(fromId, fx, fy) {
+// A nearby locked missile is redirected to the actual flare object. It keeps
+// homing on that moving flare and detonates only when it reaches it.
+function resolveFlare(fromId, fx, fy, flare = null) {
   for (let i = missiles.length - 1; i >= 0; i--) {
     const m = missiles[i];
-    if (m.targetId === fromId && dist(m.x, m.y, fx, fy) < FLARE_BREAK_RADIUS) {
-      spawnExplosion(m.x, m.y, 'shock');
-      missiles.splice(i, 1);
+    if (m.targetId === fromId && !m.decoyTarget && dist(m.x, m.y, fx, fy) < FLARE_BREAK_RADIUS) {
+      m.decoyTarget = flare || { x: fx, y: fy };
+      m.decoyed = true;
+      m.targetId = null;
     }
   }
 }
@@ -925,15 +1060,35 @@ function updateMissiles(dtSec) {
       // Used to just vanish here with no feedback at all if it never caught
       // its target — now it detonates in place so a miss is at least visible.
       spawnExplosion(m.x, m.y, 'blast');
-      missiles.splice(i, 1);
+      removeProjectileLocal('missile', m.id);
       continue;
     }
 
-    // Missiles are launched only after the shooter completes its facing lock,
-    // so a launched missile can begin homing immediately.
-    if (m.targetId != null && now >= (m.lockReadyAt || m.born)) {
+    if (!m.decoyTarget && m.targetId != null) {
+      const nearbyFlare = flares.find(f => f.ownerId === m.targetId && dist(m.x, m.y, f.x, f.y) < FLARE_BREAK_RADIUS);
+      if (nearbyFlare) {
+        m.decoyTarget = nearbyFlare;
+        m.decoyed = true;
+        m.targetId = null;
+      }
+    }
+
+    // A flare redirects the missile to the flare itself. The missile remains
+    // active until it physically reaches that flare, then explodes there.
+    if (m.decoyTarget) {
+      const decoyDistance = dist(m.x, m.y, m.decoyTarget.x, m.decoyTarget.y);
+      if (decoyDistance < MISSILE_HIT_RADIUS) {
+        spawnExplosion(m.decoyTarget.x, m.decoyTarget.y, 'blast');
+        removeProjectileLocal('missile', m.id);
+        continue;
+      }
+      const desired = Math.atan2(m.decoyTarget.y - m.y, m.decoyTarget.x - m.x);
+      const step = MISSILE_TURN_RATE * dtSec;
+      const diff = angleDiff(m.angle, desired);
+      m.angle += Math.abs(diff) < step ? diff : Math.sign(diff) * step;
+    } else if (m.targetId != null && now >= (m.lockReadyAt || m.born)) {
       const target = players[m.targetId];
-      if (target && target.alive !== false && target.connected !== false && !isInCloudBank(target.x, target.y)) {
+      if (target && target.alive !== false && target.connected !== false) {
         const desired = Math.atan2(target.y - m.y, target.x - m.x);
         const step = MISSILE_TURN_RATE * dtSec;
         const diff = angleDiff(m.angle, desired);
@@ -1046,6 +1201,7 @@ function handleHostReceive(fromId, data) {
   else if (data.type === 'missile') handleMissile(fromId, data);
   else if (data.type === 'bomb') handleBomb(fromId, data);
   else if (data.type === 'flare') handleFlare(fromId, data);
+  else if (data.type === 'sonicBoom') handleSonicBoom(fromId, data);
   else if (data.type === 'impact') handleImpact(fromId, data);
   else if (data.type === 'collect') handleCollect(fromId, data.id);
   else if (data.type === 'died') handleDied(fromId, data.by);
@@ -1121,6 +1277,13 @@ function handleFlare(fromId, data) {
   }
   Object.entries(connections).forEach(([id, c]) => {
     if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
+  });
+}
+
+function handleSonicBoom(fromId, data) {
+  if (fromId !== myId) triggerSonicBoom(data.x, data.y, data.angle || 0);
+  Object.entries(connections).forEach(([id, c]) => {
+    if (Number(id) !== fromId && c.open) c.send({ type: 'sonicBoom', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
   });
 }
 
@@ -1259,6 +1422,9 @@ function handleClientReceive(data) {
       spawnFlareSalvo(data.x, data.y, data.angle || 0, data.from);
     }
   }
+  else if (data.type === 'sonicBoom') {
+    if (data.from !== myId) triggerSonicBoom(data.x, data.y, data.angle || 0);
+  }
   else if (data.type === 'impact') {
     if (data.from !== myId) {
       removeProjectileLocal(data.kind, data.id);
@@ -1275,6 +1441,7 @@ function sendEvent(msg) {
     else if (msg.type === 'missile') handleMissile(0, msg);
     else if (msg.type === 'bomb') handleBomb(0, msg);
     else if (msg.type === 'flare') handleFlare(0, msg);
+    else if (msg.type === 'sonicBoom') handleSonicBoom(0, msg);
     else if (msg.type === 'impact') handleImpact(0, msg);
     else if (msg.type === 'collect') handleCollect(0, msg.id);
     else if (msg.type === 'died') handleDied(0, msg.by);
@@ -1331,10 +1498,10 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp
 
 // ================= Input =================
 const keysHeld = { boost: false, airbrake: false, shoot: false };
-let missileLockHeld = false, missileLockTargetId = null, missileLockProgress = 0;
+let missileLockTargetId = null, missileLockAcquireId = null, missileLockProgress = 0, missileLockExpiresAt = 0;
 let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // aim point; steering targets this each frame
 
-function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; missileLockHeld = false; missileLockTargetId = null; missileLockProgress = 0; }
+function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; }
 window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });
 
@@ -1366,11 +1533,11 @@ function wireMouse() {
   window.addEventListener('mousedown', e => {
     unlockAudio();
     if (e.button === 0) keysHeld.shoot = true;
-    else if (e.button === 2) { missileLockHeld = true; missileLockProgress = 0; missileLockTargetId = null; e.preventDefault(); }
+    else if (e.button === 2) { tryFireMissile(); e.preventDefault(); }
   });
   window.addEventListener('mouseup', e => {
     if (e.button === 0) keysHeld.shoot = false;
-    if (e.button === 2) { tryFireMissile(); missileLockHeld = false; missileLockTargetId = null; missileLockProgress = 0; e.preventDefault(); }
+    if (e.button === 2) e.preventDefault();
   });
   window.addEventListener('contextmenu', e => e.preventDefault());
 }
@@ -1412,8 +1579,8 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = 
     ctx.beginPath(); ctx.arc(-length * .72, -7, 4 + pulse * 3, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(-length * .86, 6, 3 + pulse * 2, 0, Math.PI * 2); ctx.fill();
   }
-  // Visual-only exhaust trail. Flight audio is disabled, but the aircraft
-  // still needs a clear sense of thrust during fast movement.
+  // Visual-only exhaust trail; the matching engine/boost audio is managed by
+  // updateEngineAudio() so it remains separate from rendering.
   if (alive && boosting) {
     const exhaustLength = 80;
     const exhaust = ctx.createLinearGradient(-27, 0, -exhaustLength, 0);
@@ -1858,12 +2025,16 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
 
 function updateLockProgress(now) {
   if (!lockProgressEl || !myState) return;
-  if (!missileLockHeld || missileLockTargetId == null) { lockProgressEl.style.display = 'none'; return; }
-  const progress = missileLockProgress;
+  const hasLock = missileLockTargetId != null && missileLockExpiresAt > now;
+  const hasAcquire = missileLockAcquireId != null;
+  if (!hasLock && !hasAcquire) { lockProgressEl.style.display = 'none'; return; }
+  const progress = hasLock ? 1 : missileLockProgress;
   lockProgressEl.style.display = 'block';
   lockProgressFillEl.style.width = (progress * 100) + '%';
-  lockProgressTextEl.textContent = progress >= 1 ? 'LOCKED' : 'LOCKING ' + Math.round(progress * 100) + '%';
-  lockProgressEl.classList.toggle('locked', progress >= 1);
+  lockProgressTextEl.textContent = hasLock
+    ? 'LOCKED ' + Math.max(0, (missileLockExpiresAt - now) / 1000).toFixed(1) + 's'
+    : 'LOCKING ' + Math.round(progress * 100) + '%';
+  lockProgressEl.classList.toggle('locked', hasLock);
 }
 
 function render(now) {
@@ -1890,8 +2061,8 @@ function render(now) {
 
   const shakeX = (Math.random() - .5) * screenShake;
   const shakeY = (Math.random() - .5) * screenShake;
-  const viewW = W * CAMERA_FOV_MULT, viewH = H * CAMERA_FOV_MULT;
-  const viewScale = 1 / CAMERA_FOV_MULT;
+  const viewW = W * currentCameraFovMult, viewH = H * currentCameraFovMult;
+  const viewScale = 1 / currentCameraFovMult;
   const camX = myState.x - viewW / 2, camY = myState.y - viewH / 2;
   ctx.save();
   ctx.translate(W / 2 + shakeX, H / 2 + shakeY);
@@ -1999,6 +2170,12 @@ function loop(ts) {
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
   updateLocalPlane(dtSec, keysHeld);
+  const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
+  currentCameraFovMult += (fovTarget - currentCameraFovMult) * clamp(dtSec * HIGH_SPEED_FOV_SMOOTHING, 0, 1);
+  updateEngineAudio();
+  // Update smoothed remote positions before lock and homing calculations so
+  // targeting uses the same positions the player sees on screen.
+  interpolateRemotePlayers(dtSec);
   updateMissileLock(dtSec);
   updateBullets(dtSec);
   updateMissiles(dtSec);
@@ -2007,7 +2184,6 @@ function loop(ts) {
   updateSpecialEffects(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
-  interpolateRemotePlayers(dtSec);
   hostMaybeSpawnCoin(ts);
 
   if (ts - lastBroadcast > 66) {
@@ -2025,7 +2201,7 @@ function loop(ts) {
   missileCountEl.textContent = 'MISSILES  ' + myState.missiles + '/' + MISSILE_MAX;
   bombCountEl.textContent = 'BOMBS  ' + myState.bombs + '/' + BOMB_MAX;
   flareCountEl.textContent = 'FLARES  ' + myState.flares + '/' + FLARE_MAX;
-  const speedRatio = clamp((myState.speed - MIN_FLIGHT_SPEED) / (MAX_FLIGHT_SPEED - MIN_FLIGHT_SPEED), 0, 1);
+  const speedRatio = clamp((myState.speed - MIN_FLIGHT_SPEED) / (HIGH_SPEED_MAX_SPEED - MIN_FLIGHT_SPEED), 0, 1);
   speedValueEl.textContent = Math.round(myState.speed);
   speedFillEl.style.width = (speedRatio * 100) + '%';
   speedNeedleEl.style.transform = `rotate(${-112 + speedRatio * 224}deg)`;
