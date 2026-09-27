@@ -1,17 +1,18 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.51.1 (water impact readability and performance pass)
+Current build: v1.52.0 (Red Canyon and Storm Front map pass)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
 repeat. There are no coins, stars, or other collectibles. No server, no build
 step, and no dependencies to install — PeerJS is loaded from its CDN.
 
-The current arena uses the sky/background and water, with the world-space city
-buildings and cloud banks restored. The city and ocean continue beyond the
-playable rectangle into a soft animated boundary fog instead of ending on a
-hard seam. Canyon/island/storm geometry, border lines, and other decorative
-map props remain disabled so the flight space stays visually clean.
+The default city arena uses world-space buildings and cloud banks. Red Canyon
+adds layered sandstone mesas and visible flight gaps; Storm Front adds distant
+squall shelves, light rain, occasional lightning, and darker concealment banks.
+The map scenery is visual-only, so there are no invisible rock collisions. The
+flat ocean remains the lower crash boundary, and the city and ocean continue
+beyond the playable rectangle into a soft animated boundary fog.
 
 ## Dependencies to install
 
@@ -290,6 +291,18 @@ damage once and clients only render the replicated impact.
   draw work during multi-player or bot-heavy matches.
 - Host/joiner impact packets retain the exact waterline point and duplicate
   packets are ignored.
+
+### v1.52.0 Red Canyon and Storm Front maps
+
+- Red Canyon now has layered, world-anchored sandstone walls, eroded strata,
+  shaded clefts, and broad gaps between near mesas. The minimap mirrors the
+  mesa layout and marks the canyon cloud cover.
+- Storm Front now has distant squall shelves, subtle moving rain, staggered
+  lightning in the distance, and dark cloud banks that preserve the existing
+  concealment and missile-lock rules. Its minimap marks the cloud cover.
+- Both maps use fixed world-space scenery and concealment layouts on every
+  client. Scenery does not create unseen collision hazards or change flight
+  physics; the flat waterline remains the crash boundary.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

@@ -1,6 +1,6 @@
 // ================= Constants =================
 // v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
-// v1.51.1 polishes the staged bomb/missile water-impact effects.
+// v1.52.0 adds world-anchored Red Canyon and Storm Front arena art.
 const WORLD_W = 7200, WORLD_H = 4416;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
@@ -99,9 +99,27 @@ const CLOUD_MIN_RADIUS = 22, CLOUD_MAX_RADIUS = 148;
 const CLOUD_BANK_COUNT = 4;
 const MAP_THEMES = {
   city: { label: 'NEON CITY', cloudBanks: 4 },
-  canyon: { label: 'RED CANYON', cloudBanks: 2 },
+  canyon: { label: 'RED CANYON', cloudBanks: 3 },
   storm: { label: 'STORM FRONT', cloudBanks: 5 },
   islands: { label: 'ISLAND CHAIN', cloudBanks: 3 }
+};
+// Fixed world-space concealment zones keep the map's routes and missile
+// line-of-sight rules identical for every player in a match.
+const MAP_CLOUD_BANK_LAYOUTS = {
+  city: [
+    [.16, .20, 300, 180], [.38, .31, 350, 220],
+    [.62, .18, 280, 170], [.82, .36, 330, 210]
+  ],
+  canyon: [
+    [.19, .23, 320, 185], [.51, .48, 290, 170], [.82, .58, 330, 195]
+  ],
+  storm: [
+    [.12, .28, 350, 220], [.32, .52, 340, 220], [.53, .35, 370, 230],
+    [.73, .59, 330, 210], [.91, .43, 350, 220]
+  ],
+  islands: [
+    [.22, .26, 300, 180], [.54, .19, 320, 190], [.82, .34, 300, 180]
+  ]
 };
 const MAP_PALETTES = {
   city: ['#07131d', '#173f4c', '#78afb1'],
@@ -1207,16 +1225,12 @@ function buildClouds() {
       lobe: rand(.28, .52), tilt: rand(-.12, .12)
     });
   }
-  // These fixed bank coordinates keep concealment and lock line-of-sight
-  // consistent across multiplayer clients.
-  const bankLayout = [
-    [.16, .20, 300, 180], [.38, .31, 350, 220],
-    [.62, .18, 280, 170], [.82, .36, 330, 210]
-  ];
-  const bankCount = MAP_THEMES[activeMapId]?.cloudBanks || CLOUD_BANK_COUNT;
-  cloudBanks = bankLayout.concat([
-    [.52, .45, 300, 180], [.72, .52, 260, 160]
-  ]).slice(0, bankCount).map(([nx, ny, rx, ry], i) => ({
+  // Each arena gets a deliberate route through its concealment zones. The
+  // coordinates are fixed in world space so host and joiners agree on cover.
+  const mapId = validMapId(activeMapId);
+  const bankLayout = MAP_CLOUD_BANK_LAYOUTS[mapId] || MAP_CLOUD_BANK_LAYOUTS.city;
+  const bankCount = MAP_THEMES[mapId]?.cloudBanks || CLOUD_BANK_COUNT;
+  cloudBanks = bankLayout.slice(0, bankCount).map(([nx, ny, rx, ry], i) => ({
     x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180,
     rx, ry, alpha: .72 + (i % 3) * .07
   }));
@@ -4188,11 +4202,242 @@ function drawCityWorldMap(ctx, start, end) {
   ctx.fillRect(first, GROUND_Y - 42, end - first + 260, 44);
 }
 
+function mapHash01(index, salt = 0) {
+  const value = Math.sin(index * 127.1 + salt * 311.7) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function canyonMesaLayout(index) {
+  const cell = 720;
+  const r1 = mapHash01(index, 4), r2 = mapHash01(index, 9), r3 = mapHash01(index, 14);
+  const gap = 132 + r1 * 58;
+  const x = index * cell + gap * .5;
+  const width = cell - gap - 26;
+  const base = GROUND_Y + 230;
+  const height = 310 + r2 * 300;
+  return { x, width, base, height, top: base - height, r1, r2, r3 };
+}
+
+function drawCanyonWorldMap(ctx, start, end) {
+  // A distant, continuous canyon wall makes the open passes between nearer
+  // mesas readable. It is scenery behind the flight area, like the city
+  // skyline; the only physical lower boundary remains the flat waterline.
+  const step = 96;
+  const first = Math.floor((start - step) / step) * step;
+  const last = Math.ceil((end + step) / step) * step;
+  const farBase = GROUND_Y + 170;
+  const farTop = x => farBase - (480 + Math.sin(x * .00155) * 125 +
+    Math.sin(x * .0041 + 1.7) * 72 + Math.sin(x * .0103) * 24);
+
+  ctx.beginPath();
+  ctx.moveTo(first, farBase);
+  for (let x = first; x <= last; x += step) ctx.lineTo(x, farTop(x));
+  ctx.lineTo(last, WORLD_H + 180);
+  ctx.lineTo(first, WORLD_H + 180);
+  ctx.closePath();
+  const farFill = ctx.createLinearGradient(0, GROUND_Y - 760, 0, farBase);
+  farFill.addColorStop(0, '#9a5a4d');
+  farFill.addColorStop(.42, '#75463f');
+  farFill.addColorStop(1, '#372d36');
+  ctx.fillStyle = farFill;
+  ctx.fill();
+
+  // Long broken strata follow the distant rock face instead of reading as
+  // arbitrary horizontal stripes.
+  [.24, .43, .63, .81].forEach((fraction, band) => {
+    ctx.beginPath();
+    for (let x = first; x <= last; x += step) {
+      const y = farTop(x) + (farBase - farTop(x)) * fraction +
+        Math.sin(x * (.003 + band * .0003) + band * 1.8) * 13;
+      if (x === first) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = band % 2 === 0 ? 'rgba(237,166,116,.16)' : 'rgba(30,27,35,.22)';
+    ctx.lineWidth = band === 1 ? 8 : 4;
+    ctx.stroke();
+  });
+  ctx.beginPath();
+  for (let x = first; x <= last; x += step) {
+    if (x === first) ctx.moveTo(x, farTop(x)); else ctx.lineTo(x, farTop(x));
+  }
+  ctx.strokeStyle = 'rgba(255,197,145,.34)'; ctx.lineWidth = 3; ctx.stroke();
+
+  // The nearer mesas are deliberately separated. Their wide gaps create
+  // obvious flight lanes, while the far wall visible through each gap gives
+  // the canyon depth. A little seed-based variation keeps the silhouette
+  // irregular but identical on every frame and every player's machine.
+  const cell = 720;
+  const firstCell = Math.floor(start / cell) - 1;
+  const lastCell = Math.ceil(end / cell) + 1;
+  for (let i = firstCell; i <= lastCell; i++) {
+    const { x, width, base, height, top, r1, r3 } = canyonMesaLayout(i);
+    const points = [
+      [x, base], [x, top + height * .34], [x + width * .09, top + height * .23],
+      [x + width * .18, top + height * .12], [x + width * .31, top + height * .08],
+      [x + width * .43, top + height * .13], [x + width * .54, top + height * .025],
+      [x + width * .67, top + height * .09], [x + width * .78, top + height * .06],
+      [x + width * .91, top + height * .22], [x + width, top + height * .31],
+      [x + width, base]
+    ];
+    const traceMesa = () => {
+      ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
+      for (let p = 1; p < points.length; p++) ctx.lineTo(points[p][0], points[p][1]);
+      ctx.closePath();
+    };
+    traceMesa();
+    const face = ctx.createLinearGradient(0, top, 0, base);
+    face.addColorStop(0, r3 > .5 ? '#bd7152' : '#a95c48');
+    face.addColorStop(.34, '#85483f');
+    face.addColorStop(1, '#392e38');
+    ctx.fillStyle = face; ctx.fill();
+
+    // Clipped sediment shelves sit inside the mesa faces and follow the
+    // blocky erosion profile without crossing the open flight gaps.
+    ctx.save(); traceMesa(); ctx.clip();
+    for (let band = 1; band <= 4; band++) {
+      const y = top + height * (.23 + band * .145);
+      const wobble = 8 + band * 2;
+      ctx.beginPath();
+      ctx.moveTo(x - 8, y + Math.sin(i * 1.3 + band) * wobble);
+      ctx.lineTo(x + width * .22, y - wobble * .45);
+      ctx.lineTo(x + width * .47, y + wobble * .5);
+      ctx.lineTo(x + width * .74, y - wobble * .28);
+      ctx.lineTo(x + width + 8, y + Math.cos(i + band) * wobble);
+      ctx.strokeStyle = band % 2 ? 'rgba(238,166,113,.27)' : 'rgba(36,28,35,.30)';
+      ctx.lineWidth = band === 2 ? 7 : 4; ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.moveTo(points[1][0], points[1][1]);
+    for (let p = 2; p <= 10; p++) ctx.lineTo(points[p][0], points[p][1]);
+    ctx.strokeStyle = 'rgba(255,196,143,.38)'; ctx.lineWidth = 3; ctx.stroke();
+    // Narrow shaded clefts add scale to the broad, open mesas.
+    const cleftX = x + width * (.25 + r1 * .48);
+    ctx.beginPath(); ctx.moveTo(cleftX, top + height * .18);
+    ctx.lineTo(cleftX - 15, top + height * .55);
+    ctx.lineTo(cleftX + 9, base - 30);
+    ctx.strokeStyle = 'rgba(29,28,37,.27)'; ctx.lineWidth = 12; ctx.stroke();
+  }
+
+  // A dusty horizon glow separates the rust-colored ridges from the sky.
+  const glowX = WORLD_W * .28, glowY = GROUND_Y - 630;
+  if (glowX > start - 420 && glowX < end + 420) {
+    const glow = ctx.createRadialGradient(glowX, glowY, 12, glowX, glowY, 420);
+    glow.addColorStop(0, 'rgba(255,190,132,.20)');
+    glow.addColorStop(1, 'rgba(255,153,108,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(glowX, glowY, 420, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
+  // Distant squall shelves sit behind aircraft and foreground concealment.
+  // Their positions are world-anchored, so they do not slide with the camera.
+  const firstCell = Math.floor((camX - 800) / 1800);
+  const lastCell = Math.ceil((camX + viewW + 800) / 1800);
+  for (let i = firstCell; i <= lastCell; i++) {
+    const centerX = i * 1800 + 900;
+    const centerY = 1350 + mapHash01(i, 22) * 1200;
+    const rx = 580 + mapHash01(i, 29) * 230;
+    const ry = 250 + mapHash01(i, 31) * 130;
+    if (centerY + ry < camY - 80 || centerY - ry > camY + viewH + 80) continue;
+    ctx.save();
+    const cloud = ctx.createRadialGradient(centerX, centerY - ry * .18, 30,
+      centerX, centerY, rx);
+    cloud.addColorStop(0, 'rgba(11,24,40,.54)');
+    cloud.addColorStop(.48, 'rgba(20,39,57,.39)');
+    cloud.addColorStop(1, 'rgba(37,59,75,0)');
+    ctx.fillStyle = cloud;
+    ctx.beginPath(); ctx.ellipse(centerX, centerY, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+    // A broken scalloped crest gives the squall a recognizable shelf-cloud
+    // profile without layering obvious perfect circles over the scene.
+    ctx.beginPath();
+    ctx.moveTo(centerX - rx * .92, centerY + ry * .24);
+    ctx.bezierCurveTo(centerX - rx * 1.02, centerY - ry * .02,
+      centerX - rx * .70, centerY - ry * .18, centerX - rx * .58, centerY - ry * .39);
+    ctx.bezierCurveTo(centerX - rx * .49, centerY - ry * .62,
+      centerX - rx * .23, centerY - ry * .58, centerX - rx * .17, centerY - ry * .31);
+    ctx.bezierCurveTo(centerX - rx * .02, centerY - ry * .77,
+      centerX + rx * .27, centerY - ry * .73, centerX + rx * .34, centerY - ry * .35);
+    ctx.bezierCurveTo(centerX + rx * .51, centerY - ry * .61,
+      centerX + rx * .77, centerY - ry * .46, centerX + rx * .76, centerY - ry * .15);
+    ctx.bezierCurveTo(centerX + rx * 1.02, centerY - ry * .09,
+      centerX + rx * .99, centerY + ry * .20, centerX + rx * .86, centerY + ry * .28);
+    ctx.quadraticCurveTo(centerX, centerY + ry * .62, centerX - rx * .92, centerY + ry * .24);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(17,32,49,.24)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(164,199,216,.11)'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(centerX - rx * .83, centerY + ry * .12);
+    ctx.bezierCurveTo(centerX - rx * .70, centerY - ry * .18,
+      centerX - rx * .55, centerY - ry * .54, centerX - rx * .40, centerY - ry * .40);
+    ctx.bezierCurveTo(centerX - rx * .22, centerY - ry * .60,
+      centerX - rx * .12, centerY - ry * .16, centerX - rx * .02, centerY - ry * .43);
+    ctx.bezierCurveTo(centerX + rx * .12, centerY - ry * .68,
+      centerX + rx * .28, centerY - ry * .54, centerX + rx * .39, centerY - ry * .23);
+    ctx.bezierCurveTo(centerX + rx * .57, centerY - ry * .50,
+      centerX + rx * .70, centerY - ry * .36, centerX + rx * .78, centerY - ry * .08);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Sparse, low-contrast rain gives the front motion without washing out the
+  // sight picture. It is decorative only and does not change flight physics.
+  const rainStepX = 118, rainStepY = 154;
+  const rainStartX = Math.floor(camX / rainStepX) * rainStepX;
+  const rainEndX = camX + viewW;
+  const rainStartY = Math.floor(camY / rainStepY) * rainStepY;
+  const rainEndY = camY + viewH;
+  ctx.save(); ctx.beginPath(); ctx.rect(camX, camY, viewW, viewH); ctx.clip();
+  ctx.strokeStyle = 'rgba(190,218,235,.105)'; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let x = rainStartX; x <= rainEndX; x += rainStepX) {
+    for (let y = rainStartY; y <= rainEndY; y += rainStepY) {
+      const seed = mapHash01(x / rainStepX + y / rainStepY * 43, 7);
+      const drift = (now * .045 + seed * rainStepY) % rainStepY;
+      const rx = x + (seed - .5) * 52 + drift * .12;
+      const ry = y + drift;
+      ctx.moveTo(rx, ry); ctx.lineTo(rx - 20, ry + 56);
+    }
+  }
+  ctx.stroke(); ctx.restore();
+
+  // Lightning occurs in the far distance on staggered cycles. The flash is
+  // brief and restrained, and never covers the whole screen at once.
+  const strikes = [WORLD_W * .17, WORLD_W * .48, WORLD_W * .79];
+  strikes.forEach((x, i) => {
+    const y = 1700 + mapHash01(i, 45) * 900;
+    if (x < camX - 100 || x > camX + viewW + 100 || y + 450 < camY || y > camY + viewH + 120) return;
+    const phase = (now + i * 3671) % 12600;
+    const flash = phase < 95 ? 1 - phase / 95 :
+      (phase >= 185 && phase < 245 ? .38 * (1 - (phase - 185) / 60) : 0);
+    if (flash <= .015) return;
+    const length = 240 + mapHash01(i, 52) * 190;
+    const bend = (mapHash01(i, 61) - .5) * 130;
+    ctx.save(); ctx.globalAlpha = flash * .62;
+    const glow = ctx.createRadialGradient(x, y + length * .38, 4,
+      x, y + length * .38, 260);
+    glow.addColorStop(0, 'rgba(138,204,255,.22)');
+    glow.addColorStop(1, 'rgba(91,157,230,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, y + length * .38, 260, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#b9e5ff'; ctx.lineWidth = 3; ctx.shadowColor = '#86c9ff'; ctx.shadowBlur = 18;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + bend * .25, y + length * .24);
+    ctx.lineTo(x - bend * .18, y + length * .43); ctx.lineTo(x + bend, y + length * .66);
+    ctx.lineTo(x + bend * .62, y + length); ctx.stroke();
+    ctx.lineWidth = 1.2; ctx.shadowBlur = 0; ctx.strokeStyle = 'rgba(240,250,255,.95)';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + bend * .25, y + length * .24);
+    ctx.lineTo(x - bend * .18, y + length * .43); ctx.lineTo(x + bend, y + length * .66);
+    ctx.lineTo(x + bend * .62, y + length); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - bend * .18, y + length * .43);
+    ctx.lineTo(x - 74, y + length * .52); ctx.lineTo(x - 104, y + length * .69); ctx.stroke();
+    ctx.restore();
+  });
+}
+
 function drawSkyBackdrop(ctx, camX, camY, W, H) {
-  // The background stays simple; the city and cloud banks are the only
-  // restored world scenery, and both are world-anchored.
+  // Signature backgrounds are world-anchored so scenery scrolls naturally
+  // with the arena while the sky remains uncluttered around the aircraft.
   const sunX = WORLD_W * .72, sunY = 560;
-  if (sunX > camX - 220 && sunX < camX + W + 220 && sunY > camY - 220 && sunY < camY + H + 220) {
+  if (activeMapId === 'city' && sunX > camX - 220 && sunX < camX + W + 220 && sunY > camY - 220 && sunY < camY + H + 220) {
     const sun = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 210);
     sun.addColorStop(0, 'rgba(255,246,190,.9)'); sun.addColorStop(.18, 'rgba(255,215,120,.35)'); sun.addColorStop(1, 'rgba(255,180,80,0)');
     ctx.fillStyle = sun; ctx.beginPath(); ctx.arc(sunX, sunY, 210, 0, Math.PI * 2); ctx.fill();
@@ -4202,6 +4447,10 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
     const start = Math.floor((camX - 260) / 132) * 132;
     const end = camX + W + 260;
     drawCityWorldMap(ctx, start, end);
+  } else if (activeMapId === 'canyon') {
+    drawCanyonWorldMap(ctx, camX - 220, camX + W + 220);
+  } else if (activeMapId === 'storm') {
+    drawStormBackdrop(ctx, performance.now(), camX, camY, W, H);
   }
 }
 
@@ -4214,12 +4463,25 @@ function drawCloudBanks(ctx, now, camX, camY, viewW, viewH) {
     const pulse = .96 + Math.sin(now / 900 + index) * .04;
     ctx.scale(pulse, 1);
     const g = ctx.createRadialGradient(0, -b.ry * .12, b.ry * .08, 0, 0, b.rx);
-    g.addColorStop(0, `rgba(239,252,250,${b.alpha})`);
-    g.addColorStop(.55, `rgba(201,231,232,${b.alpha * .78})`);
-    g.addColorStop(1, 'rgba(165,205,211,0)');
+    if (activeMapId === 'storm') {
+      g.addColorStop(0, `rgba(34,49,66,${b.alpha})`);
+      g.addColorStop(.55, `rgba(68,88,104,${b.alpha * .86})`);
+      g.addColorStop(1, 'rgba(96,123,140,0)');
+    } else if (activeMapId === 'canyon') {
+      g.addColorStop(0, `rgba(246,218,184,${b.alpha * .8})`);
+      g.addColorStop(.55, `rgba(211,169,144,${b.alpha * .7})`);
+      g.addColorStop(1, 'rgba(177,127,111,0)');
+    } else {
+      g.addColorStop(0, `rgba(239,252,250,${b.alpha})`);
+      g.addColorStop(.55, `rgba(201,231,232,${b.alpha * .78})`);
+      g.addColorStop(1, 'rgba(165,205,211,0)');
+    }
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.ellipse(0, 0, b.rx, b.ry, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = `rgba(241,255,253,${b.alpha * .28})`;
+    const bankHighlight = activeMapId === 'storm' ? 'rgba(174,207,223,' :
+      activeMapId === 'canyon' ? 'rgba(255,229,194,' : 'rgba(241,255,253,';
+    const highlightAlpha = b.alpha * (activeMapId === 'storm' ? .10 : activeMapId === 'canyon' ? .2 : .28);
+    ctx.fillStyle = `${bankHighlight}${highlightAlpha})`;
     ctx.beginPath(); ctx.ellipse(-b.rx * .28, -b.ry * .15, b.rx * .34, b.ry * .42, 0, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.ellipse(b.rx * .2, -b.ry * .08, b.rx * .42, b.ry * .35, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
@@ -4613,6 +4875,31 @@ function drawMinimap(now) {
   ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(31,95,143,0.7)';
   ctx.fillRect(0, GROUND_Y * scaleY, W, H - GROUND_Y * scaleY);
+
+  if (activeMapId === 'canyon') {
+    // The minimap uses the same deterministic mesa layout as the world art,
+    // so the visible canyon passes line up with their strategic overview.
+    for (let i = 0; i <= Math.ceil(WORLD_W / 720); i++) {
+      const mesa = canyonMesaLayout(i);
+      const x = mesa.x * scaleX, width = mesa.width * scaleX;
+      const baseY = GROUND_Y * scaleY, topY = mesa.top * scaleY;
+      ctx.fillStyle = 'rgba(177,91,69,.76)';
+      ctx.fillRect(x, topY, width, baseY - topY);
+      ctx.fillStyle = 'rgba(255,194,142,.6)';
+      ctx.fillRect(x, topY, width, 1.2);
+    }
+  }
+  if (activeMapId === 'canyon' || activeMapId === 'storm') {
+    ctx.save();
+    ctx.fillStyle = activeMapId === 'storm' ? 'rgba(145,180,198,.55)' : 'rgba(255,220,187,.5)';
+    cloudBanks.forEach(bank => {
+      ctx.beginPath();
+      ctx.ellipse(bank.x * scaleX, bank.y * scaleY,
+        Math.max(2, bank.rx * scaleX), Math.max(1.5, bank.ry * scaleY), 0, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.restore();
+  }
 
   Object.values(players).forEach(p => {
     if (p.connected === false || p.alive === false) return;
