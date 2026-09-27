@@ -1,5 +1,6 @@
 // ================= Constants =================
 // v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
+// v1.51 adds staged bomb/missile water-impact effects.
 const WORLD_W = 7200, WORLD_H = 4416;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
@@ -64,6 +65,7 @@ const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS =
 const BOMB_PROXIMITY_RADIUS = 132, BOMB_BLAST_RADIUS = 156, BOMB_BLAST_DAMAGE = 92;
 const SHRAPNEL_COUNT = 16, SHRAPNEL_SPEED = 500;
 const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 800, SHRAPNEL_DAMAGE = 18, SHRAPNEL_HIT_RADIUS = 22;
+const WATER_WEAPON_DETONATION_DELAY = 1.1;
 
 // Flares: a limited-charge countermeasure that redirects a locked missile
 // within FLARE_BREAK_RADIUS onto the actual moving flare.
@@ -1061,6 +1063,123 @@ class WaterSplashEffect {
   draw(ctx) { ctx.save(); ctx.translate(this.x, this.y); this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife; ctx.globalAlpha = (1 - t) * .55; ctx.strokeStyle = '#dff6ff'; ctx.lineWidth = 2 * (1 - t) + .5; ctx.beginPath(); ctx.ellipse(0, 0, t * r.maxR, t * r.maxR * .35, 0, 0, Math.PI * 2); ctx.stroke(); }); this.mist.forEach(m => { const t = m.life / m.maxLife; ctx.globalAlpha = (1 - t) * .5; ctx.fillStyle = '#eefbff'; ctx.beginPath(); ctx.ellipse(m.x, -m.r * .15, m.r, m.r * .6, 0, 0, Math.PI * 2); ctx.fill(); }); this.drops.forEach(d => { const t = d.life / d.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = '#bfeaff'; ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(.6, d.r * (1 - t * .4)), 0, Math.PI * 2); ctx.fill(); }); ctx.restore(); }
 }
 
+// Staged water strike adapted from delayed-water-bomb-effect.html. It is a
+// visual-only effect: the regular weapon impact still owns damage and shrapnel.
+// The compact particle counts keep repeated bot strikes inexpensive to draw.
+class WaterWeaponImpactEffect {
+  constructor(x, y, weapon = 'bomb', angle = -Math.PI / 2) {
+    this.x = x;
+    this.y = waterSurfaceY(x);
+    this.weapon = weapon;
+    this.angle = Number.isFinite(angle) ? angle : -Math.PI / 2;
+    this.age = 0;
+    this.delay = WATER_WEAPON_DETONATION_DELAY;
+    this.phase = 'delay';
+    this.bubbleClock = 0;
+    this.splash = new WaterSplashEffect(this.x, this.y);
+    this.waitBubbles = [];
+    this.blastAge = 0;
+    this.rings = [];
+    this.spray = [];
+    this.bubbles = [];
+    this.mist = [];
+    this.dead = false;
+  }
+  beginBlast() {
+    this.phase = 'blast'; this.blastAge = 0;
+    playExplosionSound('blast', this.x, this.y);
+    screenShake = Math.max(screenShake, 5);
+    this.rings = [0, .07, .18].map((delay, i) => ({ delay, life: 0, maxLife: .95, maxR: 42 + i * 8 + Math.random() * 8 }));
+    for (let i = 0; i < 42; i++) {
+      const a = -Math.PI / 2 + (Math.random() - .5) * 2.5;
+      const speed = 120 + Math.random() * 280;
+      this.spray.push({ x: 0, y: -1, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+        r: .9 + Math.random() * 2.5, life: 0, maxLife: .48 + Math.random() * .52 });
+    }
+    for (let i = 0; i < 18; i++) {
+      this.bubbles.push({ x: rand(-34, 34), y: rand(16, 88), vx: rand(-22, 22),
+        vy: -rand(58, 138), r: rand(1.8, 5), life: 0, maxLife: rand(.55, 1.05) });
+    }
+    for (let i = 0; i < 9; i++) {
+      this.mist.push({ x: rand(-28, 28), y: -rand(0, 9), vx: rand(-23, 23),
+        vy: -rand(24, 56), r: rand(8, 16), life: 0, maxLife: rand(.6, 1.05), delay: rand(0, .16) });
+    }
+  }
+  update(dt) {
+    this.age += dt;
+    if (this.splash && !this.splash.dead) this.splash.update(dt);
+    if (this.phase === 'delay') {
+      this.bubbleClock += dt;
+      while (this.bubbleClock >= .14) {
+        this.bubbleClock -= .14;
+        this.waitBubbles.push({ x: rand(-5, 5), y: rand(22, 64), r: rand(1.4, 3),
+          vy: -rand(42, 78), life: 0, maxLife: .5 + Math.random() * .16 });
+      }
+      this.waitBubbles.forEach(b => { b.life += dt; b.y += b.vy * dt; });
+      this.waitBubbles = this.waitBubbles.filter(b => b.life < b.maxLife && b.y > -2);
+      if (this.age >= this.delay) this.beginBlast();
+    } else if (this.phase === 'blast') {
+      this.blastAge += dt;
+      this.rings.forEach(r => { if (r.delay > 0) r.delay -= dt; else r.life += dt; });
+      this.rings = this.rings.filter(r => r.life < r.maxLife);
+      this.spray.forEach(p => { p.life += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 390 * dt; p.vx *= Math.exp(-dt * .3); });
+      this.spray = this.spray.filter(p => p.life < p.maxLife && p.y < 46);
+      this.bubbles.forEach(p => { p.life += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy *= Math.exp(-dt * .32); });
+      this.bubbles = this.bubbles.filter(p => p.life < p.maxLife && p.y > -5);
+      this.mist.forEach(p => { if (p.delay > 0) p.delay -= dt; else { p.life += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.r += dt * 12; } });
+      this.mist = this.mist.filter(p => p.life < p.maxLife);
+      if (this.blastAge > 1.35 && !this.rings.length && !this.spray.length && !this.bubbles.length && !this.mist.length) this.dead = true;
+    }
+  }
+  surfaceHeightAt(x) {
+    if (this.phase !== 'blast') return 0;
+    const d = Math.abs(x - this.x), front = 22 + this.blastAge * 92, sigma = 14 + this.blastAge * 8;
+    const crest = 13 * Math.exp(-.5 * ((d - front) / sigma) ** 2);
+    const wake = 3.2 * Math.exp(-.5 * ((d - front - 24) / (sigma * .76)) ** 2);
+    return (crest - wake) * (1 - clamp(this.blastAge / 1.5, 0, .8));
+  }
+  draw(ctx) {
+    if (this.splash && !this.splash.dead) this.splash.draw(ctx);
+    ctx.save(); ctx.translate(this.x, this.y);
+    if (this.phase === 'delay') {
+      const progress = this.age / this.delay;
+      ctx.save(); ctx.globalAlpha = .42 * (1 - progress * .48);
+      ctx.translate(0, 10 + progress * 22); ctx.rotate(this.weapon === 'missile' ? this.angle : Math.PI / 2);
+      ctx.fillStyle = '#43515a'; ctx.strokeStyle = '#c4d7dc'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(0, 0, this.weapon === 'missile' ? 11 : 10, this.weapon === 'missile' ? 3.4 : 4.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.restore();
+      this.waitBubbles.forEach(b => { const t = b.life / b.maxLife; ctx.globalAlpha = (1 - t) * .48; ctx.strokeStyle = '#d7f7ff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.stroke(); });
+    } else {
+      const t = this.blastAge;
+      if (t < .26) {
+        ctx.globalAlpha = (1 - t / .26) * .68; ctx.globalCompositeOperation = 'lighter';
+        const glow = ctx.createRadialGradient(0, 32, 0, 0, 32, 62 + t * 80);
+        glow.addColorStop(0, 'rgba(239,253,255,.9)'); glow.addColorStop(.34, 'rgba(116,217,243,.58)'); glow.addColorStop(1, 'rgba(47,155,198,0)');
+        ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 32, 62 + t * 80, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      const front = 22 + t * 92, sigma = 14 + t * 8, fade = 1 - .35 * clamp(t / 1.5, 0, 1);
+      ctx.globalAlpha = fade * .45; ctx.fillStyle = 'rgba(167,231,245,.38)';
+      ctx.beginPath(); ctx.moveTo(-front - sigma, 0);
+      for (let i = 0; i <= 28; i++) { const x = -front - sigma + i / 28 * (front + sigma) * 2; ctx.lineTo(x, -this.surfaceHeightAt(x)); }
+      ctx.lineTo(front + sigma, 0); ctx.closePath(); ctx.fill();
+      this.rings.forEach(r => { if (r.delay > 0) return; const f = r.life / r.maxLife; ctx.globalAlpha = (1 - f) * .46; ctx.strokeStyle = '#dff8ff'; ctx.lineWidth = 2.4 * (1 - f) + .45; ctx.beginPath(); ctx.ellipse(0, 0, f * r.maxR, f * r.maxR * .28, 0, 0, Math.PI * 2); ctx.stroke(); });
+      ctx.save(); ctx.globalAlpha = fade * .8; ctx.strokeStyle = '#edfcff'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+      for (const dir of [-1, 1]) { const cx = dir * front; ctx.beginPath(); for (let i = 0; i <= 16; i++) { const x = cx - sigma + i / 16 * sigma * 1.7, y = -this.surfaceHeightAt(x) - 1; if (!i) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.stroke(); }
+      ctx.restore();
+      this.mist.forEach(p => { if (p.delay > 0) return; const f = p.life / p.maxLife; ctx.globalAlpha = (1 - f) * .36; const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r); g.addColorStop(0, 'rgba(233,248,250,.78)'); g.addColorStop(1, 'rgba(220,243,249,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill(); });
+      this.spray.forEach(p => { const f = p.life / p.maxLife; ctx.globalAlpha = 1 - f; ctx.fillStyle = '#c5effb'; ctx.beginPath(); ctx.ellipse(p.x, p.y, Math.max(.55, p.r * (1 - f * .35)), Math.max(.8, p.r * 1.55), Math.atan2(p.vy, p.vx) - Math.PI / 2, 0, Math.PI * 2); ctx.fill(); });
+      this.bubbles.forEach(p => { const f = p.life / p.maxLife; ctx.globalAlpha = (1 - f) * .55; ctx.strokeStyle = '#e1faff'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (.7 + .3 * f), 0, Math.PI * 2); ctx.stroke(); });
+    }
+    ctx.restore();
+  }
+}
+
+function spawnWaterWeaponImpact(x, y, weapon = 'bomb', angle = -Math.PI / 2) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  specialEffects.push(new WaterWeaponImpactEffect(x, waterSurfaceY(x), weapon, angle));
+}
+
 class WaterCrashEffect {
   constructor(x, y) { this.x = x; this.y = y; this.age = 0; this.dead = false; this.spikes = []; this.drops = []; this.rings = [0, .06, .16, .3, .46].map(delay => ({ delay, life: 0, maxLife: 1.3, maxR: 145 + Math.random() * 35 })); this.flames = []; this.steam = []; this.debris = []; for (let i = 0; i < 16; i++) { const a = -Math.PI / 2 + (Math.random() - .5) * .5, speed = 260 + Math.random() * 290; this.spikes.push({ x: (Math.random() - .5) * 14, y: 0, vx: Math.cos(a) * speed * .35, vy: Math.sin(a) * speed, r: 4 + Math.random() * 5.5, life: 0, maxLife: .55 + Math.random() * .4 }); } for (let i = 0; i < 60; i++) { const a = -Math.PI / 2 + (Math.random() - .5) * 2.2, speed = 120 + Math.random() * 340; this.drops.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 1.3 + Math.random() * 3.3, life: 0, maxLife: .55 + Math.random() * .55 }); } for (let i = 0; i < 28; i++) { const a = Math.random() * Math.PI * 2, speed = 55 + Math.random() * 160; this.flames.push({ x: 0, y: -8, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed * .5 - 40, r: 4 + Math.random() * 8, life: 0, maxLife: .16 + Math.random() * .22, hue: 20 + Math.random() * 30 }); } for (let i = 0; i < 30; i++) this.steam.push({ x: 0, y: 0, vx: (Math.random() - .5) * 52, vy: -38 - Math.random() * 36, r: 11 + Math.random() * 22, life: 0, maxLife: 1.1 + Math.random(), delay: .1 + Math.random() * .4 }); for (let i = 0; i < 12; i++) { const a = Math.random() * Math.PI * 2, d = 30 + Math.random() * 75; this.debris.push({ x: Math.cos(a) * d * .3, y: 0, tx: Math.cos(a) * d, rot: Math.random() * Math.PI * 2, vrot: (Math.random() - .5) * 3, len: 8 + Math.random() * 13, life: 0, maxLife: 1.8 + Math.random() * .5, settle: .3 + Math.random() * .2 }); } }
   update(dt) { this.age += dt; this.spikes.forEach(s => { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 500 * dt; }); this.spikes = this.spikes.filter(s => s.life < s.maxLife && s.y < 20); this.drops.forEach(d => { d.life += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 420 * dt; }); this.drops = this.drops.filter(d => d.life < d.maxLife && d.y < 30); this.rings.forEach(r => { if (r.delay > 0) r.delay -= dt; else r.life += dt; }); this.rings = this.rings.filter(r => r.life < r.maxLife); this.flames.forEach(f => { f.life += dt; f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= .9; f.vy *= .9; }); this.flames = this.flames.filter(f => f.life < f.maxLife); this.steam.forEach(s => { if (s.delay > 0) s.delay -= dt; else { s.life += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= .98; s.r += dt * 14; } }); this.steam = this.steam.filter(s => s.life < s.maxLife); this.debris.forEach(d => { d.life += dt; const t = Math.min(1, d.life / d.settle), eased = 1 - Math.pow(1 - t, 3); d.x += (d.tx - d.x) * eased * .3; d.rot += d.vrot * dt * (1 - eased * .8); }); this.debris = this.debris.filter(d => d.life < d.maxLife); this.dead = this.age > 2.3 && !this.spikes.length && !this.drops.length && !this.rings.length && !this.flames.length && !this.steam.length && !this.debris.length; }
@@ -1804,17 +1923,19 @@ function applyBombBlastDamage(x, y, ownerId) {
   });
 }
 
-function detonateBomb(b) {
+function detonateBomb(b, surface = null) {
   if (!b) return;
-  const burstY = Math.min(b.y, GROUND_Y - 8);
+  const waterHit = surface === 'water';
+  const burstY = waterHit ? waterSurfaceY(b.x) : Math.min(b.y, GROUND_Y - 8);
   // The center blast is authoritative and runs once on the host. Clients only
   // receive the visual/fragment event, preventing duplicate damage in P2P.
   if (isHost || botMode) applyBombBlastDamage(b.x, burstY, b.ownerId);
-  spawnExplosion(b.x, burstY, 'bomb');
-  playExplosionSound('blast', b.x, burstY);
-  screenShake = Math.max(screenShake, 9);
+  if (waterHit) spawnWaterWeaponImpact(b.x, burstY, 'bomb');
+  else spawnExplosion(b.x, burstY, 'bomb');
+  if (!waterHit) playExplosionSound('blast', b.x, burstY);
+  screenShake = Math.max(screenShake, waterHit ? 3 : 9);
   spawnBombShrapnel(b.x, burstY, b.ownerId);
-  if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY });
+  if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY, surface: waterHit ? 'water' : null });
   removeProjectileLocal('bomb', b.id);
 }
 
@@ -1823,10 +1944,6 @@ function updateBombs(dtSec) {
   const authoritative = isHost || botMode;
   for (let i = bombs.length - 1; i >= 0; i--) {
     const b = bombs[i];
-    if (authoritative && (now - b.born > BOMB_LIFE || b.y >= GROUND_Y - 8)) {
-      detonateBomb(b);
-      continue;
-    }
     if (!authoritative && now - b.born > BOMB_LIFE + 900) {
       // The host owns detonation. This only removes a stale visual copy if a
       // packet was lost for an unusually long time, without inventing FX.
@@ -1834,9 +1951,20 @@ function updateBombs(dtSec) {
       continue;
     }
     b.vy += BOMB_GRAVITY * dtSec;
-    b.x += b.vx * dtSec;
-    b.y += b.vy * dtSec;
+    const startX = b.x, startY = b.y;
+    const endX = startX + b.vx * dtSec, endY = startY + b.vy * dtSec;
+    if (authoritative && (startY >= waterSurfaceY(startX) ||
+        (endY >= waterSurfaceY(endX) && endY > startY))) {
+      const t = startY >= waterSurfaceY(startX) ? 0 :
+        clamp((waterSurfaceY(startX) - startY) / (endY - startY), 0, 1);
+      b.x = startX + (endX - startX) * t;
+      b.y = waterSurfaceY(b.x);
+      detonateBomb(b, 'water');
+      continue;
+    }
+    b.x = endX; b.y = endY;
     if (!authoritative) continue;
+    if (now - b.born > BOMB_LIFE) { detonateBomb(b); continue; }
 
     // Proximity detonation makes the bomb useful against moving aircraft
     // without turning it into a homing weapon.
@@ -2146,9 +2274,24 @@ function updateMissiles(dtSec) {
     m.speed = Math.min(MISSILE_MAX_SPEED, (Number.isFinite(m.speed) ? m.speed : MISSILE_INITIAL_SPEED) + MISSILE_ACCELERATION * dtSec);
     m.trail.push({ x: m.x, y: m.y });
     if (m.trail.length > 20) m.trail.shift();
-
-    m.x += Math.cos(m.angle) * m.speed * dtSec;
-    m.y += Math.sin(m.angle) * m.speed * dtSec;
+    const startX = m.x, startY = m.y;
+    const endX = startX + Math.cos(m.angle) * m.speed * dtSec;
+    const endY = startY + Math.sin(m.angle) * m.speed * dtSec;
+    const surfaceAtStart = waterSurfaceY(startX), surfaceAtEnd = waterSurfaceY(endX);
+    if (authoritative && (startY >= surfaceAtStart ||
+        (endY >= surfaceAtEnd && endY > startY))) {
+      const t = startY >= surfaceAtStart ? 0 :
+        clamp((surfaceAtStart - startY) / (endY - startY), 0, 1);
+      const hitX = startX + (endX - startX) * t;
+      const hitY = waterSurfaceY(hitX);
+      spawnWaterWeaponImpact(hitX, hitY, 'missile', m.angle);
+      screenShake = Math.max(screenShake, 3);
+      if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id,
+        x: hitX, y: hitY, surface: 'water' });
+      removeProjectileLocal('missile', m.id);
+      continue;
+    }
+    m.x = endX; m.y = endY;
   }
 }
 
@@ -3236,15 +3379,17 @@ function handleImpact(fromId, data) {
   if (!samePlayerId(fromId, myId)) {
     if (data.kind === 'bomb') {
       const bomb = bombs.find(b => b.id === data.id);
-      if (bomb) detonateBomb(bomb);
+      if (bomb) detonateBomb(bomb, data.surface);
       else {
-        spawnExplosion(data.x, data.y, 'bomb');
-        playExplosionSound('blast', data.x, data.y);
+        if (data.surface === 'water') spawnWaterWeaponImpact(data.x, data.y, 'bomb');
+        else spawnExplosion(data.x, data.y, 'bomb');
+        if (data.surface !== 'water') playExplosionSound('blast', data.x, data.y);
         spawnBombShrapnel(data.x, data.y, fromId);
       }
     } else {
       removeProjectileLocal(data.kind, data.id);
-      spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+      if (data.kind === 'missile' && data.surface === 'water') spawnWaterWeaponImpact(data.x, data.y, 'missile');
+      else spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
     }
   }
   Object.entries(connections).forEach(([id, c]) => {
@@ -3490,15 +3635,17 @@ function handleClientReceive(data) {
         Number.isFinite(data.x) && Number.isFinite(data.y) && rememberImpact(data.kind, data.id)) {
       if (data.kind === 'bomb') {
         const bomb = bombs.find(b => b.id === data.id);
-        if (bomb) detonateBomb(bomb);
+        if (bomb) detonateBomb(bomb, data.surface);
         else {
-          spawnExplosion(data.x, data.y, 'bomb');
-          playExplosionSound('blast', data.x, data.y);
+          if (data.surface === 'water') spawnWaterWeaponImpact(data.x, data.y, 'bomb');
+          else spawnExplosion(data.x, data.y, 'bomb');
+          if (data.surface !== 'water') playExplosionSound('blast', data.x, data.y);
           spawnBombShrapnel(data.x, data.y, data.from);
         }
       } else {
         removeProjectileLocal(data.kind, data.id);
-        spawnExplosion(data.x, data.y, data.surface === 'water' ? 'water' : data.kind === 'missile' ? 'blast' : 'spark');
+        if (data.kind === 'missile' && data.surface === 'water') spawnWaterWeaponImpact(data.x, data.y, 'missile');
+        else spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
       }
     }
   }
