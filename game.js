@@ -2772,32 +2772,36 @@ function drawIslandSilhouettes(ctx) {
   });
 }
 
-function drawFixedCityForeground(ctx, W, H) {
-  // Screen-space skyline: the city stays anchored to the bottom of the
-  // display instead of sliding with the aircraft's world camera.
-  const base = H + 8;
-  const horizon = H * .86;
-  const fade = ctx.createLinearGradient(0, horizon - 90, 0, H);
-  fade.addColorStop(0, 'rgba(5,18,29,0)');
-  fade.addColorStop(.35, 'rgba(5,18,29,.62)');
-  fade.addColorStop(1, 'rgba(3,12,21,.94)');
-  ctx.fillStyle = fade; ctx.fillRect(0, horizon - 90, W, H - horizon + 90);
-  for (let x = -20, index = 0; x < W + 40; x += 54, index++) {
-    const width = 30 + (index % 4) * 9;
-    const height = 24 + ((index * 37) % 78);
-    const y = base - height;
-    ctx.fillStyle = index % 3 ? 'rgba(7,30,45,.92)' : 'rgba(10,40,55,.96)';
-    ctx.fillRect(x, y, width, height + 12);
-    if (height > 58) {
-      ctx.fillStyle = 'rgba(107,225,218,.24)';
-      ctx.fillRect(x + 8, y + 10, 3, height - 18);
-      ctx.fillRect(x + width - 11, y + 10, 3, height - 18);
+function drawCityWorldMap(ctx, start, end) {
+  // Buildings live in world coordinates, so the city follows the camera like
+  // every other map feature instead of sliding as a screen overlay.
+  const first = Math.floor((start - 260) / 132) * 132;
+  const backBase = GROUND_Y - 220;
+  const frontBase = GROUND_Y - 70;
+  const drawLayer = (base, layer, color, windowColor) => {
+    for (let x = first; x <= end + 260; x += 132) {
+      const seed = Math.abs(Math.sin(x * .017 + layer * 2.3));
+      const width = 64 + Math.abs(Math.sin(x * .031 + layer)) * 46;
+      const height = (95 + seed * 160 + Math.abs(Math.sin(x * .009)) * 90) * layer;
+      const y = base - height;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, width, height + 90);
+      ctx.fillStyle = 'rgba(104,224,221,.16)';
+      ctx.fillRect(x + 9, y + 13, 3, Math.max(12, height - 20));
+      ctx.fillRect(x + width - 12, y + 13, 3, Math.max(12, height - 20));
+      ctx.fillStyle = windowColor;
+      const rows = Math.floor(height / 30);
+      for (let row = 0; row < rows; row++) {
+        if ((Math.floor(x / 132) + row * 3) % 4 < 2) {
+          ctx.fillRect(x + 18, y + 18 + row * 30, Math.max(7, width - 34), 4);
+        }
+      }
     }
-    ctx.fillStyle = 'rgba(255,204,111,.34)';
-    for (let row = 0; row < Math.floor(height / 24); row++) {
-      if ((index + row * 2) % 4 !== 0) ctx.fillRect(x + 14, y + 13 + row * 24, Math.max(5, width - 24), 3);
-    }
-  }
+  };
+  drawLayer(backBase, .72, 'rgba(9,34,48,.68)', 'rgba(255,205,108,.18)');
+  drawLayer(frontBase, 1, 'rgba(6,25,39,.9)', 'rgba(255,205,108,.34)');
+  ctx.fillStyle = 'rgba(7,22,32,.65)';
+  ctx.fillRect(first, GROUND_Y - 42, end - first + 260, 44);
 }
 
 function drawSkyBackdrop(ctx, camX, camY, W, H) {
@@ -2824,7 +2828,9 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
   drawRange(horizon + 330, 'rgba(18,50,60,.78)', .9, 1.8);
   ctx.fillStyle = 'rgba(188,232,226,.10)'; ctx.fillRect(start, horizon + 280, end - start, 180);
 
-  if (activeMapId === 'canyon') {
+  if (activeMapId === 'city') {
+    drawCityWorldMap(ctx, start, end);
+  } else if (activeMapId === 'canyon') {
     ctx.fillStyle = 'rgba(111,57,52,.55)';
     ctx.beginPath(); ctx.moveTo(start, horizon + 420); for (let x = start; x <= end; x += 120) ctx.lineTo(x, horizon + 170 + Math.abs(Math.sin(x / 240)) * 170); ctx.lineTo(end, WORLD_H); ctx.lineTo(start, WORLD_H); ctx.closePath(); ctx.fill();
   } else if (activeMapId === 'storm') {
@@ -2949,10 +2955,9 @@ function drawCrosshair(ctx, now, camX, camY, viewScale) {
       ? 'LOCKED ' + Math.max(0, (missileLockExpiresAt - now) / 1000).toFixed(1) + 's'
       : hint ? 'ALIGN TO LOCK' : 'LOCKING ' + Math.round(progress * 100) + '%';
     drawLockReticle(ctx, x, y, progress, hasLock, now, label, hint);
-    return;
   }
 
-  // Normal steering crosshair remains visible when no target is being locked.
+  // Keep the blue mouse crosshair visible even while the red lock reticle is active.
   drawFallbackCrosshair(ctx, now);
 }
 
@@ -3107,8 +3112,6 @@ function render(now) {
   drawCloudBanks(ctx, now, camX, camY, viewW, viewH);
 
   ctx.restore();
-
-  if (activeMapId === 'city') drawFixedCityForeground(ctx, W, H);
 
   drawMinimap(now);
   drawFlightReticles(ctx, now, camX, camY, viewScale);
