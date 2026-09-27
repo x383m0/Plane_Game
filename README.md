@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.48.8 (smooth multiplayer flight)
+Current build: v1.49.0 (multiplayer synchronization audit)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -224,6 +224,32 @@ damage once and clients only render the replicated impact.
   has been since a fast state packet arrived. A silent fast link falls back to
   reliable input after three seconds and reconnects. Both host and joiner need
   this version for the new link to open.
+
+### v1.48.9 multiplayer gun muzzle alignment
+
+- Gun bullets spawn just ahead of the drawn plane tip on the host and in
+  skirmish. Joiners receive a fast visual shot alongside its reliable backup;
+  the displayed bullet starts at the predicted plane nose and eases into the
+  host's authoritative path. Bullet damage and collision stay host controlled.
+- Shot IDs deduplicate the two deliveries. Older projectile snapshots do not
+  erase a shot fired after that snapshot; newer snapshots can confirm removal.
+- Both host and joiner need v1.48.9 for the fast gun visual. The reliable
+  backup continues to work during a fast channel outage.
+
+### v1.49.0 multiplayer synchronization audit
+
+- Fixed a host physics bug: render interpolation was pulling each remote
+  pilot's authoritative x/y/angle toward its original random spawn target
+  every frame. Only joiners now interpolate other pilots; host simulation,
+  collisions, missile lock, and bullet origins share the same real position.
+- Flight state for all pilots is sent in one sequenced packet each tick rather
+  than one packet per pilot. Late/out-of-order packets still cannot rewind a
+  player. Remote respawns and large corrections snap to the host position.
+- Projectile correction snapshots contain at most 48 bullets nearest each
+  joiner. Gun creation and hit/water removal still use individual reliable
+  events; a partial correction cannot erase bullets omitted for bandwidth.
+  A delayed fast shot cannot recreate a bullet already reported as hit.
+- Host and joiner must both use v1.49.0 for the batched flight packets.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

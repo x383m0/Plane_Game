@@ -89,6 +89,7 @@ const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes cat
 const NETWORK_INPUT_TIMEOUT_MS = 900; // tolerate short WebRTC jitter without dropping steering
 const NETWORK_SNAPSHOT_BUFFER_LIMIT = 48000;
 const NETWORK_PROJECTILE_SNAPSHOT_MS = 250; // projectiles extrapolate between authoritative updates
+const NETWORK_BULLETS_PER_SNAPSHOT = 48; // nearby bullet corrections; spawns/impacts use reliable events
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;
 const CLOUD_BANK_COUNT = 4;
@@ -139,6 +140,7 @@ let realtimeConnections = {};     // host: fast channel for replaceable input an
 let realtimeRetryTimer = null, nextStateSeq = 0;
 const lastStateSeqByPlayer = new Map();
 let lastRealtimeRxAt = 0, lastRealtimeOpenAt = 0;
+let lastProjectileSnapshotAt = 0;
 let players = {};                 // id -> {id,name,connected,alive,x,y,angle,health,score,kills,color}
 let bullets = [];                 // {id,ownerId,x,y,angle,born}
 let missiles = [];                // {id,ownerId,targetId,x,y,angle,born,trail}
@@ -1667,7 +1669,7 @@ function updateLocalPlane(dtSec, keys) {
 }
 
 function fireBulletFor(state, ownerId, replicate = false) {
-  const nose = 38;
+  const nose = 44; // the drawn fuselage ends at x=42 in local plane space
   const b = {
     id: ownerId + '-' + (nextBulletId++), ownerId,
     x: state.x + Math.cos(state.angle) * nose,
@@ -1682,7 +1684,7 @@ function fireBulletFor(state, ownerId, replicate = false) {
   playCannonSound(ownerId === myId ? null : b.x, ownerId === myId ? null : b.y);
   if (ownerId === myId) recoilKick = Math.min(10, recoilKick + 3.2);
   if (replicate) {
-    const packet = { type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle };
+    const packet = { type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle, shotAt: b.born };
     if (isHost && ownerId !== myId) broadcast({ ...packet, from: ownerId });
     else sendEvent(packet);
   }
@@ -2678,6 +2680,7 @@ function resetForNewSession() {
   started = false; isHost = false; botMode = false; myId = null; myState = null;
   players = {}; connections = {}; realtimeConnections = {};
   nextStateSeq = 0; lastStateSeqByPlayer.clear(); lastRealtimeRxAt = 0; lastRealtimeOpenAt = 0;
+  lastProjectileSnapshotAt = 0;
   bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; seenImpactKeys.clear();
   highSpeedWake.reset();
@@ -2795,10 +2798,10 @@ function nextFreeId() {
 }
 
 function broadcast(msg) {
-  const isSnapshot = msg?.type === 'state' || msg?.type === 'projectiles';
+  const isSnapshot = msg?.type === 'states' || msg?.type === 'state' || msg?.type === 'projectiles';
   Object.entries(connections).forEach(([id, c]) => {
     if (!c?.open) return;
-    const fast = msg?.type === 'state' ? realtimeConnections[id] : null;
+    const fast = msg?.type === 'states' || msg?.type === 'state' ? realtimeConnections[id] : null;
     if (fast?.open) {
       // Flight state is replaceable. When the fast channel is backed up,
       // drop this frame and let the next snapshot supersede it.
@@ -2808,6 +2811,14 @@ function broadcast(msg) {
         }
       }
       return;
+    }
+    // Send gunfire immediately on the fast link, with a reliable backup.
+    // Duplicate packets share a bullet ID and are ignored by the receiver.
+    if (msg?.type === 'shoot') {
+      const visual = realtimeConnections[id];
+      if (visual?.open && (visual.dataChannel?.bufferedAmount || 0) < 8192) {
+        try { visual.send(msg); } catch (_) { /* reliable copy follows */ }
+      }
     }
     // PeerJS exposes the underlying RTCDataChannel on current builds. When
     // its outbound queue grows, skip only replaceable snapshots; this lets
@@ -2944,7 +2955,8 @@ function applyRemoteState(p, data) {
     return;
   }
   ensureNetworkPlayerState(p);
-  if (!p.synced || (samePlayerId(p.id, myId) && p.alive === false && data.alive === true)) {
+  if (!p.synced || (p.alive === false && data.alive === true) ||
+      (!samePlayerId(p.id, myId) && dist(p.x, p.y, data.x, data.y) > 500)) {
     // First update we've ever gotten for this player: snap immediately so
     // it doesn't visibly slide in from its placeholder spawn point.
     p.x = data.x; p.y = data.y; p.angle = data.angle;
@@ -3048,9 +3060,12 @@ function handleState(fromId, data) {
 function broadcastAuthoritativeSnapshot() {
   if (!isHost) return;
   const stateSeq = ++nextStateSeq;
-  Object.values(players).forEach(p => {
-    broadcast({
-      type: 'state', stateSeq, from: p.id, x: p.x, y: p.y, angle: p.angle,
+  // One packet per peer per tick keeps all pilots on the same host frame and
+  // avoids the N separate messages per peer that used to congest the link.
+  broadcast({ type: 'states', stateSeq, states: Object.values(players)
+    .filter(p => p.connected !== false)
+    .map(p => ({
+      from: p.id, x: p.x, y: p.y, angle: p.angle,
       health: p.health, alive: p.alive, falling: p.falling, stalled: p.stalled,
       boosting: p.boosting, roll: p.roll, speed: p.speed, heat: p.heat,
       overheated: p.overheated, boost: p.boost, missiles: p.missiles,
@@ -3063,37 +3078,73 @@ function broadcastAuthoritativeSnapshot() {
       lockTargetId: p.hostLockTargetId, lockProgress: p.hostLockProgress || 0,
       lockExpiresAt: p.hostLockExpiresAt || 0,
       lockRemaining: Math.max(0, (p.hostLockExpiresAt || 0) - performance.now())
-    });
-  });
+    })) });
 }
 
 function broadcastAuthoritativeProjectiles() {
   if (!isHost) return;
   const now = performance.now();
   const age = p => Math.max(0, now - (p.born || now));
-  broadcast({
-    type: 'projectiles',
-    bullets: bullets.map(b => ({ id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, prevX: b.prevX, prevY: b.prevY, angle: b.angle, vx: b.vx, vy: b.vy, age: age(b) })),
+  const nearest = (items, viewer, count) => items.length <= count ? items :
+    [...items].sort((a, b) =>
+      (a.x - viewer.x) ** 2 + (a.y - viewer.y) ** 2 -
+      ((b.x - viewer.x) ** 2 + (b.y - viewer.y) ** 2)).slice(0, count);
+  const other = {
     missiles: missiles.map(m => ({ id: m.id, ownerId: m.ownerId, targetId: m.targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, decoyed: !!m.decoyed, decoyTarget: m.decoyTarget ? { x: m.decoyTarget.x, y: m.decoyTarget.y } : null, age: age(m) })),
     bombs: bombs.map(b => ({ id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, vx: b.vx, vy: b.vy, age: age(b) })),
     shrapnels: shrapnels.map(s => ({ id: s.id, ownerId: s.ownerId, x: s.x, y: s.y, prevX: s.prevX, prevY: s.prevY, vx: s.vx, vy: s.vy, age: age(s) }))
+  };
+  Object.entries(connections).forEach(([id, c]) => {
+    if (!c?.open || !players[id]) return;
+    const packet = {
+      type: 'projectiles', snapshotAt: now, bulletsPartial: bullets.length > NETWORK_BULLETS_PER_SNAPSHOT,
+      bullets: nearest(bullets, players[id], NETWORK_BULLETS_PER_SNAPSHOT).map(b => ({
+        id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, prevX: b.prevX, prevY: b.prevY,
+        angle: b.angle, vx: b.vx, vy: b.vy, age: age(b)
+      })), ...other
+    };
+    // Never build a queue of stale world corrections ahead of actions or
+    // hit events. Bullet creation/removal travels independently and reliably.
+    if ((c.dataChannel?.bufferedAmount || 0) > 12000) return;
+    try { c.send(packet); } catch (error) {
+      debugLog('PEER', 'Projectile snapshot send failed', { id, message: error?.message || String(error) });
+    }
   });
 }
 
 function reconcileAuthoritativeProjectiles(data) {
   const now = performance.now();
+  if (Number.isFinite(data.snapshotAt)) {
+    if (data.snapshotAt <= lastProjectileSnapshotAt) return;
+    lastProjectileSnapshotAt = data.snapshotAt;
+  }
   const valid = (p, required) => p && p.id != null && required.every(key => Number.isFinite(p[key]));
   const sync = (kind, incoming, required, build) => {
     if (!Array.isArray(incoming)) return;
     const current = kind === 'bullet' ? bullets : kind === 'missile' ? missiles : kind === 'bomb' ? bombs : shrapnels;
     const oldById = new Map(current.map(p => [String(p.id), p]));
-    const next = incoming.filter(p => valid(p, required)).map(p => build(p, oldById.get(String(p.id)), now));
+    const next = incoming.filter(p => valid(p, required) &&
+      (kind !== 'bullet' || !seenImpactKeys.has('bullet:' + String(p.id))))
+      .map(p => build(p, oldById.get(String(p.id)), now));
+    if (kind === 'bullet' && (data.bulletsPartial || Number.isFinite(data.snapshotAt))) {
+      const included = new Set(next.map(p => String(p.id)));
+      for (const old of current) {
+        // Partial snapshots omit distant bullets on purpose. Full older
+        // snapshots cannot erase a fast shot fired after they were made.
+        if (!seenImpactKeys.has('bullet:' + String(old.id)) && !included.has(String(old.id)) &&
+            (data.bulletsPartial || old.shotAt > data.snapshotAt)) next.push(old);
+      }
+    }
     if (kind === 'bullet') bullets = next;
     else if (kind === 'missile') missiles = next;
     else if (kind === 'bomb') bombs = next;
     else shrapnels = next;
   };
-  sync('bullet', data.bullets, ['x', 'y', 'angle', 'vx', 'vy'], (p, old, t) => ({ ...p, born: t - (p.age || 0) }));
+  sync('bullet', data.bullets, ['x', 'y', 'angle', 'vx', 'vy'], (p, old, t) => ({ ...p,
+    born: t - (p.age || 0), renderDx: old?.renderDx || 0, renderDy: old?.renderDy || 0,
+    renderAngle: old?.renderAngle || 0, visualBorn: old?.visualBorn || 0,
+    shotAt: old?.shotAt || 0
+  }));
   sync('missile', data.missiles, ['x', 'y', 'angle', 'speed'], (p, old, t) => ({
     ...p, born: t - (p.age || 0), lockReadyAt: t, trail: old?.trail || [], exhaust: 1,
     decoyTarget: p.decoyTarget && Number.isFinite(p.decoyTarget.x) && Number.isFinite(p.decoyTarget.y) ? p.decoyTarget : null
@@ -3114,9 +3165,8 @@ function handleShoot(fromId, data) {
     bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
     spawnExplosion(data.x, data.y, 'muzzle');
   }
-  Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'shoot', from: fromId, id: data.id, x: data.x, y: data.y, angle: data.angle });
-  });
+  broadcast({ type: 'shoot', from: fromId, id: data.id, x: data.x, y: data.y,
+    angle: data.angle, shotAt: data.shotAt });
 }
 
 function handleMissile(fromId, data) {
@@ -3234,8 +3284,8 @@ function openRealtimeLink(hostId) {
     sendClientInput(performance.now());
   });
   c.on('data', data => {
-    if (peer !== sessionPeer || connections.realtime !== c || data?.type !== 'state') return;
-    lastRealtimeRxAt = performance.now();
+    if (peer !== sessionPeer || connections.realtime !== c || !['states', 'state', 'shoot'].includes(data?.type)) return;
+    if (data.type === 'states' || data.type === 'state') lastRealtimeRxAt = performance.now();
     handleClientReceive(data);
   });
   const fallback = () => {
@@ -3355,6 +3405,12 @@ function handleClientReceive(data) {
   else if (data.type === 'effect') {
     handleRemoteEffect(data);
   }
+  else if (data.type === 'states') {
+    if (!Array.isArray(data.states) || data.states.length > MAX_PLAYERS) return;
+    data.states.forEach(state => {
+      if (state && typeof state === 'object') handleClientReceive({ ...state, type: 'state', stateSeq: data.stateSeq });
+    });
+  }
   else if (data.type === 'state') {
     const id = Number(data.from);
     if (!Number.isInteger(id) || id < 0 || id >= MAX_PLAYERS) return;
@@ -3367,9 +3423,27 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'shoot') {
     if (data.id != null && Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.angle) &&
-        !projectileExists('bullet', data.id)) {
-      bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
-      spawnExplosion(data.x, data.y, 'muzzle');
+        !projectileExists('bullet', data.id) && !seenImpactKeys.has('bullet:' + String(data.id)) &&
+        (!Number.isFinite(data.shotAt) || data.shotAt > lastProjectileSnapshotAt)) {
+      const b = { id: data.id, ownerId: data.from, x: data.x, y: data.y,
+        prevX: data.x, prevY: data.y, angle: data.angle,
+        vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED,
+        born: performance.now(), shotAt: Number.isFinite(data.shotAt) ? data.shotAt : 0 };
+      // The joiner's displayed plane is predicted between host snapshots.
+      // Correct only the first frames of this bullet's drawing; its physics
+      // and damage still use the host's x/y/angle.
+      const owner = players[Number(data.from)];
+      if (owner && Number.isFinite(owner.x) && Number.isFinite(owner.y) && Number.isFinite(owner.angle)) {
+        const dx = owner.x + Math.cos(owner.angle) * 44 - b.x;
+        const dy = owner.y + Math.sin(owner.angle) * 44 - b.y;
+        if (Math.hypot(dx, dy) < (samePlayerId(data.from, myId) ? 350 : 180)) {
+          b.renderDx = dx; b.renderDy = dy;
+          b.renderAngle = angleDiff(b.angle, owner.angle);
+          b.visualBorn = performance.now();
+        }
+      }
+      bullets.push(b);
+      spawnExplosion(b.x + (b.renderDx || 0), b.y + (b.renderDy || 0), 'muzzle');
       playCannonSound(data.x, data.y);
     }
   }
@@ -3729,15 +3803,19 @@ function drawPlane(ctx, p, isMe, now) {
 }
 
 function drawBullet(ctx, b) {
+  const visible = clamp(1 - (performance.now() - (b.visualBorn || 0)) / 300, 0, 1);
+  const bx = b.x + (b.renderDx || 0) * visible;
+  const by = b.y + (b.renderDy || 0) * visible;
+  const angle = b.angle + (b.renderAngle || 0) * visible;
   ctx.save();
   ctx.strokeStyle = b.ownerId === myId ? 'rgba(255,244,155,.7)' : 'rgba(255,125,90,.55)';
   ctx.lineWidth = 1; ctx.lineCap = 'round';
   const tail = 9;
-  ctx.beginPath(); ctx.moveTo(b.x - Math.cos(b.angle) * tail, b.y - Math.sin(b.angle) * tail); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx - Math.cos(angle) * tail, by - Math.sin(angle) * tail); ctx.lineTo(bx, by); ctx.stroke();
   ctx.restore();
   ctx.save();
-  ctx.translate(b.x, b.y);
-  ctx.rotate(b.angle);
+  ctx.translate(bx, by);
+  ctx.rotate(angle);
   ctx.shadowColor = b.ownerId === myId ? '#fff59d' : '#ff6548'; ctx.shadowBlur = 5;
   ctx.fillStyle = b.ownerId === myId ? '#fffbd0' : '#ff987d';
   ctx.beginPath();
@@ -4322,6 +4400,9 @@ function drawMinimap(now) {
 }
 
 function interpolateRemotePlayers(dtSec) {
+  // Host coordinates are authoritative physics and must never be eased back
+  // toward an old network target (freshPlayerState seeds tx at spawn).
+  if (isHost) return;
   const t = Math.min(1, REMOTE_SMOOTH * dtSec);
   Object.values(players).forEach(p => {
     if (samePlayerId(p.id, myId) || p.isBot || p.connected === false || p.tx === undefined) return;
