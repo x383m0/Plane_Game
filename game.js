@@ -1,6 +1,9 @@
 // ================= Constants =================
-const WORLD_W = 6000, WORLD_H = 3680;
-const CAMERA_FOV_MULT = 1.15; // show 15% more world without enlarging the HUD
+// v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
+const WORLD_W = 7200, WORLD_H = 4416;
+// The previous camera already showed 15% more world. Apply the requested
+// additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
+const CAMERA_FOV_MULT = 1.3225;
 const GROUND_Y = WORLD_H - 150;   // sea surface / crash boundary
 const MAX_PLAYERS = 8;
 
@@ -19,7 +22,7 @@ const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
 const HIGH_SPEED_THRESHOLD = 600;
 const HIGH_SPEED_ACCELERATION = 78;
 const HIGH_SPEED_MAX_SPEED = 820;
-const HIGH_SPEED_FOV_MULT = 1.32;
+const HIGH_SPEED_FOV_MULT = 1.518;
 const HIGH_SPEED_FOV_SMOOTHING = 5.5;
 const SONIC_BOOM_COOLDOWN_MS = 1800;
 const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
