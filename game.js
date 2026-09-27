@@ -2748,37 +2748,8 @@ function drawGround(ctx) {
     ctx.stroke();
   });
 
-  if (activeMapId === 'city') drawCityEdgeStructures(ctx);
-  else if (activeMapId === 'canyon') drawCanyonEdgeWalls(ctx);
+  if (activeMapId === 'canyon') drawCanyonEdgeWalls(ctx);
   else if (activeMapId === 'islands') drawIslandSilhouettes(ctx);
-}
-
-function drawCityEdgeStructures(ctx) {
-  const towers = [
-    [70, 520, 270], [190, 380, 210], [330, 610, 330], [495, 450, 250],
-    [WORLD_W - 565, 470, 250], [WORLD_W - 390, 650, 360], [WORLD_W - 220, 390, 230], [WORLD_W - 70, 540, 290]
-  ];
-  towers.forEach(([x, width, height], index) => {
-    const y = GROUND_Y - height;
-    ctx.fillStyle = index % 2 ? 'rgba(8,27,42,.92)' : 'rgba(12,39,55,.94)';
-    ctx.fillRect(x - width / 2, y, width, height + 155);
-    ctx.fillStyle = 'rgba(110,224,220,.18)';
-    ctx.fillRect(x - width / 2 + 8, y + 12, 3, height - 20);
-    ctx.fillRect(x + width / 2 - 11, y + 12, 3, height - 20);
-    ctx.fillStyle = 'rgba(255,205,108,.42)';
-    for (let row = 0; row < Math.floor(height / 32); row++) {
-      for (let col = 0; col < Math.max(2, Math.floor(width / 38)); col++) {
-        if ((row * 7 + col * 3 + index) % 5 < 2) {
-          ctx.fillRect(x - width / 2 + 18 + col * 38, y + 20 + row * 32, 9, 5);
-        }
-      }
-    }
-    if (index % 3 === 0) {
-      ctx.strokeStyle = 'rgba(105,235,255,.5)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y - 58); ctx.stroke();
-      ctx.fillStyle = '#ff6e7a'; ctx.beginPath(); ctx.arc(x, y - 62, 3, 0, Math.PI * 2); ctx.fill();
-    }
-  });
 }
 
 function drawCanyonEdgeWalls(ctx) {
@@ -2801,19 +2772,30 @@ function drawIslandSilhouettes(ctx) {
   });
 }
 
-function drawCitySkyline(ctx, start, end, base, color, scale, layer) {
-  ctx.fillStyle = color;
-  for (let x = start; x <= end; x += 86) {
-    const wave = Math.abs(Math.sin(x / 173 + layer * 1.7));
-    const h = (70 + wave * 210 + Math.abs(Math.sin(x / 61)) * 80) * scale;
-    const w = 50 + Math.abs(Math.sin(x / 47 + layer)) * 26;
-    ctx.fillRect(x, base - h, w, h + 40);
-    if (layer > .5) {
-      ctx.fillStyle = 'rgba(105,224,221,.16)';
-      for (let row = 0; row < h / 34; row++) {
-        if ((Math.floor(x / 86) + row) % 3 !== 0) ctx.fillRect(x + 10, base - h + 18 + row * 34, Math.max(4, w - 22), 4);
-      }
-      ctx.fillStyle = color;
+function drawFixedCityForeground(ctx, W, H) {
+  // Screen-space skyline: the city stays anchored to the bottom of the
+  // display instead of sliding with the aircraft's world camera.
+  const base = H + 8;
+  const horizon = H * .86;
+  const fade = ctx.createLinearGradient(0, horizon - 90, 0, H);
+  fade.addColorStop(0, 'rgba(5,18,29,0)');
+  fade.addColorStop(.35, 'rgba(5,18,29,.62)');
+  fade.addColorStop(1, 'rgba(3,12,21,.94)');
+  ctx.fillStyle = fade; ctx.fillRect(0, horizon - 90, W, H - horizon + 90);
+  for (let x = -20, index = 0; x < W + 40; x += 54, index++) {
+    const width = 30 + (index % 4) * 9;
+    const height = 24 + ((index * 37) % 78);
+    const y = base - height;
+    ctx.fillStyle = index % 3 ? 'rgba(7,30,45,.92)' : 'rgba(10,40,55,.96)';
+    ctx.fillRect(x, y, width, height + 12);
+    if (height > 58) {
+      ctx.fillStyle = 'rgba(107,225,218,.24)';
+      ctx.fillRect(x + 8, y + 10, 3, height - 18);
+      ctx.fillRect(x + width - 11, y + 10, 3, height - 18);
+    }
+    ctx.fillStyle = 'rgba(255,204,111,.34)';
+    for (let row = 0; row < Math.floor(height / 24); row++) {
+      if ((index + row * 2) % 4 !== 0) ctx.fillRect(x + 14, y + 13 + row * 24, Math.max(5, width - 24), 3);
     }
   }
 }
@@ -2842,10 +2824,7 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
   drawRange(horizon + 330, 'rgba(18,50,60,.78)', .9, 1.8);
   ctx.fillStyle = 'rgba(188,232,226,.10)'; ctx.fillRect(start, horizon + 280, end - start, 180);
 
-  if (activeMapId === 'city') {
-    drawCitySkyline(ctx, start, end, horizon + 320, 'rgba(11,37,53,.64)', .55, .2);
-    drawCitySkyline(ctx, start, end, horizon + 390, 'rgba(6,23,36,.88)', .85, 1.1);
-  } else if (activeMapId === 'canyon') {
+  if (activeMapId === 'canyon') {
     ctx.fillStyle = 'rgba(111,57,52,.55)';
     ctx.beginPath(); ctx.moveTo(start, horizon + 420); for (let x = start; x <= end; x += 120) ctx.lineTo(x, horizon + 170 + Math.abs(Math.sin(x / 240)) * 170); ctx.lineTo(end, WORLD_H); ctx.lineTo(start, WORLD_H); ctx.closePath(); ctx.fill();
   } else if (activeMapId === 'storm') {
@@ -2934,8 +2913,26 @@ function drawLockReticle(ctx, x, y, progress, locked, now, label, hint = false) 
   ctx.restore();
 }
 
+function drawFallbackCrosshair(ctx, now) {
+  if (!myState) return;
+  const x = clamp(mouseX, 18, window.innerWidth - 18);
+  const y = clamp(mouseY, 18, window.innerHeight - 18);
+  const boosting = !!keysHeld.boost && myState.boost > 0 && myState.alive !== false;
+  const pulse = 1 + Math.sin(now / 160) * .06;
+  const color = boosting ? '#9cf3ed' : 'rgba(188,239,255,.94)';
+  const glow = boosting ? 'rgba(100,235,255,.65)' : 'rgba(150,235,255,.58)';
+  const gap = 8 * pulse, arm = 15 * pulse, radius = 19;
+  ctx.save(); ctx.translate(x, y); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.shadowColor = glow; ctx.shadowBlur = 8; ctx.lineWidth = 1.35; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-gap - arm, 0); ctx.lineTo(-gap, 0); ctx.moveTo(gap, 0); ctx.lineTo(gap + arm, 0);
+  ctx.moveTo(0, -gap - arm); ctx.lineTo(0, -gap); ctx.moveTo(0, gap); ctx.lineTo(0, gap + arm); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0; ctx.font = '8px Space Mono, monospace'; ctx.textAlign = 'center'; ctx.fillText('GO', 0, 34); ctx.restore();
+}
+
 function drawCrosshair(ctx, now, camX, camY, viewScale) {
-  if (!started || !myState || !myState.alive) return;
+  if (!started || !myState) return;
   const hasLock = missileLockTargetId != null && missileLockExpiresAt > now;
   const targetId = hasLock ? missileLockTargetId : (missileLockAcquireId ?? missileLockCandidateId);
   const target = targetId == null ? null : players[targetId];
@@ -2956,20 +2953,7 @@ function drawCrosshair(ctx, now, camX, camY, viewScale) {
   }
 
   // Normal steering crosshair remains visible when no target is being locked.
-  const x = clamp(mouseX, 18, window.innerWidth - 18);
-  const y = clamp(mouseY, 18, window.innerHeight - 18);
-  const boosting = keysHeld.boost && myState.boost > 0;
-  const pulse = 1 + Math.sin(now / 160) * .06;
-  const color = boosting ? '#9cf3ed' : '#bcefff';
-  const glow = boosting ? 'rgba(100,235,255,.65)' : 'rgba(150,235,255,.58)';
-  const gap = 8 * pulse, arm = 15 * pulse, radius = 19;
-  ctx.save(); ctx.translate(x, y); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.shadowColor = glow; ctx.shadowBlur = 8; ctx.lineWidth = 1.35; ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(-gap - arm, 0); ctx.lineTo(-gap, 0); ctx.moveTo(gap, 0); ctx.lineTo(gap + arm, 0);
-  ctx.moveTo(0, -gap - arm); ctx.lineTo(0, -gap); ctx.moveTo(0, gap); ctx.lineTo(0, gap + arm); ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill();
-  ctx.shadowBlur = 0; ctx.font = '8px Space Mono, monospace'; ctx.textAlign = 'center'; ctx.fillStyle = color; ctx.fillText('GO', 0, 34); ctx.restore();
+  drawFallbackCrosshair(ctx, now);
 }
 
 function drawFlightReticles(ctx, now, camX, camY, viewScale) {
@@ -3124,11 +3108,22 @@ function render(now) {
 
   ctx.restore();
 
+  if (activeMapId === 'city') drawFixedCityForeground(ctx, W, H);
+
   drawMinimap(now);
   drawFlightReticles(ctx, now, camX, camY, viewScale);
   drawAimAssist(ctx, now, camX, camY, viewScale);
   drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale);
-  drawCrosshair(ctx, now, camX, camY, viewScale);
+  try {
+    drawCrosshair(ctx, now, camX, camY, viewScale);
+  } catch (error) {
+    // Keep the steering reticle visible if a transient target/render value is
+    // malformed. The rest of the frame remains usable and the error is still
+    // reported by the outer frame guard.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    drawFallbackCrosshair(ctx, now);
+  }
 }
 
 function drawMinimap(now) {
