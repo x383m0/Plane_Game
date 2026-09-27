@@ -66,6 +66,12 @@ const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
 const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
 const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each two-sided flare wave
 const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30% HP
+// Near-water wake tuning. The wake is visual/audio only; it never changes
+// flight physics or the water crash boundary.
+const WATER_WAKE_MIN_ALTITUDE = 18;
+const WATER_WAKE_MAX_ALTITUDE = 220;
+const WATER_WAKE_MIN_SPEED = 360;
+const WATER_WAKE_MAX_TRAIL = 280;
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
@@ -125,6 +131,7 @@ let specialEffects = [];           // imported impact/death/water effects
 let clouds = [];
 let cloudBanks = [];
 let started = false, nextBulletId = 0, nextMissileId = 0;
+let keyboardWired = false, mouseWired = false, resizeWired = false;
 let lastClientInputSend = 0, clientInputSeq = 0, clientActionSeq = 0;
 
 let myState = null;               // local authoritative plane state
@@ -136,6 +143,7 @@ let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let audioCtx = null, masterGain = null;
 let audioBank = {}, audioAssetsStarted = false;
 let engineCruiseAudio = null, engineBoostAudio = null;
+let waterWakeChurnAudio = null, waterWakeSprayAudio = null;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 let currentCameraFovMult = CAMERA_FOV_MULT;
 let selectedMapId = 'city';
@@ -163,6 +171,8 @@ const AUDIO_ASSETS = {
   cruise: 'airplane-cruise.mp3',
   boost: 'airplane-boost.mp3',
   sonicBoom: 'sonic-boom.mp3',
+  waterWakeChurn: 'freesound_community-waterfall-2-27954.mp3',
+  waterWakeSpray: 'freesound_community-little-waterfall-26768.mp3',
 };
 
 // ================= World helpers =================
@@ -185,6 +195,11 @@ function angleDiff(from, to) {
   if (d > Math.PI) d -= Math.PI * 2;
   if (d < -Math.PI) d += Math.PI * 2;
   return d;
+}
+function waterSurfaceY(x) {
+  // Keep the ocean surface level. It is also the crash boundary and the
+  // reference plane for the high-speed wake effect.
+  return GROUND_Y;
 }
 
 // Small procedural sound rig: it starts only after a user gesture and keeps
@@ -231,6 +246,49 @@ function updateEngineAudio() {
   } else {
     engineCruiseAudio.pause(); engineBoostAudio.pause();
   }
+}
+function ensureWaterWakeAudio() {
+  if (!audioAssetsStarted || waterWakeChurnAudio || !audioBank.waterWakeChurn || !audioBank.waterWakeSpray) return;
+  waterWakeChurnAudio = audioBank.waterWakeChurn.cloneNode();
+  waterWakeSprayAudio = audioBank.waterWakeSpray.cloneNode();
+  [waterWakeChurnAudio, waterWakeSprayAudio].forEach(a => {
+    a.loop = true;
+    a.volume = 0;
+    a.preload = 'auto';
+    // Let the speed-linked playback rate change the character of the water
+    // without preserving the original pitch.
+    a.preservesPitch = false;
+    a.mozPreservesPitch = false;
+    a.webkitPreservesPitch = false;
+  });
+}
+function updateWaterWakeAudio(intensity, speedFactor, dtSec = 1 / 60) {
+  if (!audioAssetsStarted) return;
+  ensureWaterWakeAudio();
+  if (!waterWakeChurnAudio || !waterWakeSprayAudio) return;
+  const c = clamp(Number.isFinite(intensity) ? intensity : 0, 0, 1);
+  const s = clamp(Number.isFinite(speedFactor) ? speedFactor : 0, 0, 1);
+  const near = c > 0.008;
+  const churnTarget = near ? c * (.18 + s * .12) : 0;
+  const sprayTarget = near ? c * (.10 + s * .14) : 0;
+  const blend = clamp(dtSec * 9, 0, 1);
+  waterWakeChurnAudio.volume += (churnTarget - waterWakeChurnAudio.volume) * blend;
+  waterWakeSprayAudio.volume += (sprayTarget - waterWakeSprayAudio.volume) * blend;
+  waterWakeChurnAudio.playbackRate = .72 + s * .58;
+  waterWakeSprayAudio.playbackRate = 1.0 + s * .95;
+  if (near) {
+    if (waterWakeChurnAudio.paused) waterWakeChurnAudio.play().catch(() => {});
+    if (waterWakeSprayAudio.paused) waterWakeSprayAudio.play().catch(() => {});
+  } else if (waterWakeChurnAudio.volume < .002 && waterWakeSprayAudio.volume < .002) {
+    waterWakeChurnAudio.pause(); waterWakeChurnAudio.currentTime = 0;
+    waterWakeSprayAudio.pause(); waterWakeSprayAudio.currentTime = 0;
+  }
+}
+function stopWaterWakeAudio() {
+  [waterWakeChurnAudio, waterWakeSprayAudio].forEach(a => {
+    if (!a) return;
+    a.pause(); a.currentTime = 0; a.volume = 0;
+  });
 }
 function playAsset(name, volume = .65, rate = 1) {
   const source = audioBank[name]; if (!source) return false;
@@ -337,6 +395,187 @@ class SonicBoomEffect {
   }
 }
 
+// Adapted from the supplied HIGH SPEED WAKE demo. This is deliberately a
+// world-space effect: the wake sits on the water surface while the aircraft
+// remains above it, so the wake can lag behind a fast plane without affecting
+// the plane's position or collision physics.
+class HighSpeedWakeEffect {
+  constructor() {
+    this.trail = [];
+    this.bubbles = [];
+    this.spray = [];
+    this.foam = [];
+    this.emitAccumulator = 0;
+  }
+  reset() {
+    this.trail.length = 0;
+    this.bubbles.length = 0;
+    this.spray.length = 0;
+    this.foam.length = 0;
+    this.emitAccumulator = 0;
+  }
+  emit(x, y, heading, speedFactor, intensity, dtSec) {
+    const s = clamp(speedFactor, 0, 1);
+    const c = clamp(intensity, 0, 1);
+    if (c < .02 || s < .03) return;
+    this.emitAccumulator += dtSec * (18 + s * 32);
+    while (this.emitAccumulator >= 1) {
+      this.emitAccumulator -= 1;
+      const delay = s * .14;
+      const maxAge = 1.15 + s * 2.55;
+      this.trail.push({ x, y, heading, speed: s, intensity: c, age: 0, delay, maxAge });
+
+      const bubbleCount = 1 + Math.floor(s * 5);
+      for (let i = 0; i < bubbleCount; i++) {
+        const back = heading + Math.PI;
+        const spread = back + (Math.random() - .5) * (1.1 + s * .8);
+        const distance = Math.random() * (8 + s * 24);
+        this.bubbles.push({
+          x: x + Math.cos(spread) * distance,
+          y: y + Math.sin(spread) * distance * .28,
+          radius: 1 + Math.random() * (1.4 + s * 2.8),
+          age: 0,
+          maxAge: .5 + Math.random() * .65 + s * .55,
+          intensity: c
+        });
+      }
+
+      if (Math.random() < .3 + s * .55) {
+        const back = heading + Math.PI;
+        const sprayAngle = back + (Math.random() - .5) * 1.2;
+        const spraySpeed = 48 + s * 190;
+        this.spray.push({
+          x, y,
+          vx: Math.cos(sprayAngle) * spraySpeed,
+          vy: -Math.abs(Math.sin(sprayAngle)) * spraySpeed * .45 - s * 92,
+          radius: 1.1 + Math.random() * (1.6 + s * 2.3),
+          age: 0,
+          maxAge: .28 + Math.random() * .36,
+          intensity: c
+        });
+      }
+
+      if (s > .32 && Math.random() < .48) {
+        this.foam.push({ x, y, heading, speed: s, age: 0, maxAge: .24 + Math.random() * .2, intensity: c });
+      }
+    }
+  }
+  update(dtSec) {
+    this.trail.forEach(p => { p.age += dtSec; });
+    this.trail = this.trail.filter(p => p.age < p.delay + p.maxAge);
+    if (this.trail.length > WATER_WAKE_MAX_TRAIL) this.trail.splice(0, this.trail.length - WATER_WAKE_MAX_TRAIL);
+    this.bubbles.forEach(p => { p.age += dtSec; });
+    this.bubbles = this.bubbles.filter(p => p.age < p.maxAge);
+    if (this.bubbles.length > 620) this.bubbles.splice(0, this.bubbles.length - 620);
+    this.spray.forEach(p => { p.age += dtSec; p.x += p.vx * dtSec; p.y += p.vy * dtSec; p.vy += 260 * dtSec; });
+    this.spray = this.spray.filter(p => p.age < p.maxAge);
+    if (this.spray.length > 160) this.spray.splice(0, this.spray.length - 160);
+    this.foam.forEach(p => { p.age += dtSec; });
+    this.foam = this.foam.filter(p => p.age < p.maxAge);
+  }
+  edgeWidth(p) {
+    const t = clamp((p.age - p.delay) / p.maxAge, 0, 1);
+    const base = (3.5 + p.speed * 15) * (.5 + t * 2.25);
+    const wave = Math.sin(p.age * 9 + p.x * .04) * (1.2 + t * 2.8) * p.speed;
+    return Math.max(1.3, base + wave) * (.55 + p.intensity * .45);
+  }
+  draw(ctx) {
+    ctx.save();
+    const visible = this.trail.filter(p => p.age >= p.delay);
+    if (visible.length >= 2) {
+      ctx.beginPath();
+      visible.forEach((p, i) => {
+        const w = this.edgeWidth(p), perp = p.heading + Math.PI / 2;
+        const x = p.x + Math.cos(perp) * -w;
+        const y = p.y + Math.sin(perp) * -w * .34;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      for (let i = visible.length - 1; i >= 0; i--) {
+        const p = visible[i], w = this.edgeWidth(p), perp = p.heading + Math.PI / 2;
+        ctx.lineTo(p.x + Math.cos(perp) * w, p.y + Math.sin(perp) * w * .34);
+      }
+      ctx.closePath();
+      ctx.globalAlpha = .09 + visible[visible.length - 1].intensity * .13;
+      ctx.fillStyle = '#eefbff';
+      ctx.fill();
+
+      [-1, 1].forEach(side => {
+        ctx.beginPath();
+        visible.forEach((p, i) => {
+          const w = this.edgeWidth(p), perp = p.heading + Math.PI / 2;
+          const x = p.x + Math.cos(perp) * w * side;
+          const y = p.y + Math.sin(perp) * w * side * .34;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        const newest = visible[visible.length - 1];
+        const newestT = clamp((newest.age - newest.delay) / newest.maxAge, 0, 1);
+        ctx.globalAlpha = (.24 + newest.intensity * .32) * (1 - newestT * .35);
+        ctx.strokeStyle = '#e7fbff';
+        ctx.lineWidth = 1.2 + newest.speed * 1.2;
+        ctx.stroke();
+      });
+    }
+
+    this.bubbles.forEach(p => {
+      const t = p.age / p.maxAge;
+      ctx.globalAlpha = (1 - t) * (.22 + p.intensity * .4);
+      ctx.fillStyle = '#eefbff';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.radius * (1 - t * .32), 0, Math.PI * 2); ctx.fill();
+    });
+    this.foam.forEach(p => {
+      const t = p.age / p.maxAge;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.heading);
+      ctx.globalAlpha = (1 - t) * (.3 + p.intensity * .4);
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2 + p.speed;
+      ctx.beginPath(); ctx.arc(0, 0, 7 + p.speed * 12 + t * 14, .15 * Math.PI, .85 * Math.PI); ctx.stroke();
+      ctx.restore();
+    });
+    this.spray.forEach(p => {
+      const t = p.age / p.maxAge;
+      ctx.globalAlpha = (1 - t) * (.35 + p.intensity * .65);
+      ctx.fillStyle = '#bfeaff';
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(.4, p.radius * (1 - t * .4)), 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+  }
+}
+
+const highSpeedWake = new HighSpeedWakeEffect();
+
+function updateHighSpeedWake(dtSec) {
+  highSpeedWake.update(dtSec);
+  const p = myState;
+  if (!p || !p.alive || p.falling || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+    updateWaterWakeAudio(0, 0, dtSec);
+    return;
+  }
+
+  const surfaceY = waterSurfaceY(p.x);
+  const altitude = surfaceY - p.y;
+  const nearWater = clamp(
+    (WATER_WAKE_MAX_ALTITUDE - altitude) /
+      (WATER_WAKE_MAX_ALTITUDE - WATER_WAKE_MIN_ALTITUDE),
+    0, 1
+  );
+  const speedFactor = clamp(
+    (Math.max(0, p.speed) - WATER_WAKE_MIN_SPEED) /
+      (HIGH_SPEED_MAX_SPEED - WATER_WAKE_MIN_SPEED),
+    0, 1
+  );
+  const intensity = altitude >= WATER_WAKE_MIN_ALTITUDE && altitude <= WATER_WAKE_MAX_ALTITUDE
+    ? nearWater * speedFactor
+    : 0;
+
+  if (intensity > .01) {
+    // At higher speed the aircraft gets farther ahead of the newest wake
+    // sample, making the effect read as a delayed high-speed water trail.
+    const lag = 20 + speedFactor * 86;
+    const wakeX = p.x - Math.cos(p.angle) * lag;
+    highSpeedWake.emit(wakeX, surfaceY, p.angle, speedFactor, intensity, dtSec);
+  }
+  updateWaterWakeAudio(intensity, speedFactor, dtSec);
+}
+
 function triggerSonicBoom(x, y, angle) {
   specialEffects.push(new SonicBoomEffect(x, y, angle));
   screenShake = Math.max(screenShake, 12);
@@ -357,7 +596,8 @@ function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
 }
 function pruneExplosions(now) {
   for (let i = explosions.length - 1; i >= 0; i--) {
-    if (now - explosions[i].born > FX[explosions[i].kind].life) explosions.splice(i, 1);
+    const life = FX[explosions[i].kind]?.life ?? 500;
+    if (now - explosions[i].born > life) explosions.splice(i, 1);
   }
   for (let i = specialEffects.length - 1; i >= 0; i--) {
     if (specialEffects[i].dead) specialEffects.splice(i, 1);
@@ -823,6 +1063,8 @@ function respawnLocal() {
   myState.bombs = BOMB_MAX; myState.bombCooldown = 0; myState.bombRegenTimer = 0;
   myState.flares = FLARE_MAX; myState.flareCooldown = 0; myState.flareRegenTimer = 0;
   myState.alive = true;
+  highSpeedWake.reset();
+  stopWaterWakeAudio();
   myState.invulnUntil = performance.now() + INVULN_TIME;
   respawnOverlay.style.display = 'none';
 }
@@ -880,6 +1122,8 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   if (!myState || !myState.alive || myState.falling) return;
   myState.health = 0;
   myState.falling = true;
+  highSpeedWake.reset();
+  stopWaterWakeAudio();
   myState.stalled = false;
   myState.boosting = false;
   localFlareScheduleGeneration++;
@@ -1551,6 +1795,7 @@ function tryDeployFlare() {
 }
 
 function spawnFlareSalvo(x, y, angle, ownerId = myId) {
+  const sessionGeneration = localFlareScheduleGeneration;
   const ownerState = players[ownerId];
   const scheduleGeneration = ownerId === myId
     ? localFlareScheduleGeneration
@@ -1561,6 +1806,7 @@ function spawnFlareSalvo(x, y, angle, ownerId = myId) {
     // like every flare spawned on top of the first one.
     setTimeout(() => {
       if (!started) return;
+      if (sessionGeneration !== localFlareScheduleGeneration) return;
       if (ownerId === myId && scheduleGeneration !== localFlareScheduleGeneration) return;
       if (ownerState && ownerState.isBot && scheduleGeneration !== ownerState.botScheduleGeneration) return;
       const born = performance.now();
@@ -1618,6 +1864,7 @@ function updateMissiles(dtSec) {
         spawnExplosion(m.x, m.y, 'blast');
         if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.x, y: m.y });
         removeProjectileLocal('missile', m.id);
+        continue;
       } else if (now - m.born > MISSILE_LIFE + 900) {
         // Wait for the host's impact packet instead of inventing a second FX
         // event locally. This is only a silent stale-copy fallback.
@@ -2170,7 +2417,36 @@ function updateHostCombat() {
 }
 
 // ================= Networking: host side =================
+function resetForNewSession() {
+  resetAllInput();
+  const stalePeer = peer;
+  peer = null;
+  if (stalePeer && !stalePeer.destroyed) {
+    try { stalePeer.destroy(); } catch (_) { /* an already-closed peer is harmless */ }
+  }
+  started = false; isHost = false; botMode = false; myId = null; myState = null;
+  players = {}; connections = {};
+  bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
+  explosions = []; specialEffects = []; seenImpactKeys.clear();
+  highSpeedWake.reset();
+  stopWaterWakeAudio();
+  localFlareScheduleGeneration++;
+  missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
+  missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
+  currentCameraFovMult = CAMERA_FOV_MULT;
+  lastClientInputSend = 0; clientInputSeq = 0; clientActionSeq = 0;
+  lastTime = 0; lastBroadcast = 0; lastRuntimeErrorAt = 0;
+  lastIncomingLock = false;
+  if (engineCruiseAudio) { engineCruiseAudio.pause(); engineCruiseAudio.currentTime = 0; }
+  if (engineBoostAudio) { engineBoostAudio.pause(); engineBoostAudio.currentTime = 0; }
+  if (boundaryWarningEl) boundaryWarningEl.style.display = 'none';
+  if (gameArea) gameArea.classList.remove('boundary-warning', 'missile-lock');
+  if (lockWarningEl) lockWarningEl.style.display = 'none';
+  if (respawnOverlay) respawnOverlay.style.display = 'none';
+}
+
 function startHost() {
+  resetForNewSession();
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
   debugLog('SESSION', 'Starting host', { name: myName, map: validMapId(mapSelectEl?.value || selectedMapId) });
@@ -2239,6 +2515,7 @@ function startHost() {
 }
 
 function startBotMode() {
+  resetForNewSession();
   unlockAudio();
   debugLog('SESSION', 'Starting skirmish', { bots: botCountInputEl?.value, map: validMapId(mapSelectEl?.value || selectedMapId) });
   setNetworkStatus('SKIRMISH // LOCAL', 'ok');
@@ -2580,6 +2857,7 @@ function handleDied(fromId, killerId) {
 
 // ================= Networking: client side =================
 function startJoin() {
+  resetForNewSession();
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
   debugLog('SESSION', 'Starting join', { host: document.getElementById('hostIdInput').value.trim(), name: myName });
@@ -2633,17 +2911,7 @@ function startJoin() {
 }
 
 function returnToMenuAfterNetworkLoss(message) {
-  resetAllInput();
-  started = false; isHost = false; botMode = false; myId = null; myState = null;
-  players = {}; connections = {};
-  bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
-  explosions = []; specialEffects = []; seenImpactKeys.clear();
-  localFlareScheduleGeneration++;
-  missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
-  missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
-  currentCameraFovMult = CAMERA_FOV_MULT;
-  if (engineCruiseAudio) { engineCruiseAudio.pause(); engineCruiseAudio.currentTime = 0; }
-  if (engineBoostAudio) { engineBoostAudio.pause(); engineBoostAudio.currentTime = 0; }
+  resetForNewSession();
   if (gameArea) gameArea.style.display = 'none';
   if (menu) menu.style.display = 'block';
   if (chooseRole) chooseRole.style.display = 'flex';
@@ -2820,6 +3088,8 @@ window.addEventListener('blur', resetAllInput);
 document.addEventListener('visibilitychange', () => { if (document.hidden) resetAllInput(); });
 
 function wireKeyboard() {
+  if (keyboardWired) return;
+  keyboardWired = true;
   document.addEventListener('keydown', e => {
     unlockAudio();
     switch (e.key) {
@@ -2843,6 +3113,8 @@ function wireKeyboard() {
 }
 
 function wireMouse() {
+  if (mouseWired) return;
+  mouseWired = true;
   window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
   window.addEventListener('mousedown', e => {
     unlockAudio();
@@ -3144,7 +3416,7 @@ function drawGround(ctx, startX = 0, endX = WORLD_W) {
   const first = Math.floor((startX - step) / step) * step;
   const last = Math.ceil((endX + step) / step) * step;
   const bottom = WORLD_H + BORDER_FOG_DEPTH;
-  const waveHeight = x => Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
+  const waveHeight = x => waterSurfaceY(x) - GROUND_Y;
   ctx.beginPath();
   ctx.moveTo(first, bottom);
   ctx.lineTo(first, GROUND_Y + waveHeight(first));
@@ -3171,7 +3443,7 @@ function drawGround(ctx, startX = 0, endX = WORLD_W) {
   [18, 40].forEach((depth, di) => {
     ctx.beginPath();
     for (let x = first; x <= last; x += step) {
-      const h = Math.sin(x / 260 + di + 1) * 5 + Math.sin(x / 100 + di * 2) * 3;
+      const h = 0;
       if (x === first) ctx.moveTo(x, GROUND_Y + depth + h); else ctx.lineTo(x, GROUND_Y + depth + h);
     }
     ctx.stroke();
@@ -3257,35 +3529,35 @@ function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
   ctx.save();
   ctx.globalCompositeOperation = 'source-over';
 
+  // These fills are deliberately anchored to world coordinates. Using camX
+  // or camY for their position makes the fog slide with the player instead of
+  // staying attached to the arena boundary.
   if (camX < edge) {
     const g = ctx.createLinearGradient(0, 0, edge, 0);
     g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(camX - extra, camY - extra, edge + extra, viewH + extra * 2);
+    ctx.fillStyle = g; ctx.fillRect(-edge, camY - extra, edge * 2, viewH + extra * 2);
   }
   if (camX + viewW > WORLD_W - edge) {
     const g = ctx.createLinearGradient(WORLD_W, 0, WORLD_W - edge, 0);
     g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(WORLD_W - edge, camY - extra, viewW + extra, viewH + extra * 2);
+    ctx.fillStyle = g; ctx.fillRect(WORLD_W - edge, camY - extra, edge * 2, viewH + extra * 2);
   }
   if (camY < edge) {
     const g = ctx.createLinearGradient(0, 0, 0, edge);
     g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(camX - extra, camY - extra, viewW + extra * 2, edge + extra);
-  }
-  if (camY + viewH > WORLD_H - edge) {
-    const g = ctx.createLinearGradient(0, WORLD_H, 0, WORLD_H - edge);
-    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(camX - extra, WORLD_H - edge, viewW + extra * 2, viewH + extra);
+    ctx.fillStyle = g; ctx.fillRect(camX - extra, -edge, viewW + extra * 2, edge * 2);
   }
 
-  // Slow translucent wisps keep the boundary reading as thick atmosphere,
-  // rather than a static rectangle or a hard map line.
+  // Slow translucent wisps are also world-anchored. There is intentionally no
+  // bottom fog: the flat ocean is the visual and gameplay boundary there.
   ctx.globalAlpha = .16 + Math.sin(now / 430) * .03;
   ctx.fillStyle = '#efffff';
+  const wispSpan = WORLD_H + edge * 2 + 240;
   for (let i = 0; i < 8; i++) {
-    const y = camY + ((i * 173 + now * .018) % Math.max(1, viewH + 180)) - 90;
-    if (camX < edge) { ctx.beginPath(); ctx.ellipse(Math.min(0, camX + 110), y, 150, 34 + (i % 3) * 12, -.08, 0, Math.PI * 2); ctx.fill(); }
-    if (camX + viewW > WORLD_W - edge) { ctx.beginPath(); ctx.ellipse(Math.max(WORLD_W, camX + viewW - 110), y, 150, 34 + (i % 3) * 12, .08, 0, Math.PI * 2); ctx.fill(); }
+    const y = -edge + ((i * 173 + now * .018) % wispSpan);
+    if (y < camY - 180 || y > camY + viewH + 180) continue;
+    if (camX < edge) { ctx.beginPath(); ctx.ellipse(0, y, 150, 34 + (i % 3) * 12, -.08, 0, Math.PI * 2); ctx.fill(); }
+    if (camX + viewW > WORLD_W - edge) { ctx.beginPath(); ctx.ellipse(WORLD_W, y, 150, 34 + (i % 3) * 12, .08, 0, Math.PI * 2); ctx.fill(); }
   }
   ctx.restore();
 }
@@ -3508,6 +3780,7 @@ function render(now) {
   drawSkyBackdrop(ctx, camX, camY, viewW, viewH);
 
   drawGround(ctx, camX - BORDER_FOG_DEPTH - 180, camX + viewW + BORDER_FOG_DEPTH + 180);
+  highSpeedWake.draw(ctx);
 
   flares.forEach(f => drawFlare(ctx, f, now));
   bullets.forEach(b => drawBullet(ctx, b));
@@ -3579,13 +3852,17 @@ function beginLocalGame() {
   // A duplicated start packet must not create duplicate keyboard listeners
   // or a second animation loop, both of which can make the game appear frozen.
   if (myState) return;
+  resetAllInput();
   menu.style.display = 'none'; gameArea.style.display = 'block';
   myState = createLocalState();
   players[myId] = myState;
   wireKeyboard();
   wireMouse();
   resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
+  if (!resizeWired) {
+    resizeWired = true;
+    window.addEventListener('resize', resizeCanvas);
+  }
   // Send the first control state immediately. This prevents a newly joined
   // pilot from waiting for the next animation/input interval before the host
   // starts simulating its aircraft.
@@ -3643,6 +3920,7 @@ function loopFrame(ts) {
   updateHostCombat();
   updateBotHits();
   updateSpecialEffects(dtSec);
+  updateHighSpeedWake(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
   if (ts - lastBroadcast > 66) {

@@ -1,5 +1,7 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
+Current build: v1.48.1 (boundary fog and flat water patch)
+
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
 repeat. There are no coins, stars, or other collectibles. No server, no build
@@ -18,6 +20,12 @@ None. Just `index.html`, `style.css`, `game.js`, loading PeerJS from a CDN:
 ```html
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 ```
+
+When working from the numbered source folder, the active source pair is
+`02-game.js` + `04-index.html` + `10-style.css`. `01-game.js` is an older
+prototype and is not part of the current launch path; it still contains the
+retired collectible prototype. The distributable package renames the active
+files to `game.js`, `index.html`, and `style.css`.
 
 ## How the networking works (same hub topology as before)
 
@@ -97,6 +105,40 @@ warning and countdown; staying outside until the timer expires disables the
 aircraft. Bombs now have a larger model, a stronger central blast, 16 active
 shrapnel fragments, and a larger explosion radius. The host applies the blast
 damage once and clients only render the replicated impact.
+
+### v1.47 polish fixes
+
+- Restarting a sortie no longer stacks keyboard, mouse, or resize listeners.
+  This prevents a later test-fall/reset key press from performing two actions
+  at once and avoids duplicate weapon input after returning to a room.
+- Starting a new host, join, or skirmish session clears stale PeerJS state,
+  projectile arrays, lock timers, audio, and HUD warnings before the new match.
+- A missile that reaches its lifetime now stops processing immediately after
+  its final detonation, preventing a one-frame ghost update.
+- Delayed flare waves are tied to the current session, so a fast restart cannot
+  leak countermeasures from the previous sortie.
+- Unknown visual-effect kinds are safely pruned instead of being allowed to
+  throw inside the render loop.
+
+### v1.48 high-speed water wake
+
+- Added the supplied HIGH SPEED WAKE-style effect as a world-space water trail.
+  It appears only while the local aircraft is alive, above the water, and
+  moving above the wake threshold; it grows wider and persists longer as speed
+  increases, with a speed-scaled delayed trail behind the aircraft.
+- Added the two supplied waterfall recordings as layered wake audio. The
+  churn and spray layers smoothly follow wake intensity, change playback rate
+  with speed, and fade/mute outside the near-water zone. Audio is stopped on
+  death, respawn, and session reset.
+
+### v1.48.1 boundary and water polish
+
+- Fixed the left, right, and top fog so the gradients and wisps stay attached
+  to the fixed world borders instead of moving with the camera.
+- Removed bottom boundary fog; the flat ocean now provides the visual and
+  gameplay boundary at the bottom of the arena.
+- Flattened the water surface and its submerged highlight lines while keeping
+  the high-speed wake aligned to that level surface.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics
