@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.48.2 (runtime hardening and multiplayer polish)
+Current build: v1.48.4 (straight-flight propulsion pass)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -150,6 +150,26 @@ damage once and clients only render the replicated impact.
   a single bad effect from interrupting the animation loop.
 - Delayed flare waves are cancelled when their owner disconnects, and lock-on
   candidate checks now ignore incomplete remote state.
+
+### v1.48.3 soft border fog
+
+- The playable area now ends at the clear edge of the fog instead of having
+  fog drawn inside the arena before the border.
+- Fog begins exactly at each side/top border and becomes denser outward into
+  the visible outside buffer, creating a soft return-to-map boundary without
+  a hard line. The existing five-second return warning remains unchanged.
+- The bottom remains fog-free so the flat ocean continues to act as the lower
+  boundary.
+
+### v1.48.4 straight-flight propulsion
+
+- Added a small forward propulsion assist while the aircraft is flying
+  steadily. It fades out during hard turns and is disabled while air-braking,
+  so the plane can build enough speed in a straight run to cross the 600
+  supersonic threshold without requiring a dive.
+- Preserved the 900 maximum speed, high-speed assist, boost, gravity, and
+  host-authoritative multiplayer simulation. The same propulsion rule is used
+  by the local plane, host-simulated joiners, and skirmish bots.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

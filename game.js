@@ -28,6 +28,11 @@ const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
 const HIGH_SPEED_THRESHOLD = 600;
 const HIGH_SPEED_ACCELERATION = 88;
 const HIGH_SPEED_MAX_SPEED = 900;
+// A level, settled aircraft should be able to build speed without needing a
+// dive or boost. This is scaled by turn rate so hard manoeuvres still trade
+// speed for agility, while a straight run can naturally reach sonic speed.
+const STRAIGHT_FLIGHT_TURN_LIMIT = 0.55;
+const STRAIGHT_FLIGHT_PROPULSION = 285;
 const HIGH_SPEED_FOV_MULT = 1.518;
 const HIGH_SPEED_FOV_SMOOTHING = 5.5;
 const SONIC_BOOM_COOLDOWN_MS = 1800;
@@ -195,6 +200,11 @@ function angleDiff(from, to) {
   if (d > Math.PI) d -= Math.PI * 2;
   if (d < -Math.PI) d += Math.PI * 2;
   return d;
+}
+function straightFlightPropulsion(turnVelocity, airbraking) {
+  if (airbraking || !Number.isFinite(turnVelocity)) return 0;
+  const stability = 1 - clamp(Math.abs(turnVelocity) / STRAIGHT_FLIGHT_TURN_LIMIT, 0, 1);
+  return STRAIGHT_FLIGHT_PROPULSION * stability;
 }
 function waterSurfaceY(x) {
   // Keep the ocean surface level. It is also the crash boundary and the
@@ -1194,7 +1204,8 @@ function updateStalledFlight(dtSec, keys) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : 0;
-  myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight - drag) * dtSec, 0, MAX_FLIGHT_SPEED);
+  const straightPropulsion = straightFlightPropulsion(myState.turnVelocity, false);
+  myState.speed = clamp(myState.speed + (thrust + straightPropulsion + gravityAlongFlight - drag) * dtSec, 0, MAX_FLIGHT_SPEED);
   myState.boosting = boosting && myState.speed > 0;
 
   // While stalled, gravity pulls the aircraft down. Once the nose points into
@@ -1319,8 +1330,9 @@ function updateLocalPlane(dtSec, keys) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
+  const straightPropulsion = straightFlightPropulsion(myState.turnVelocity, airbraking);
   const highSpeedAssist = myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
-  myState.speed = clamp(myState.speed + (thrust + gravityAlongFlight + highSpeedAssist - drag) * dtSec, MIN_FLIGHT_SPEED, HIGH_SPEED_MAX_SPEED);
+  myState.speed = clamp(myState.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, MIN_FLIGHT_SPEED, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = myState.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !myState.highSpeedActive && performance.now() >= (myState.sonicBoomReadyAt || 0)) {
     triggerSonicBoom(myState.x, myState.y, myState.angle);
@@ -2076,8 +2088,9 @@ function updateOneBot(bot, dtSec, now) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(bot.angle);
   const drag = (bot.speed - PLANE_SPEED) * .82;
   const thrust = bot.boosting ? 250 : bot.airbraking ? -300 : 0;
+  const straightPropulsion = straightFlightPropulsion(bot.turnVelocity, bot.airbraking);
   const highSpeedAssist = bot.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
-  bot.speed = clamp(bot.speed + (thrust + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
+  bot.speed = clamp(bot.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = bot.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !bot.highSpeedActive && now >= bot.sonicBoomReadyAt) {
     triggerSonicBoom(bot.x, bot.y, bot.angle);
@@ -2317,8 +2330,9 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(p.angle);
   const drag = (p.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
+  const straightPropulsion = straightFlightPropulsion(p.turnVelocity, airbraking);
   const highSpeedAssist = p.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
-  p.speed = clamp(p.speed + (thrust + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
+  p.speed = clamp(p.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = p.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !p.highSpeedActive && now >= (p.sonicBoomReadyAt || 0)) {
     triggerSonicBoom(p.x, p.y, p.angle);
@@ -3567,27 +3581,41 @@ function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
   const pulse = .88 + Math.sin(now / 520) * .06;
   const solid = `rgba(205,226,225,${.72 * pulse})`;
   const soft = `rgba(205,226,225,${.26 * pulse})`;
+  const clear = 'rgba(205,226,225,0)';
   const extra = 220;
   ctx.save();
   ctx.globalCompositeOperation = 'source-over';
 
-  // These fills are deliberately anchored to world coordinates. Using camX
-  // or camY for their position makes the fog slide with the player instead of
-  // staying attached to the arena boundary.
+  // The playable border is the clear edge of each gradient. Fog begins at
+  // x/y = 0 or WORLD_W/H and becomes denser as the camera looks farther into
+  // the outside buffer. The fill extents follow the visible camera only to
+  // cover the whole screen; the gradients themselves stay world-anchored.
   if (camX < edge) {
-    const g = ctx.createLinearGradient(0, 0, edge, 0);
-    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(-edge, camY - extra, edge * 2, viewH + extra * 2);
+    const start = camX - extra;
+    const width = Math.max(0, -start);
+    if (width > 0) {
+      const g = ctx.createLinearGradient(-edge, 0, 0, 0);
+      g.addColorStop(0, solid); g.addColorStop(.65, soft); g.addColorStop(1, clear);
+      ctx.fillStyle = g; ctx.fillRect(start, camY - extra, width, viewH + extra * 2);
+    }
   }
   if (camX + viewW > WORLD_W - edge) {
-    const g = ctx.createLinearGradient(WORLD_W, 0, WORLD_W - edge, 0);
-    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(WORLD_W - edge, camY - extra, edge * 2, viewH + extra * 2);
+    const end = camX + viewW + extra;
+    const width = Math.max(0, end - WORLD_W);
+    if (width > 0) {
+      const g = ctx.createLinearGradient(WORLD_W, 0, WORLD_W + edge, 0);
+      g.addColorStop(0, clear); g.addColorStop(.35, soft); g.addColorStop(1, solid);
+      ctx.fillStyle = g; ctx.fillRect(WORLD_W, camY - extra, width, viewH + extra * 2);
+    }
   }
   if (camY < edge) {
-    const g = ctx.createLinearGradient(0, 0, 0, edge);
-    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
-    ctx.fillStyle = g; ctx.fillRect(camX - extra, -edge, viewW + extra * 2, edge * 2);
+    const start = camY - extra;
+    const height = Math.max(0, -start);
+    if (height > 0) {
+      const g = ctx.createLinearGradient(0, -edge, 0, 0);
+      g.addColorStop(0, solid); g.addColorStop(.65, soft); g.addColorStop(1, clear);
+      ctx.fillStyle = g; ctx.fillRect(camX - extra, start, viewW + extra * 2, height);
+    }
   }
 
   // Slow translucent wisps are also world-anchored. There is intentionally no
@@ -3595,11 +3623,17 @@ function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
   ctx.globalAlpha = .16 + Math.sin(now / 430) * .03;
   ctx.fillStyle = '#efffff';
   const wispSpan = WORLD_H + edge * 2 + 240;
+  const leftWispX = -edge * .45, rightWispX = WORLD_W + edge * .45;
   for (let i = 0; i < 8; i++) {
     const y = -edge + ((i * 173 + now * .018) % wispSpan);
     if (y < camY - 180 || y > camY + viewH + 180) continue;
-    if (camX < edge) { ctx.beginPath(); ctx.ellipse(0, y, 150, 34 + (i % 3) * 12, -.08, 0, Math.PI * 2); ctx.fill(); }
-    if (camX + viewW > WORLD_W - edge) { ctx.beginPath(); ctx.ellipse(WORLD_W, y, 150, 34 + (i % 3) * 12, .08, 0, Math.PI * 2); ctx.fill(); }
+    if (camX < edge) { ctx.beginPath(); ctx.ellipse(leftWispX, y, 150, 34 + (i % 3) * 12, -.08, 0, Math.PI * 2); ctx.fill(); }
+    if (camX + viewW > WORLD_W - edge) { ctx.beginPath(); ctx.ellipse(rightWispX, y, 150, 34 + (i % 3) * 12, .08, 0, Math.PI * 2); ctx.fill(); }
+
+    const x = -edge + ((i * 257 + now * .02) % (WORLD_W + edge * 2 + 240));
+    if (camY < edge && x >= camX - 180 && x <= camX + viewW + 180) {
+      ctx.beginPath(); ctx.ellipse(x, -edge * .45, 34 + (i % 3) * 12, 150, .08, 0, Math.PI * 2); ctx.fill();
+    }
   }
   ctx.restore();
 }
