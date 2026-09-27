@@ -63,8 +63,8 @@ const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
-const CLOUD_COUNT = 45;           // lighter background coverage; easy to tune
-const CLOUD_BANK_COUNT = 4;       // fewer dense concealment zones
+const CLOUD_COUNT = 45;
+const CLOUD_BANK_COUNT = 4;
 const MAP_THEMES = {
   city: { label: 'NEON CITY', cloudBanks: 4 },
   canyon: { label: 'RED CANYON', cloudBanks: 2 },
@@ -488,8 +488,8 @@ function buildClouds() {
       r: rand(30, 90), a: rand(0.08, 0.22)
     });
   }
-  // Fixed coordinates keep cloud concealment and missile line-of-sight
-  // identical on every multiplayer client.
+  // These fixed bank coordinates keep concealment and lock line-of-sight
+  // consistent across multiplayer clients.
   const bankLayout = [
     [.16, .20, 300, 180], [.38, .31, 350, 220],
     [.62, .18, 280, 170], [.82, .36, 330, 210]
@@ -498,7 +498,8 @@ function buildClouds() {
   cloudBanks = bankLayout.concat([
     [.52, .45, 300, 180], [.72, .52, 260, 160]
   ]).slice(0, bankCount).map(([nx, ny, rx, ry], i) => ({
-    x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180, rx, ry, alpha: .72 + (i % 3) * .07
+    x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180,
+    rx, ry, alpha: .72 + (i % 3) * .07
   }));
 }
 
@@ -521,6 +522,19 @@ function freshPlayerState(id, name) {
     x: p.x, y: p.y, angle,
     tx: p.x, ty: p.y, tangle: angle, synced: false, // network target for smoothing remote planes
     health: MAX_HEALTH, score: 0, kills: 0, deaths: 0,
+    boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0,
+    respawnAt: 0, boosting: false, airbraking: false,
+    speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
+    stallTime: 0, stallRecoverTime: 0, roll: 0,
+    barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
+    falling: false, stalled: false, deathKiller: null, fallSpinVelocity: 0,
+    highSpeedActive: false, sonicBoomReadyAt: 0,
+    missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
+    bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
+    flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0,
+    networkInput: { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false },
+    networkInputSeq: 0, networkActionSeq: 0, networkInputAt: performance.now(),
+    hostLockTargetId: null, hostLockProgress: 0, hostLockExpiresAt: 0,
     color: colorFor(id), invulnUntil: performance.now() + INVULN_TIME
   };
 }
@@ -1732,6 +1746,23 @@ function updateHostLock(p, dtSec) {
 
 function updateOneNetworkPlayer(p, dtSec, now) {
   if (!p || p.isBot || p.id === myId || p.connected === false) return;
+  // Recover safely if a player object came from an older room/session or a
+  // partially delivered roster. Without these defaults, undefined physics
+  // values become NaN and the client rejects every authoritative position.
+  if (!Number.isFinite(p.speed)) p.speed = PLANE_SPEED;
+  if (!Number.isFinite(p.verticalVelocity)) p.verticalVelocity = 0;
+  if (!Number.isFinite(p.turnVelocity)) p.turnVelocity = 0;
+  if (!Number.isFinite(p.heat)) p.heat = 0;
+  if (!Number.isFinite(p.fireTimer)) p.fireTimer = 0;
+  if (!Number.isFinite(p.missileCooldown)) p.missileCooldown = 0;
+  if (!Number.isFinite(p.missileRegenTimer)) p.missileRegenTimer = 0;
+  if (!Number.isFinite(p.bombCooldown)) p.bombCooldown = 0;
+  if (!Number.isFinite(p.bombRegenTimer)) p.bombRegenTimer = 0;
+  if (!Number.isFinite(p.flareCooldown)) p.flareCooldown = 0;
+  if (!Number.isFinite(p.flareRegenTimer)) p.flareRegenTimer = 0;
+  if (!Number.isFinite(p.missiles)) p.missiles = MISSILE_MAX;
+  if (!Number.isFinite(p.bombs)) p.bombs = BOMB_MAX;
+  if (!Number.isFinite(p.flares)) p.flares = FLARE_MAX;
   if (!p.alive) {
     if (p.respawnAt && now >= p.respawnAt) respawnNetworkPlayer(p);
     return;
@@ -2817,34 +2848,11 @@ function drawGround(ctx) {
     }
     ctx.stroke();
   });
-
-  if (activeMapId === 'canyon') drawCanyonEdgeWalls(ctx);
-  else if (activeMapId === 'islands') drawIslandSilhouettes(ctx);
-}
-
-function drawCanyonEdgeWalls(ctx) {
-  const wallColor = 'rgba(76,39,43,.92)';
-  ctx.fillStyle = wallColor;
-  ctx.beginPath(); ctx.moveTo(0, GROUND_Y); ctx.lineTo(0, 850); ctx.lineTo(150, 1080); ctx.lineTo(310, 900); ctx.lineTo(470, 1180); ctx.lineTo(650, 980); ctx.lineTo(820, GROUND_Y); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(WORLD_W, GROUND_Y); ctx.lineTo(WORLD_W, 850); ctx.lineTo(WORLD_W - 150, 1080); ctx.lineTo(WORLD_W - 310, 900); ctx.lineTo(WORLD_W - 470, 1180); ctx.lineTo(WORLD_W - 650, 980); ctx.lineTo(WORLD_W - 820, GROUND_Y); ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = 'rgba(230,157,105,.24)'; ctx.lineWidth = 5;
-  ctx.beginPath(); ctx.moveTo(0, 850); ctx.lineTo(150, 1080); ctx.lineTo(310, 900); ctx.lineTo(470, 1180); ctx.lineTo(650, 980); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(WORLD_W, 850); ctx.lineTo(WORLD_W - 150, 1080); ctx.lineTo(WORLD_W - 310, 900); ctx.lineTo(WORLD_W - 470, 1180); ctx.lineTo(WORLD_W - 650, 980); ctx.stroke();
-}
-
-function drawIslandSilhouettes(ctx) {
-  const islands = [[820, 1260, 360, 120], [WORLD_W * .5, 980, 430, 145], [WORLD_W - 920, 1360, 390, 130]];
-  islands.forEach(([x, y, rx, ry], index) => {
-    ctx.fillStyle = index % 2 ? 'rgba(20,71,67,.76)' : 'rgba(14,57,62,.82)';
-    ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, Math.PI, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(92,180,137,.36)';
-    ctx.beginPath(); ctx.ellipse(x - rx * .16, y - ry * .38, rx * .38, ry * .28, -.15, 0, Math.PI * 2); ctx.fill();
-  });
 }
 
 function drawCityWorldMap(ctx, start, end) {
-  // Buildings live in world coordinates, so the city follows the camera like
-  // every other map feature instead of sliding as a screen overlay.
+  // Keep the city anchored in world space so it follows the camera naturally
+  // instead of behaving like a fixed overlay or a border strip.
   const first = Math.floor((start - 260) / 132) * 132;
   const backBase = GROUND_Y - 220;
   const frontBase = GROUND_Y - 70;
@@ -2875,7 +2883,8 @@ function drawCityWorldMap(ctx, start, end) {
 }
 
 function drawSkyBackdrop(ctx, camX, camY, W, H) {
-  const horizon = GROUND_Y - 520;
+  // The background stays simple; the city and cloud banks are the only
+  // restored world scenery, and both are world-anchored.
   const sunX = WORLD_W * .72, sunY = 560;
   if (sunX > camX - 220 && sunX < camX + W + 220 && sunY > camY - 220 && sunY < camY + H + 220) {
     const sun = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 210);
@@ -2883,42 +2892,17 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
     ctx.fillStyle = sun; ctx.beginPath(); ctx.arc(sunX, sunY, 210, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = 'rgba(255,246,200,.85)'; ctx.beginPath(); ctx.arc(sunX, sunY, 34, 0, Math.PI * 2); ctx.fill();
   }
-  const start = Math.floor((camX - 260) / 150) * 150;
-  const end = camX + W + 260;
-  const drawRange = (base, color, scale, offset) => {
-    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(start, WORLD_H);
-    ctx.lineTo(start, base);
-    for (let x = start; x <= end; x += 150) {
-      const peak = base - 100 - Math.abs(Math.sin(x / 390 + offset)) * 230 * scale - Math.abs(Math.sin(x / 170 + offset * 2)) * 70 * scale;
-      ctx.lineTo(x + 75, peak); ctx.lineTo(x + 150, base + Math.sin(x / 210) * 12);
-    }
-    ctx.lineTo(end, WORLD_H); ctx.closePath(); ctx.fill();
-  };
-  drawRange(horizon + 250, 'rgba(38,88,99,.48)', .65, .5);
-  drawRange(horizon + 330, 'rgba(18,50,60,.78)', .9, 1.8);
-  ctx.fillStyle = 'rgba(188,232,226,.10)'; ctx.fillRect(start, horizon + 280, end - start, 180);
-
   if (activeMapId === 'city') {
+    const start = Math.floor((camX - 260) / 132) * 132;
+    const end = camX + W + 260;
     drawCityWorldMap(ctx, start, end);
-  } else if (activeMapId === 'canyon') {
-    ctx.fillStyle = 'rgba(111,57,52,.55)';
-    ctx.beginPath(); ctx.moveTo(start, horizon + 420); for (let x = start; x <= end; x += 120) ctx.lineTo(x, horizon + 170 + Math.abs(Math.sin(x / 240)) * 170); ctx.lineTo(end, WORLD_H); ctx.lineTo(start, WORLD_H); ctx.closePath(); ctx.fill();
-  } else if (activeMapId === 'storm') {
-    ctx.fillStyle = 'rgba(4,11,26,.34)'; ctx.fillRect(start, camY - 80, end - start, H + 160);
-    ctx.strokeStyle = 'rgba(168,211,238,.13)'; ctx.lineWidth = 2;
-    const rainStart = Math.floor(start / 70) * 70;
-    for (let x = rainStart; x < end; x += 70) { ctx.beginPath(); ctx.moveTo(x, camY + 60); ctx.lineTo(x - 42, camY + 210); ctx.stroke(); }
-    const lightning = Math.sin(performance.now() / 1700);
-    if (lightning > .985) { ctx.strokeStyle = 'rgba(218,242,255,.8)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(WORLD_W * .3, horizon + 100); ctx.lineTo(WORLD_W * .27, horizon + 220); ctx.lineTo(WORLD_W * .33, horizon + 185); ctx.lineTo(WORLD_W * .3, horizon + 330); ctx.stroke(); }
-  } else if (activeMapId === 'islands') {
-    ctx.fillStyle = 'rgba(10,71,76,.5)';
-    ctx.beginPath(); ctx.moveTo(start, horizon + 360); for (let x = start; x <= end; x += 140) ctx.lineTo(x, horizon + 315 + Math.sin(x / 230) * 38); ctx.lineTo(end, WORLD_H); ctx.lineTo(start, WORLD_H); ctx.closePath(); ctx.fill();
   }
 }
 
 function drawCloudBanks(ctx, now, camX, camY, viewW, viewH) {
   cloudBanks.forEach((b, index) => {
-    if (b.x + b.rx < camX - 80 || b.x - b.rx > camX + viewW + 80 || b.y + b.ry < camY - 80 || b.y - b.ry > camY + viewH + 80) return;
+    if (b.x + b.rx < camX - 80 || b.x - b.rx > camX + viewW + 80 ||
+        b.y + b.ry < camY - 80 || b.y - b.ry > camY + viewH + 80) return;
     ctx.save();
     ctx.translate(b.x, b.y);
     const pulse = .96 + Math.sin(now / 900 + index) * .04;
@@ -3155,14 +3139,6 @@ function render(now) {
 
   drawGround(ctx);
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.moveTo(0, 0); ctx.lineTo(0, WORLD_H);
-  ctx.moveTo(WORLD_W, 0); ctx.lineTo(WORLD_W, WORLD_H);
-  ctx.moveTo(0, 0); ctx.lineTo(WORLD_W, 0);
-  ctx.stroke();
-
   flares.forEach(f => drawFlare(ctx, f, now));
   bullets.forEach(b => drawBullet(ctx, b));
   missiles.forEach(m => drawMissile(ctx, m));
@@ -3178,7 +3154,7 @@ function render(now) {
 
   explosions.forEach(e => drawExplosion(ctx, e, now));
   specialEffects.forEach(e => e.draw(ctx));
-  // The foreground veil conceals planes and effects inside a cloud bank.
+  // Cloud banks remain the only foreground concealment layer.
   drawCloudBanks(ctx, now, camX, camY, viewW, viewH);
 
   ctx.restore();
@@ -3239,6 +3215,13 @@ function beginLocalGame() {
   wireMouse();
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
+  // Send the first control state immediately. This prevents a newly joined
+  // pilot from waiting for the next animation/input interval before the host
+  // starts simulating its aircraft.
+  if (isNetworkClient()) {
+    lastClientInputSend = 0;
+    sendClientInput(performance.now());
+  }
   requestAnimationFrame(loop);
 }
 

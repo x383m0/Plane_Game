@@ -5,6 +5,11 @@ join with a code. Fly around an open arena, shoot down opponents, respawn, and
 repeat. There are no coins, stars, or other collectibles. No server, no build
 step, and no dependencies to install — PeerJS is loaded from its CDN.
 
+The current arena uses the sky/background and water, with the world-space city
+buildings and cloud banks restored. Canyon/island/storm geometry, border lines,
+and other decorative map props remain disabled so the flight space stays
+visually clean.
+
 ## Dependencies to install
 
 None. Just `index.html`, `style.css`, `game.js`, loading PeerJS from a CDN:
