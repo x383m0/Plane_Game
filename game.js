@@ -539,7 +539,7 @@ function createLocalState() {
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0,
     networkInput: { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false },
-    networkInputSeq: 0, networkActionSeq: 0,
+    networkInputSeq: 0, networkActionSeq: 0, networkInputAt: performance.now(),
     hostLockTargetId: null, hostLockProgress: 0, hostLockExpiresAt: 0
   });
 }
@@ -1042,7 +1042,7 @@ function updateBullets(dtSec) {
     // Rounds persist indefinitely and are removed only when they reach the sea.
     if (b.y >= GROUND_Y - 8) {
       spawnExplosion(b.x, GROUND_Y - 8, 'water');
-      if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: GROUND_Y - 8 });
+      if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: GROUND_Y - 8, surface: 'water' });
       removeProjectileLocal('bullet', b.id); continue;
     }
     b.prevX = b.x; b.prevY = b.y;
@@ -1301,6 +1301,7 @@ function spawnFlareSalvo(x, y, angle, ownerId = myId) {
     // inserted immediately with future timestamps, which made the salvo look
     // like every flare spawned on top of the first one.
     setTimeout(() => {
+      if (!started) return;
       if (ownerId === myId && scheduleGeneration !== localFlareScheduleGeneration) return;
       if (ownerState && ownerState.isBot && scheduleGeneration !== ownerState.botScheduleGeneration) return;
       const born = performance.now();
@@ -1701,6 +1702,20 @@ function findHostLockTarget(p) {
 }
 
 function updateHostLock(p, dtSec) {
+  const now = performance.now();
+  if (p.hostLockTargetId != null && p.hostLockExpiresAt > now) {
+    const heldTarget = players[p.hostLockTargetId];
+    if (heldTarget && heldTarget.alive !== false && heldTarget.connected !== false) {
+      // A completed lock is held even after the pilot looks away. Do not
+      // refresh the timer every frame; it must genuinely expire.
+      p.hostLockProgress = MISSILE_LOCK_DELAY;
+      return;
+    }
+    p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
+  }
+  if (p.hostLockExpiresAt && p.hostLockExpiresAt <= now) {
+    p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
+  }
   const targetId = findHostLockTarget(p);
   if (targetId == null) {
     p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
@@ -1710,7 +1725,9 @@ function updateHostLock(p, dtSec) {
     p.hostLockTargetId = targetId; p.hostLockProgress = 0;
   }
   p.hostLockProgress = clamp(p.hostLockProgress + dtSec * 1000, 0, MISSILE_LOCK_DELAY);
-  if (p.hostLockProgress >= MISSILE_LOCK_DELAY) p.hostLockExpiresAt = performance.now() + MISSILE_LOCK_HOLD_MS;
+  if (p.hostLockProgress >= MISSILE_LOCK_DELAY && p.hostLockExpiresAt <= now) {
+    p.hostLockExpiresAt = now + MISSILE_LOCK_HOLD_MS;
+  }
 }
 
 function updateOneNetworkPlayer(p, dtSec, now) {
@@ -1720,7 +1737,10 @@ function updateOneNetworkPlayer(p, dtSec, now) {
     return;
   }
   if (p.falling) { updateRemoteDeathFall(p, dtSec); return; }
-  const input = p.networkInput || { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false };
+  const inputFresh = now - (p.networkInputAt || 0) < 350;
+  const input = inputFresh
+    ? (p.networkInput || { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false })
+    : { aimX: Math.cos(p.angle), aimY: Math.sin(p.angle), boost: false, airbrake: false, shoot: false };
   const targetAngle = Math.atan2(input.aimY || 0, input.aimX || 1);
   const diff = angleDiff(p.angle, targetAngle);
   const boosting = !!input.boost && !input.airbrake;
@@ -1823,7 +1843,10 @@ function updateHostCombat() {
     Object.values(players).forEach(target => {
       if (hit || target.id === s.ownerId || !target.alive || target.falling || now < (target.invulnUntil || 0)) return;
       if (pointSegmentDistance(target.x, target.y, s.prevX ?? s.x, s.prevY ?? s.y, s.x, s.y) >= SHRAPNEL_HIT_RADIUS) return;
-      hit = true; spawnExplosion(s.x, s.y, 'spark', Math.atan2(s.vy, s.vx));
+      hit = true;
+      const hitAngle = Math.atan2(s.vy, s.vx);
+      spawnExplosion(s.x, s.y, 'spark', hitAngle);
+      broadcast({ type: 'effect', kind: 'spark', x: s.x, y: s.y, angle: hitAngle });
       applyHostDamage(target, SHRAPNEL_DAMAGE, s.ownerId);
     });
     if (hit) shrapnels.splice(i, 1);
@@ -1870,9 +1893,14 @@ function startHost() {
       broadcastRoster();
     });
     c.on('data', data => handleHostReceive(id, data));
-    c.on('close', () => { if (players[id]) players[id].connected = false; broadcastRoster(); });
+    c.on('close', () => {
+      if (players[id]) players[id].connected = false;
+      removePlayerArtifacts(id);
+      broadcastRoster();
+    });
     c.on('error', () => {
       if (players[id]) players[id].connected = false;
+      removePlayerArtifacts(id);
       broadcastRoster();
     });
   });
@@ -1909,6 +1937,14 @@ function nextFreeId() {
 
 function broadcast(msg) {
   Object.values(connections).forEach(c => { if (c.open) c.send(msg); });
+}
+
+function removePlayerArtifacts(ownerId) {
+  bullets = bullets.filter(p => p.ownerId !== ownerId);
+  missiles = missiles.filter(p => p.ownerId !== ownerId);
+  bombs = bombs.filter(p => p.ownerId !== ownerId);
+  shrapnels = shrapnels.filter(p => p.ownerId !== ownerId);
+  flares = flares.filter(p => p.ownerId !== ownerId);
 }
 
 function broadcastRoster() {
@@ -1956,6 +1992,7 @@ function handleClientInput(fromId, data) {
   const p = players[fromId];
   if (!p || fromId === myId || !validNetworkInput(data) || data.seq <= (p.networkInputSeq || 0)) return;
   p.networkInputSeq = data.seq;
+  p.networkInputAt = performance.now();
   p.networkInput = {
     aimX: clamp(data.aimX, -window.innerWidth * 2, window.innerWidth * 2),
     aimY: clamp(data.aimY, -window.innerHeight * 2, window.innerHeight * 2),
@@ -2157,6 +2194,11 @@ function handleSonicBoom(fromId, data) {
   });
 }
 
+function handleRemoteEffect(data) {
+  if (!data || !Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+  if (data.kind === 'spark') spawnExplosion(data.x, data.y, 'spark', Number.isFinite(data.angle) ? data.angle : -Math.PI / 2);
+}
+
 // A bullet or missile just hit whoever it was aimed at (data.x/y is where).
 // The victim's client already removed its own copy and sent this so every
 // other client's copy of that same projectile disappears with an explosion
@@ -2179,7 +2221,7 @@ function handleImpact(fromId, data) {
     }
   }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'impact', from: fromId, kind: data.kind, id: data.id, x: data.x, y: data.y });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'impact', from: fromId, kind: data.kind, id: data.id, x: data.x, y: data.y, surface: data.surface || null });
   });
 }
 
@@ -2199,6 +2241,7 @@ function startJoin() {
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
   setNetworkStatus('P2P // CONNECTING', 'warn');
+  isHost = false;
   botMode = false;
   const hostId = document.getElementById('hostIdInput').value.trim();
   if (!hostId) return;
@@ -2230,11 +2273,36 @@ function startJoin() {
       chooseRole.style.display = 'flex'; lobby.style.display = 'none';
     });
     conn.on('close', () => {
-      statusEl.textContent = 'Host connection closed.';
-      setNetworkStatus('P2P // HOST LOST', 'bad');
-      if (!started) { chooseRole.style.display = 'flex'; lobby.style.display = 'none'; }
+      if (started) returnToMenuAfterNetworkLoss('Host connection closed. Start or join another room.');
+      else {
+        statusEl.textContent = 'Host connection closed.';
+        setNetworkStatus('P2P // HOST LOST', 'bad');
+        chooseRole.style.display = 'flex'; lobby.style.display = 'none';
+      }
     });
   });
+}
+
+function returnToMenuAfterNetworkLoss(message) {
+  resetAllInput();
+  started = false; isHost = false; botMode = false; myId = null; myState = null;
+  players = {}; connections = {};
+  bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
+  explosions = []; specialEffects = []; seenImpactKeys.clear();
+  localFlareScheduleGeneration++;
+  missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
+  missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
+  currentCameraFovMult = CAMERA_FOV_MULT;
+  if (engineCruiseAudio) { engineCruiseAudio.pause(); engineCruiseAudio.currentTime = 0; }
+  if (engineBoostAudio) { engineBoostAudio.pause(); engineBoostAudio.currentTime = 0; }
+  if (gameArea) gameArea.style.display = 'none';
+  if (menu) menu.style.display = 'block';
+  if (chooseRole) chooseRole.style.display = 'flex';
+  if (lobby) lobby.style.display = 'none';
+  if (startBtn) startBtn.style.display = 'none';
+  if (waitHint) waitHint.style.display = 'none';
+  if (statusEl) statusEl.textContent = message;
+  setNetworkStatus('P2P // OFFLINE', 'bad');
 }
 
 function handleClientReceive(data) {
@@ -2258,38 +2326,40 @@ function handleClientReceive(data) {
   else if (data.type === 'projectiles') {
     reconcileAuthoritativeProjectiles(data);
   }
+  else if (data.type === 'effect') {
+    handleRemoteEffect(data);
+  }
   else if (data.type === 'state') {
     const p = players[data.from] = players[data.from] || freshPlayerState(data.from, 'Player ' + (data.from + 1));
     applyRemoteState(p, data);
   }
   else if (data.type === 'shoot') {
-    if (data.from !== myId && data.id != null && !projectileExists('bullet', data.id)) {
+    if (data.id != null && !projectileExists('bullet', data.id)) {
       bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
       spawnExplosion(data.x, data.y, 'muzzle');
+      playCannonSound(data.x, data.y);
     }
   }
   else if (data.type === 'missile') {
-    if (data.from !== myId && data.id != null && !projectileExists('missile', data.id)) {
+    if (data.id != null && !projectileExists('missile', data.id)) {
       missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
   }
   else if (data.type === 'bomb') {
-    if (data.from !== myId && data.id != null && !projectileExists('bomb', data.id)) {
+    if (data.id != null && !projectileExists('bomb', data.id)) {
       bombs.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
     }
   }
   else if (data.type === 'flare') {
-    if (data.from !== myId) {
-      spawnFlareSalvo(data.x, data.y, data.angle || 0, data.from);
-    }
+    spawnFlareSalvo(data.x, data.y, data.angle || 0, data.from);
   }
   else if (data.type === 'sonicBoom') {
-    if (data.from !== myId) triggerSonicBoom(data.x, data.y, data.angle || 0);
+    triggerSonicBoom(data.x, data.y, data.angle || 0);
   }
   else if (data.type === 'impact') {
-    if (data.from !== myId && rememberImpact(data.kind, data.id)) {
+    if (rememberImpact(data.kind, data.id)) {
       if (data.kind === 'bomb') {
         const bomb = bombs.find(b => b.id === data.id);
         if (bomb) detonateBomb(bomb);
@@ -2299,8 +2369,8 @@ function handleClientReceive(data) {
           spawnBombShrapnel(data.x, data.y, data.from);
         }
       } else {
-      removeProjectileLocal(data.kind, data.id);
-      spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
+        removeProjectileLocal(data.kind, data.id);
+        spawnExplosion(data.x, data.y, data.surface === 'water' ? 'water' : data.kind === 'missile' ? 'blast' : 'spark');
       }
     }
   }
@@ -3189,6 +3259,10 @@ function loop(ts) {
 }
 
 function loopFrame(ts) {
+  // A host-loss reset intentionally clears myState and stops the old sortie.
+  // Exit before HUD/physics code touches the cleared state; a new match will
+  // create a fresh animation loop through beginLocalGame().
+  if (!started || !myState) return;
   const dt = Math.min(lastTime ? ts - lastTime : 16, 60);
   lastTime = ts;
   const dtSec = dt / 1000;

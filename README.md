@@ -1,10 +1,9 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-A free-for-all biplane dogfight in the browser. One person hosts, up to seven
-friends join with a code. Fly around an open arena, collect coins for score,
-shoot down opponents, respawn, repeat. No server, no build step, no
-dependencies to install — same approach as the Tetris project this was built
-from.
+A free-for-all dogfight in the browser. One person hosts, up to seven friends
+join with a code. Fly around an open arena, shoot down opponents, respawn, and
+repeat. There are no coins, stars, or other collectibles. No server, no build
+step, and no dependencies to install — PeerJS is loaded from its CDN.
 
 ## Dependencies to install
 
@@ -17,30 +16,25 @@ None. Just `index.html`, `style.css`, `game.js`, loading PeerJS from a CDN:
 ## How the networking works (same hub topology as before)
 
 With more than two players, everyone connecting directly to everyone else
-gets complicated fast. So everyone connects only to the host, and the host
-relays messages — if Player 2 shoots at Player 3, that shot travels
-Player 2 → Host → Player 3. Joiners only ever need the host's code, never
-each other's.
+gets complicated fast. Everyone connects only to the host, and the host
+relays the authoritative match state — if Player 2 shoots at Player 3, that
+shot travels Player 2 → Host → Player 3. Joiners only need the host's code.
 
 Split of responsibilities:
 
-- **Each client is authoritative over its own plane.** You decide your own
-  position, heading, and — crucially — whether an incoming bullet hit *you*.
-  This keeps movement perfectly smooth locally (no waiting on the network)
-  and matches how the Tetris version had each player own their own board.
-- **The host is authoritative over coins and kill credit.** The host spawns
-  coins, decides who gets credit when a `collect` message arrives first, and
-  tallies kills/deaths when a `died` message arrives — so score can't
-  double-count even if two players grab the same coin in the same instant.
+- **The host is authoritative over movement, weapons, projectiles, damage,
+  lock validity, and kill credit.** Clients submit input and one-shot actions;
+  the host simulates them and broadcasts snapshots so every player shares the
+  same projectile and collision timeline.
 - **Position updates broadcast ~15 times/sec** (every 66ms), same cadence as
   the Tetris board sync. Each client still *renders* at a full 60fps, though:
   incoming updates are stored as a target position, and every other player's
   plane glides toward that target each frame instead of snapping to it. Without
   this, remote planes visibly teleport 15 times a second, which reads as
   choppy, low-framerate motion even though your own plane is smooth.
-- **Shots are relayed as fire-and-forget events** — the shooter simulates the
-  bullet locally and tells everyone else "a bullet was fired from here, going
-  this way," and each client checks that bullet against their own plane only.
+- **Projectile snapshots and impact events are replicated together.** Clients
+  render the host's projectile positions, and impact effects are deduplicated
+  so a bomb, missile, or bullet cannot explode twice on one screen.
 
 ## Hosting on GitHub Pages
 
@@ -51,8 +45,10 @@ Split of responsibilities:
    branch (usually `main`) and the root folder, and save.
 3. GitHub gives you a URL like `https://yourname.github.io/your-repo/`.
    Share that link — anyone who opens it can host or join a match.
-4. Future edits: just re-upload the changed files and commit. Pages
-   redeploys automatically.
+4. Future edits: just re-upload the changed files and commit. Pages redeploys
+   automatically. Use the flat package files named `index.html`, `style.css`,
+   and `game.js`; the numbered files in the source folder are the editable
+   project copies.
 
 ## How to play with up to 8 people
 
@@ -61,29 +57,32 @@ Split of responsibilities:
 3. Up to seven friends each click **Join Game** and paste in that code.
 4. The host sees a lobby list of who's connected and clicks **Start Game**
    whenever ready (doesn't need all 8).
-5. Everyone spawns into the same open sky arena. Coins are worth 10 points;
-   shooting someone down is worth 50 and adds to your kill count.
+5. Everyone spawns into the same open sky arena. Shooting someone down is
+   worth 50 points and adds to your kill count.
 6. Get shot to 0 HP and you respawn after ~2 seconds with brief
    invulnerability (your plane flickers). There's no match end — it's an
    open-ended arena, so play as long as you like.
 
 ## Controls
 
-- **Mouse movement** — steer. The plane always flies forward and turns to
-  face wherever your cursor is (the camera keeps you centered on screen, so
-  the turn is computed straight from screen-center → cursor).
-- **↑** or **W** — boost (limited meter, recharges when not in use)
-- **Left click** or **Space** — fire, at a very high rate of fire
+- **Mouse movement** — steer. The camera keeps the plane centered, so the
+  turn target is computed from screen-center → cursor.
+- **↑** or **W** — boost
+- **S / Shift** — air-brake
+- **Q / E** — barrel roll
+- **Left click** or **Space** — cannon
+- **Right click** — missile
+- **B** — bomb
+- **F** — chaff/flares
+- **R** — test uncontrolled fall / reset
 
 ### Gun heat
 
-The gun fires fast (about 90ms between shots), but holding it down builds
-heat. Max out the heat bar and the gun locks up until it cools back down —
-so short controlled bursts beat holding the trigger. Heat drains on its own
-whenever you let off fire, and drains faster once you've overheated. Like
-the hit-detection trust model below, heat is tracked client-side and
-self-reported, so it's fine for casual play but not hardened against a
-modified client.
+The gun fires fast, but holding it down builds heat. Max out the 300-point
+heat bar and the gun locks up until it cools back down, so short controlled
+bursts beat holding the trigger. Heat drains when you let off fire and drains
+faster after overheating. In multiplayer the host owns each player's heat and
+fire cooldown.
 
 ## Known limitations
 - Fixed: shots fired by anyone other than the host used to be invisible to
@@ -93,12 +92,11 @@ modified client.
   before the code that checks the respawn timer, so that check never ran.
 
 - If the host disconnects, the match ends for everyone (the host is the
-  relay hub and the coin/score authority). Joiners disconnecting doesn't
-  affect anyone else.
-- Hit detection trusts the player being shot at to self-report the hit
-  (the same trust model the Tetris version used for eliminations). Fine for
-  a casual game with friends; not hardened against a modified client.
+  relay hub and match authority); joiners disconnecting does not affect
+  anyone else.
+- The host owns collision and damage decisions. A player with a strict
+  firewall may still need a TURN relay for PeerJS to connect.
 - Same WebRTC caveat as always: same-network setups connect reliably;
   separate networks with strict firewalls occasionally need a TURN relay,
   which isn't included here.
-- No sound effects or mobile touch controls yet — keyboard only.
+- Mobile touch controls are not included; keyboard and mouse are recommended.
