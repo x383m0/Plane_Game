@@ -84,6 +84,7 @@ const BOT_RESPAWN_DELAY = RESPAWN_DELAY;
 const BOT_FIRE_RANGE = 1050;
 const BOT_GUN_CONE = Math.PI / 10;
 const BOT_BOMB_CONE = Math.PI / 5;
+const BOT_FIRE_COOLDOWN = 85; // keeps five local pilots readable and prevents projectile floods
 const BOT_MISSILE_RANGE = 950;
 const BOT_BOMB_RANGE = 520;
 const BOT_AI_TICK_MS = 90;
@@ -1376,7 +1377,7 @@ function botThink(bot, now) {
     const gunFacing = target && Math.abs(angleDiff(bot.angle, targetAngle)) <= BOT_GUN_CONE;
     if (gunFacing && targetDistance <= BOT_FIRE_RANGE && !bot.overheated && bot.fireTimer <= 0 && Math.random() < bot.botSkill) {
       fireBulletFor(bot, bot.id, false);
-      bot.fireTimer = FIRE_COOLDOWN;
+      bot.fireTimer = BOT_FIRE_COOLDOWN;
       bot.heat = Math.min(HEAT_MAX, bot.heat + HEAT_PER_SHOT);
       if (bot.heat >= HEAT_MAX) bot.overheated = true;
     }
@@ -1404,6 +1405,14 @@ function botThink(bot, now) {
 }
 
 function updateOneBot(bot, dtSec, now) {
+  // A bad network-style value must not poison the shared render loop. Bots
+  // are local, so recovering this one aircraft is safer than freezing the
+  // entire sortie when a projectile/effect produces invalid coordinates.
+  if (!Number.isFinite(bot.x) || !Number.isFinite(bot.y) || !Number.isFinite(bot.angle) ||
+      !Number.isFinite(bot.speed) || !Number.isFinite(bot.verticalVelocity)) {
+    respawnBot(bot);
+    return;
+  }
   if (!bot.alive) {
     if (bot.respawnAt && now >= bot.respawnAt) respawnBot(bot);
     return;
@@ -1479,7 +1488,15 @@ function updateOneBot(bot, dtSec, now) {
 
 function updateBots(dtSec, now) {
   if (!botMode) return;
-  Object.values(players).forEach(p => { if (p.isBot) updateOneBot(p, dtSec, now); });
+  Object.values(players).forEach(p => {
+    if (!p.isBot) return;
+    try {
+      updateOneBot(p, dtSec, now);
+    } catch (error) {
+      console.error('Bot update recovered:', error);
+      respawnBot(p);
+    }
+  });
 }
 
 function damageBot(bot, amount, killerId) {
@@ -1579,7 +1596,7 @@ function startBotMode() {
   // Bots run locally as a private host-like sortie. No PeerJS connection is
   // created, so starting this mode never interferes with room multiplayer.
   isHost = true; botMode = true; myId = 0; peer = null; connections = {};
-  players = {}; coins = []; bullets = []; missiles = []; bombs = []; flares = [];
+  players = {}; coins = []; bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; started = true;
   players[0] = freshPlayerState(0, myName);
   buildClouds(); spawnInitialCoins(); spawnBotSquadron();
@@ -2636,9 +2653,23 @@ function beginLocalGame() {
   requestAnimationFrame(loop);
 }
 
-let lastTime = 0, lastBroadcast = 0;
+let lastTime = 0, lastBroadcast = 0, lastRuntimeErrorAt = 0;
 
+// Keep one bad bot/effect frame from permanently stopping requestAnimationFrame.
+// The original error is still logged for diagnosis, but the sortie continues.
 function loop(ts) {
+  try {
+    loopFrame(ts);
+  } catch (error) {
+    if (ts - lastRuntimeErrorAt > 1000) {
+      lastRuntimeErrorAt = ts;
+      console.error('Wings Arena frame recovered:', error);
+    }
+    requestAnimationFrame(loop);
+  }
+}
+
+function loopFrame(ts) {
   const dt = Math.min(lastTime ? ts - lastTime : 16, 60);
   lastTime = ts;
   const dtSec = dt / 1000;
