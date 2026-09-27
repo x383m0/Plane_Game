@@ -73,13 +73,21 @@ const FX = {
 };
 
 const MAX_HEALTH = 100, RESPAWN_DELAY = 2200, INVULN_TIME = 1500;
+const BOT_COUNT = 5;
+const BOT_RESPAWN_DELAY = RESPAWN_DELAY;
+const BOT_FIRE_RANGE = 1050;
+const BOT_GUN_CONE = Math.PI / 10;
+const BOT_BOMB_CONE = Math.PI / 5;
+const BOT_MISSILE_RANGE = 950;
+const BOT_BOMB_RANGE = 520;
+const BOT_AI_TICK_MS = 90;
 const COIN_CAP = 16, COIN_VALUE = 10, COIN_PICKUP_RADIUS = 30, COIN_SPAWN_EVERY = 1800;
 const KILL_SCORE = 50;
 
 const COLORS = ['#ff6b6b', '#4dd0e1', '#ffd166', '#9d7bff', '#6fe08a', '#ff9f43', '#5ea8ff', '#f472b6'];
 
 // ================= Shared state =================
-let peer = null, isHost = false, myId = null, myName = 'Player';
+let peer = null, isHost = false, botMode = false, myId = null, myName = 'Player';
 let connections = {};             // host: {id -> DataConnection}; client: {host -> DataConnection}
 let players = {};                 // id -> {id,name,connected,alive,x,y,angle,health,score,kills,color}
 let coins = [];                   // {id,x,y}
@@ -97,7 +105,7 @@ let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
 let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, lockProgressEl, lockProgressFillEl, lockProgressTextEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
-let statusEl, lobbyList, startBtn, chooseRole, lobby, menu, gameArea, waitHint;
+let statusEl, lobbyList, startBtn, botsBtn, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let lastSpawnTick = 0;
 let audioCtx = null, masterGain = null;
@@ -215,7 +223,11 @@ function noiseBurst(duration, volume, filterType = 'bandpass', frequency = 900) 
   g.gain.setValueAtTime(volume, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + duration);
   source.connect(filter); filter.connect(g); g.connect(masterGain); source.start();
 }
-function playCannonSound() { if (!playAsset('cannon', .34, 1.22)) { noiseBurst(.055, .12, 'bandpass', 1100); tone(82, .09, .09, 'sawtooth', -32); } }
+function playCannonSound(x = null, y = null) {
+  const volume = x == null || y == null ? .34 : proximityVolume(x, y, .34);
+  if (volume <= .005) return;
+  if (!playAsset('cannon', volume, 1.22)) { noiseBurst(.055, volume * .35, 'bandpass', 1100); tone(82, .09, volume * .26, 'sawtooth', -32); }
+}
 function playMissileLaunchSound(x = null, y = null) {
   const volume = x == null || y == null ? .36 : proximityVolume(x, y, .36);
   if (volume <= .005) return;
@@ -463,7 +475,7 @@ function freshPlayerState(id, name) {
 function createLocalState() {
   const base = freshPlayerState(myId, myName);
   return Object.assign(base, {
-    boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0,
+    boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0, airbraking: false,
     speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
     stallTime: 0, stallRecoverTime: 0,
     roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
@@ -473,6 +485,31 @@ function createLocalState() {
     bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
     flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
   });
+}
+
+function createBotState(id, name, skill = .7) {
+  const base = freshPlayerState(id, name);
+  return Object.assign(base, {
+    isBot: true, botSkill: skill, botTargetId: null, botTargetLockUntil: 0, botLockTargetId: null,
+    botLockProgress: 0, botNextThink: performance.now() + rand(120, 520),
+    botOrbitSign: id % 2 ? 1 : -1, botScheduleGeneration: 0,
+    boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0, respawnAt: 0, airbraking: false,
+    speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
+    stallTime: 0, stallRecoverTime: 0,
+    roll: 0, barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
+    falling: false, stalled: false, deathKiller: null, fallSpinVelocity: 0,
+    highSpeedActive: false, sonicBoomReadyAt: 0,
+    missiles: MISSILE_MAX, missileCooldown: 0, missileRegenTimer: 0,
+    bombs: BOMB_MAX, bombCooldown: 0, bombRegenTimer: 0,
+    flares: FLARE_MAX, flareCooldown: 0, flareRegenTimer: 0
+  });
+}
+
+function spawnBotSquadron() {
+  for (let i = 0; i < BOT_COUNT; i++) {
+    const id = i + 1;
+    players[id] = createBotState(id, ['RAVEN', 'VIPER', 'NOVA', 'FALCON', 'WRAITH'][i], .58 + i * .055);
+  }
 }
 
 function respawnLocal() {
@@ -497,6 +534,49 @@ function respawnLocal() {
   myState.alive = true;
   myState.invulnUntil = performance.now() + INVULN_TIME;
   respawnOverlay.style.display = 'none';
+}
+
+function respawnBot(bot) {
+  const p = randomSpawnPoint();
+  bot.x = p.x; bot.y = p.y; bot.angle = rand(0, Math.PI * 2);
+  bot.health = MAX_HEALTH; bot.alive = true; bot.connected = true;
+  bot.falling = false; bot.stalled = false; bot.deathKiller = null;
+  bot.speed = PLANE_SPEED; bot.verticalVelocity = 0; bot.turnVelocity = 0;
+  bot.stallTime = 0; bot.stallRecoverTime = 0; bot.roll = 0;
+  bot.barrelRollUntil = 0; bot.barrelRollCooldown = 0; bot.barrelRollDirection = 1;
+  bot.highSpeedActive = false; bot.sonicBoomReadyAt = 0;
+  bot.botTargetId = null; bot.botTargetLockUntil = 0; bot.botLockTargetId = null; bot.botLockProgress = 0;
+  bot.botNextThink = performance.now() + rand(100, 450);
+  bot.botScheduleGeneration++;
+  bot.heat = 0; bot.overheated = false; bot.fireTimer = 0; bot.airbraking = false;
+  bot.missiles = MISSILE_MAX; bot.missileCooldown = 0; bot.missileRegenTimer = 0;
+  bot.bombs = BOMB_MAX; bot.bombCooldown = 0; bot.bombRegenTimer = 0;
+  bot.flares = FLARE_MAX; bot.flareCooldown = 0; bot.flareRegenTimer = 0;
+  bot.respawnAt = 0; bot.invulnUntil = performance.now() + INVULN_TIME;
+}
+
+function beginBotDeathFall(bot, killerId) {
+  if (!bot || !bot.alive || bot.falling) return;
+  bot.health = 0; bot.falling = true; bot.stalled = false; bot.boosting = false;
+  bot.deathKiller = killerId; bot.speed = 0; bot.turnVelocity = 0;
+  bot.verticalVelocity = Math.max(45, bot.verticalVelocity);
+  bot.fallSpinVelocity = STALL_SPIN_SPEED * (bot.id % 2 ? 1 : -1);
+  bot.botScheduleGeneration++;
+}
+
+function finishBotDeath(bot) {
+  if (!bot || !bot.alive) return;
+  bot.alive = false; bot.falling = false; bot.boosting = false;
+  bot.respawnAt = performance.now() + BOT_RESPAWN_DELAY;
+  handleDied(bot.id, bot.deathKiller);
+}
+
+function updateBotDeathFall(bot, dtSec) {
+  bot.verticalVelocity += FALL_GRAVITY * dtSec;
+  bot.speed = 0; bot.turnVelocity = 0;
+  bot.roll += bot.fallSpinVelocity * dtSec;
+  bot.y += bot.verticalVelocity * dtSec;
+  if (bot.y >= GROUND_Y - 12) finishBotDeath(bot);
 }
 
 function crashLocal(message = 'You crashed.') {
@@ -828,22 +908,29 @@ function updateLocalPlane(dtSec, keys) {
   }
 }
 
-function fireBullet() {
-  unlockAudio();
+function fireBulletFor(state, ownerId, replicate = false) {
   const nose = 38;
   const b = {
-    id: myId + '-' + (nextBulletId++), ownerId: myId,
-    x: myState.x + Math.cos(myState.angle) * nose,
-    y: myState.y + Math.sin(myState.angle) * nose,
-    prevX: myState.x, prevY: myState.y, angle: myState.angle,
-    vx: Math.cos(myState.angle) * BULLET_SPEED,
-    vy: Math.sin(myState.angle) * BULLET_SPEED,
+    id: ownerId + '-' + (nextBulletId++), ownerId,
+    x: state.x + Math.cos(state.angle) * nose,
+    y: state.y + Math.sin(state.angle) * nose,
+    prevX: state.x, prevY: state.y, angle: state.angle,
+    vx: Math.cos(state.angle) * BULLET_SPEED,
+    vy: Math.sin(state.angle) * BULLET_SPEED,
     born: performance.now()
   };
   bullets.push(b);
   spawnExplosion(b.x, b.y, 'muzzle');
-  playCannonSound(); recoilKick = Math.min(10, recoilKick + 3.2);
-  sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
+  playCannonSound(ownerId === myId ? null : b.x, ownerId === myId ? null : b.y);
+  if (ownerId === myId) recoilKick = Math.min(10, recoilKick + 3.2);
+  if (replicate) sendEvent({ type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle });
+  return b;
+}
+
+function fireBullet() {
+  if (!myState) return;
+  unlockAudio();
+  fireBulletFor(myState, myId, true);
 }
 
 function tryBarrelRoll(direction = 1) {
@@ -863,21 +950,27 @@ function testDeathOrReset() {
   }
 }
 
-function tryDropBomb() {
-  if (!myState || !myState.alive || myState.bombCooldown > 0 || myState.bombs <= 0) return;
-  unlockAudio();
-  myState.bombCooldown = BOMB_COOLDOWN;
-  myState.bombs--;
-  const angle = myState.angle;
+function dropBombFor(state, ownerId, replicate = false) {
+  if (!state || !state.alive || state.bombCooldown > 0 || state.bombs <= 0) return null;
+  state.bombCooldown = BOMB_COOLDOWN;
+  state.bombs--;
+  const angle = state.angle;
   const b = {
-    id: myId + '-b' + (nextBulletId++), ownerId: myId,
-    x: myState.x - Math.cos(angle) * 18, y: myState.y - Math.sin(angle) * 18,
+    id: ownerId + '-b' + (nextBulletId++), ownerId,
+    x: state.x - Math.cos(angle) * 18, y: state.y - Math.sin(angle) * 18,
     vx: Math.cos(angle) * BOMB_SPEED, vy: Math.sin(angle) * BOMB_SPEED,
     born: performance.now()
   };
   bombs.push(b);
   spawnExplosion(b.x, b.y, 'launch');
-  sendEvent({ type: 'bomb', id: b.id, x: b.x, y: b.y, vx: b.vx, vy: b.vy });
+  if (replicate) sendEvent({ type: 'bomb', id: b.id, x: b.x, y: b.y, vx: b.vx, vy: b.vy });
+  return b;
+}
+
+function tryDropBomb() {
+  if (!myState) return;
+  unlockAudio();
+  dropBombFor(myState, myId, true);
 }
 
 function updateBullets(dtSec) {
@@ -971,47 +1064,63 @@ function updateMissileLock(dtSec) {
   }
 }
 
-function tryFireMissile() {
-  if (!myState || !myState.alive || myState.falling || myState.missileCooldown > 0 || myState.missiles <= 0) return;
-  unlockAudio();
-  myState.missileCooldown = MISSILE_COOLDOWN;
-  myState.missiles--;
+function fireMissileFor(state, ownerId, targetId = null, replicate = false) {
+  if (!state || !state.alive || state.falling || state.missileCooldown > 0 || state.missiles <= 0) return null;
+  state.missileCooldown = MISSILE_COOLDOWN;
+  state.missiles--;
+  const nose = 22;
+  const m = {
+    id: ownerId + '-m' + (nextMissileId++), ownerId, targetId,
+    x: state.x + Math.cos(state.angle) * nose,
+    y: state.y + Math.sin(state.angle) * nose,
+    angle: state.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [], exhaust: 1
+  };
+  missiles.push(m);
+  spawnExplosion(m.x, m.y, 'launch');
+  playMissileLaunchSound(m.x, m.y); screenShake = Math.max(screenShake, ownerId === myId ? 7 : 3);
+  if (replicate) sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, locked: true });
+  return m;
+}
 
+function tryFireMissile() {
+  if (!myState) return;
+  unlockAudio();
   // Releasing before the lock completes still fires, but the missile is
   // dumb/unguided. A completed facing lock is the only thing that grants a
   // target and homing behavior.
   const targetId = missileLockTargetId != null && missileLockExpiresAt > performance.now() ? missileLockTargetId : null;
-  const nose = 22;
-  const m = {
-    id: myId + '-m' + (nextMissileId++), ownerId: myId, targetId,
-    x: myState.x + Math.cos(myState.angle) * nose,
-    y: myState.y + Math.sin(myState.angle) * nose,
-    angle: myState.angle, born: performance.now(), lockReadyAt: performance.now(), trail: [], exhaust: 1
-  };
-  missiles.push(m);
-  spawnExplosion(m.x, m.y, 'launch');
-  playMissileLaunchSound(); screenShake = Math.max(screenShake, 7);
-  sendEvent({ type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, locked: true });
+  fireMissileFor(myState, myId, targetId, true);
+}
+
+function deployFlareFor(state, ownerId, replicate = false) {
+  if (!state || !state.alive || state.falling || state.flareCooldown > 0 || state.flares <= 0) return false;
+  state.flareCooldown = FLARE_MIN_INTERVAL;
+  state.flares--;
+  const volume = ownerId === myId ? .34 : proximityVolume(state.x, state.y, .34);
+  if (volume > .005) playAsset('chaff', volume, 1);
+  spawnFlareSalvo(state.x, state.y, state.angle, ownerId);
+  if (replicate) sendEvent({ type: 'flare', x: state.x, y: state.y, angle: state.angle });
+  return true;
 }
 
 function tryDeployFlare() {
-  if (!myState || !myState.alive || myState.falling || myState.flareCooldown > 0 || myState.flares <= 0) return;
-  myState.flareCooldown = FLARE_MIN_INTERVAL;
-  myState.flares--;
+  if (!myState) return;
   unlockAudio();
-  playAsset('chaff', .34, 1);
-  spawnFlareSalvo(myState.x, myState.y, myState.angle, myId);
-  sendEvent({ type: 'flare', x: myState.x, y: myState.y, angle: myState.angle });
+  deployFlareFor(myState, myId, true);
 }
 
 function spawnFlareSalvo(x, y, angle, ownerId = myId) {
-  const scheduleGeneration = ownerId === myId ? localFlareScheduleGeneration : null;
+  const ownerState = players[ownerId];
+  const scheduleGeneration = ownerId === myId
+    ? localFlareScheduleGeneration
+    : ownerState && ownerState.isBot ? ownerState.botScheduleGeneration : null;
   for (let flareNumber = 0; flareNumber < FLARE_SALVO_COUNT; flareNumber++) {
     // Only create the flare at its launch time. Previously all objects were
     // inserted immediately with future timestamps, which made the salvo look
     // like every flare spawned on top of the first one.
     setTimeout(() => {
       if (ownerId === myId && scheduleGeneration !== localFlareScheduleGeneration) return;
+      if (ownerState && ownerState.isBot && scheduleGeneration !== ownerState.botScheduleGeneration) return;
       const born = performance.now();
       // Re-read the aircraft at launch time. This makes every flare originate
       // from the plane's current position, even while the plane is turning or
@@ -1127,10 +1236,214 @@ function pruneFlares(now) {
   }
 }
 
+// ================= Bot sortie AI =================
+function chooseBotTarget(bot) {
+  let best = null, bestScore = Infinity;
+  Object.values(players).forEach(p => {
+    if (p.id === bot.id || p.connected === false || p.alive === false || p.falling) return;
+    const d = dist(bot.x, bot.y, p.x, p.y);
+    // Prefer nearby targets, but add a small alternating bias so bots do not
+    // all stack onto the same player every frame.
+    const score = d + (p.id === myId ? -90 : 0) + ((p.id + bot.id) % 3) * 35;
+    if (score < bestScore) { bestScore = score; best = p; }
+  });
+  return best;
+}
+
+function botCanEngage(bot, target) {
+  return !!target && target.alive !== false && target.connected !== false &&
+    !target.falling && !isInCloudBank(target.x, target.y);
+}
+
+function botThink(bot, now) {
+  const currentTarget = players[bot.botTargetId];
+  const currentTargetValid = currentTarget && currentTarget.connected !== false && currentTarget.alive !== false && !currentTarget.falling;
+  const target = currentTargetValid && now < bot.botTargetLockUntil ? currentTarget : chooseBotTarget(bot);
+  bot.botTargetId = target ? target.id : null;
+  if (target && (!currentTargetValid || target.id !== currentTarget.id || now >= bot.botTargetLockUntil)) {
+    bot.botTargetLockUntil = now + rand(900, 1800);
+  }
+  const targetDistance = target ? dist(bot.x, bot.y, target.x, target.y) : Infinity;
+  const targetAngle = target ? Math.atan2(target.y - bot.y, target.x - bot.x) : bot.angle;
+  const facing = target && Math.abs(angleDiff(bot.angle, targetAngle)) <= MISSILE_LOCK_CONE;
+  const visible = botCanEngage(bot, target);
+
+  const incoming = missiles.some(m => m.ownerId !== bot.id && m.targetId === bot.id && dist(bot.x, bot.y, m.x, m.y) < FLARE_BREAK_RADIUS * 2.4);
+  if (incoming && bot.flares > 0 && bot.flareCooldown <= 0) deployFlareFor(bot, bot.id, false);
+
+  if (target && visible) {
+    if (bot.botLockTargetId === target.id && facing && targetDistance <= MISSILE_LOCK_RANGE) {
+      bot.botLockProgress = clamp(bot.botLockProgress + BOT_AI_TICK_MS, 0, MISSILE_LOCK_DELAY);
+    } else {
+      bot.botLockTargetId = target.id;
+      bot.botLockProgress = facing && targetDistance <= MISSILE_LOCK_RANGE ? BOT_AI_TICK_MS : 0;
+    }
+
+    if (bot.botLockProgress >= MISSILE_LOCK_DELAY && bot.missiles > 0 && bot.missileCooldown <= 0) {
+      fireMissileFor(bot, bot.id, target.id, false);
+      bot.botLockProgress = 0;
+      bot.botLockTargetId = null;
+    } else if (targetDistance <= BOT_MISSILE_RANGE && bot.missiles > 0 && bot.missileCooldown <= 0 && Math.random() < .08) {
+      // Bots occasionally release early, creating the same dumb-fire threat
+      // a human creates by firing before the two-second lock completes.
+      fireMissileFor(bot, bot.id, null, false);
+      bot.botLockProgress = 0;
+    }
+
+    const gunFacing = target && Math.abs(angleDiff(bot.angle, targetAngle)) <= BOT_GUN_CONE;
+    if (gunFacing && targetDistance <= BOT_FIRE_RANGE && !bot.overheated && bot.fireTimer <= 0 && Math.random() < bot.botSkill) {
+      fireBulletFor(bot, bot.id, false);
+      bot.fireTimer = FIRE_COOLDOWN;
+      bot.heat = Math.min(HEAT_MAX, bot.heat + HEAT_PER_SHOT);
+      if (bot.heat >= HEAT_MAX) bot.overheated = true;
+    }
+
+    const bombFacing = target && Math.abs(angleDiff(bot.angle, targetAngle)) <= BOT_BOMB_CONE;
+    if (bombFacing && targetDistance <= BOT_BOMB_RANGE && bot.bombs > 0 && bot.bombCooldown <= 0 && Math.random() < .12) {
+      dropBombFor(bot, bot.id, false);
+    }
+  } else {
+    bot.botLockTargetId = null;
+    bot.botLockProgress = 0;
+  }
+
+  if ((incoming || bot.health <= MAX_HEALTH * .32) && bot.barrelRollCooldown <= 0 && Math.random() < .55) {
+    bot.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
+    bot.barrelRollUntil = now + BARREL_ROLL_DURATION;
+    bot.barrelRollDirection = bot.botOrbitSign;
+  }
+
+  bot.boosting = !!target && (targetDistance > 650 || (facing && bot.speed < HIGH_SPEED_THRESHOLD));
+  bot.airbraking = !!target && !bot.boosting && (targetDistance < 260 || Math.abs(angleDiff(bot.angle, targetAngle)) > 1.15) && bot.speed > 360;
+  if (bot.speed > HIGH_SPEED_MAX_SPEED * .94 && Math.random() < .35) bot.boosting = false;
+  if (bot.airbraking) bot.boosting = false;
+  bot.botNextThink = now + BOT_AI_TICK_MS + rand(-15, 25);
+}
+
+function updateOneBot(bot, dtSec, now) {
+  if (!bot.alive) {
+    if (bot.respawnAt && now >= bot.respawnAt) respawnBot(bot);
+    return;
+  }
+  if (bot.falling) {
+    updateBotDeathFall(bot, dtSec);
+    return;
+  }
+
+  if (now >= bot.botNextThink) botThink(bot, now);
+  const target = players[bot.botTargetId];
+  if (botCanEngage(bot, target)) {
+    const direct = Math.atan2(target.y - bot.y, target.x - bot.x);
+    const orbitOffset = Math.sin(now / 900 + bot.id) * .12 * bot.botOrbitSign;
+    const diff = angleDiff(bot.angle, direct + orbitOffset);
+    const desiredTurn = clamp(diff * 4.8, -TURN_RATE, TURN_RATE);
+    bot.turnVelocity += (desiredTurn - bot.turnVelocity) * clamp(TURN_ACCEL * dtSec, 0, 1);
+    bot.turnVelocity *= Math.max(0, 1 - TURN_DAMPING * dtSec);
+    bot.turnVelocity = clamp(bot.turnVelocity, -TURN_RATE * 1.15, TURN_RATE * 1.15);
+    bot.angle += bot.turnVelocity * dtSec;
+  } else {
+    bot.botLockTargetId = null;
+    bot.botLockProgress = 0;
+    bot.angle += bot.botOrbitSign * .18 * dtSec;
+  }
+
+  if (now < bot.barrelRollUntil) bot.roll += bot.barrelRollDirection * BARREL_ROLL_SPEED * dtSec;
+  else bot.roll *= Math.max(0, 1 - 7 * dtSec);
+  bot.barrelRollCooldown = Math.max(0, bot.barrelRollCooldown - dtSec * 1000);
+
+  const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(bot.angle);
+  const drag = (bot.speed - PLANE_SPEED) * .82;
+  const thrust = bot.boosting ? 250 : bot.airbraking ? -300 : 0;
+  const highSpeedAssist = bot.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_ACCELERATION : 0;
+  bot.speed = clamp(bot.speed + (thrust + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
+  const atHighSpeed = bot.speed >= HIGH_SPEED_THRESHOLD;
+  if (atHighSpeed && !bot.highSpeedActive && now >= bot.sonicBoomReadyAt) {
+    triggerSonicBoom(bot.x, bot.y, bot.angle);
+    bot.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
+  }
+  bot.highSpeedActive = atHighSpeed;
+  bot.x = clamp(bot.x + Math.cos(bot.angle) * bot.speed * dtSec, 30, WORLD_W - 30);
+  bot.y += Math.sin(bot.angle) * bot.speed * dtSec;
+  if (bot.y < 0) bot.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-bot.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
+  else bot.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
+  bot.y += bot.verticalVelocity * dtSec;
+  if (bot.y >= GROUND_Y - 12) { beginBotDeathFall(bot, null); return; }
+
+  bot.fireTimer = Math.max(0, bot.fireTimer - dtSec * 1000);
+  if (bot.overheated) {
+    bot.heat = Math.max(0, bot.heat - HEAT_DECAY_OVERHEAT * dtSec);
+    if (bot.heat <= HEAT_MAX * OVERHEAT_RESET_FRAC) bot.overheated = false;
+  } else {
+    bot.heat = Math.max(0, bot.heat - HEAT_DECAY * dtSec);
+  }
+  bot.missileCooldown = Math.max(0, bot.missileCooldown - dtSec * 1000);
+  bot.missileRegenTimer += dtSec * 1000;
+  if (bot.missiles < MISSILE_MAX && bot.missileRegenTimer >= MISSILE_REGEN_MS) { bot.missiles++; bot.missileRegenTimer = 0; }
+  bot.flareCooldown = Math.max(0, bot.flareCooldown - dtSec * 1000);
+  bot.flareRegenTimer += dtSec * 1000;
+  if (bot.flares < FLARE_MAX && bot.flareRegenTimer >= FLARE_REGEN_MS) { bot.flares++; bot.flareRegenTimer = 0; }
+  bot.bombCooldown = Math.max(0, bot.bombCooldown - dtSec * 1000);
+  bot.bombRegenTimer += dtSec * 1000;
+  if (bot.bombs < BOMB_MAX && bot.bombRegenTimer >= BOMB_REGEN_MS) { bot.bombs++; bot.bombRegenTimer = 0; }
+
+  for (let i = coins.length - 1; i >= 0; i--) {
+    if (dist(bot.x, bot.y, coins[i].x, coins[i].y) < COIN_PICKUP_RADIUS) {
+      const coinId = coins[i].id;
+      handleCollect(bot.id, coinId);
+    }
+  }
+}
+
+function updateBots(dtSec, now) {
+  if (!botMode) return;
+  Object.values(players).forEach(p => { if (p.isBot) updateOneBot(p, dtSec, now); });
+}
+
+function damageBot(bot, amount, killerId) {
+  if (!bot || !bot.alive || bot.falling) return;
+  bot.health -= amount;
+  if (bot.health <= 0) beginBotDeathFall(bot, killerId);
+}
+
+function updateBotHits() {
+  if (!botMode) return;
+  Object.values(players).forEach(bot => {
+    if (!bot.isBot || !bot.alive || performance.now() < (bot.invulnUntil || 0)) return;
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      if (b.ownerId === bot.id) continue;
+      if (pointSegmentDistance(bot.x, bot.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) >= HIT_RADIUS) continue;
+      removeProjectileLocal('bullet', b.id); spawnExplosion(b.x, b.y, 'spark', b.angle);
+      sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
+      if (bot.falling) finishBotDeath(bot); else damageBot(bot, BULLET_DAMAGE, b.ownerId);
+      break;
+    }
+    if (!bot.alive) return;
+    for (let i = missiles.length - 1; i >= 0; i--) {
+      const m = missiles[i];
+      if (m.ownerId === bot.id || m.decoyTarget || (m.targetId != null && m.targetId !== bot.id)) continue;
+      if (dist(bot.x, bot.y, m.x, m.y) >= MISSILE_HIT_RADIUS) continue;
+      removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
+      sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
+      if (bot.falling) finishBotDeath(bot); else damageBot(bot, MISSILE_DAMAGE, m.ownerId);
+      break;
+    }
+    if (!bot.alive) return;
+    for (let i = bombs.length - 1; i >= 0; i--) {
+      const b = bombs[i];
+      if (b.ownerId === bot.id || dist(bot.x, bot.y, b.x, b.y) >= BOMB_HIT_RADIUS) continue;
+      removeProjectileLocal('bomb', b.id); spawnExplosion(b.x, b.y, 'blast');
+      sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
+      if (bot.falling) finishBotDeath(bot); else damageBot(bot, BOMB_DAMAGE, b.ownerId);
+      break;
+    }
+  });
+}
+
 // ================= Networking: host side =================
 function startHost() {
   unlockAudio();
-  isHost = true; myId = 0;
+  isHost = true; botMode = false; myId = 0;
   players[0] = freshPlayerState(0, myName);
   peer = new Peer();
   peer.on('error', err => {
@@ -1176,6 +1489,19 @@ function startHost() {
     broadcast({ type: 'coins', list: coins });
     beginLocalGame();
   };
+}
+
+function startBotMode() {
+  unlockAudio();
+  // Bots run locally as a private host-like sortie. No PeerJS connection is
+  // created, so starting this mode never interferes with room multiplayer.
+  isHost = true; botMode = true; myId = 0; peer = null; connections = {};
+  players = {}; coins = []; bullets = []; missiles = []; bombs = []; flares = [];
+  explosions = []; specialEffects = []; started = true;
+  players[0] = freshPlayerState(0, myName);
+  buildClouds(); spawnInitialCoins(); spawnBotSquadron();
+  renderLeaderboard();
+  beginLocalGame();
 }
 
 function nextFreeId() {
@@ -1349,6 +1675,7 @@ function hostMaybeSpawnCoin(ts) {
 // ================= Networking: client side =================
 function startJoin() {
   unlockAudio();
+  botMode = false;
   const hostId = document.getElementById('hostIdInput').value.trim();
   if (!hostId) return;
   peer = new Peer();
@@ -1665,7 +1992,7 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.fillStyle = '#fff';
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText((isMe ? '' : '') + (p.name || 'Player'), p.x, p.y - 34);
+  ctx.fillText((p.isBot ? 'AI // ' : '') + (p.name || 'Player'), p.x, p.y - 34);
 
   const w = 30, h = 4, frac = clamp((p.health != null ? p.health : 100) / MAX_HEALTH, 0, 1);
   ctx.fillStyle = 'rgba(0,0,0,0.4)';
@@ -2142,7 +2469,7 @@ function drawMinimap(now) {
 function interpolateRemotePlayers(dtSec) {
   const t = Math.min(1, REMOTE_SMOOTH * dtSec);
   Object.values(players).forEach(p => {
-    if (p.id === myId || p.connected === false || p.tx === undefined) return;
+    if (p.id === myId || p.isBot || p.connected === false || p.tx === undefined) return;
     p.x += (p.tx - p.x) * t;
     p.y += (p.ty - p.y) * t;
     p.angle += angleDiff(p.angle, p.tangle) * t;
@@ -2173,6 +2500,7 @@ function loop(ts) {
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
   updateLocalPlane(dtSec, keysHeld);
+  updateBots(dtSec, ts);
   const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
   currentCameraFovMult += (fovTarget - currentCameraFovMult) * clamp(dtSec * HIGH_SPEED_FOV_SMOOTHING, 0, 1);
   updateEngineAudio();
@@ -2184,6 +2512,7 @@ function loop(ts) {
   updateMissiles(dtSec);
   updateBombs(dtSec);
   updateFlares(dtSec);
+  updateBotHits();
   updateSpecialEffects(dtSec);
   pruneFlares(ts);
   pruneExplosions(ts);
@@ -2234,6 +2563,7 @@ window.addEventListener('DOMContentLoaded', () => {
   statusEl = document.getElementById('status');
   lobbyList = document.getElementById('lobbyList');
   startBtn = document.getElementById('startBtn');
+  botsBtn = document.getElementById('botsBtn');
   waitHint = document.getElementById('waitHint');
 
   skyCanvas = document.getElementById('sky');
@@ -2265,6 +2595,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('hostBtn').onclick = () => { captureName(); startHost(); };
   document.getElementById('joinBtn').onclick = () => { captureName(); startJoin(); };
+  botsBtn.onclick = () => { captureName(); startBotMode(); };
 });
 
 function captureName() {

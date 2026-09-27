@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Wings Arena — multiplayer sky battle</title>
+<title>Wings Arena — multiplayer and bot sky battle</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -19,6 +19,7 @@
       <label class="field-label" for="nameInput">CALLSIGN</label>
       <input id="nameInput" maxlength="14" placeholder="ENTER YOUR CALLSIGN" autocomplete="off" />
       <button id="hostBtn"><span>HOST A FLIGHT</span><b>→</b></button>
+      <button id="botsBtn"><span>SKIRMISH VS BOTS</span><b>→</b></button>
       <div id="joinBox">
         <input id="hostIdInput" placeholder="ROOM CODE" autocomplete="off" />
         <button id="joinBtn"><span>JOIN</span><b>→</b></button>
@@ -32,7 +33,7 @@
       <button id="startBtn" style="display:none;"><span>LAUNCH SORTIE</span><b>→</b></button>
       <p class="hint" id="waitHint">Waiting for the flight leader…</p>
     </div>
-    <div class="menu-footer"><span>WINGS ARENA v1.27.0</span><span>VECTOR COCKPIT // BEST WITH MOUSE + KEYBOARD</span></div>
+    <div class="menu-footer"><span>WINGS ARENA v1.28.0</span><span>VECTOR COCKPIT // BEST WITH MOUSE + KEYBOARD</span></div>
   </div>
 
   <div id="gameArea" style="display:none;">
@@ -96,7 +97,7 @@
         <div id="respawnTimer"></div>
       </div>
     </div>
-    <div id="gameVersion">WINGS ARENA // v1.27.0</div>
+    <div id="gameVersion">WINGS ARENA // v1.28.0</div>
   </div>
 
   <div class="controls"><span><b>MOUSE</b> steer / aim</span><span><b>W / ↑</b> boost</span><span><b>S / SHIFT</b> air-brake</span><span><b>Q / E</b> barrel roll</span><span><b>R</b> test fall / reset</span><span><b>CLICK / SPACE</b> cannon</span><span><b>RIGHT CLICK</b> fire missile</span><span><b>B</b> bomb</span><span><b>F</b> flare</span></div>
