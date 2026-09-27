@@ -577,12 +577,16 @@ function updateHighSpeedWake(dtSec) {
 }
 
 function triggerSonicBoom(x, y, angle) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   specialEffects.push(new SonicBoomEffect(x, y, angle));
   screenShake = Math.max(screenShake, 12);
   playSonicBoomSound(x, y);
 }
 
 function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
+  const validKind = ['blast', 'crash', 'spark', 'water', 'planeWater', 'muzzle', 'launch', 'shock', 'bomb'].includes(kind);
+  if (!validKind || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  angle = Number.isFinite(angle) ? angle : -Math.PI / 2;
   if (kind === 'blast') specialEffects.push(new ImpactExplosion(x, y, 'missile'));
   else if (kind === 'crash') specialEffects.push(new ImpactExplosion(x, y, 'death'));
   else if (kind === 'spark') specialEffects.push(new BulletHitEffect(x, y, angle));
@@ -596,14 +600,23 @@ function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
 }
 function pruneExplosions(now) {
   for (let i = explosions.length - 1; i >= 0; i--) {
-    const life = FX[explosions[i].kind]?.life ?? 500;
-    if (now - explosions[i].born > life) explosions.splice(i, 1);
+    const e = explosions[i];
+    const life = FX[e?.kind]?.life;
+    if (!e || !Number.isFinite(e.x) || !Number.isFinite(e.y) || !Number.isFinite(e.born) || !life || now - e.born > life) {
+      explosions.splice(i, 1);
+    }
   }
   for (let i = specialEffects.length - 1; i >= 0; i--) {
-    if (specialEffects[i].dead) specialEffects.splice(i, 1);
+    const e = specialEffects[i];
+    if (!e || e.dead || typeof e.draw !== 'function') specialEffects.splice(i, 1);
   }
 }
-function updateSpecialEffects(dtSec) { specialEffects.forEach(e => e.update(dtSec)); }
+function updateSpecialEffects(dtSec) {
+  specialEffects.forEach(e => {
+    if (e && typeof e.update === 'function') e.update(dtSec);
+    else if (e) e.dead = true;
+  });
+}
 // Used when another client reports a hit on a bullet/missile we're also
 // tracking locally, so our copy disappears (with an effect) at the same time.
 function removeProjectileLocal(kind, id) {
@@ -1664,6 +1677,7 @@ function findMissileLockTarget(requireFacing = true) {
   let bestId = null, bestDist = MISSILE_LOCK_RANGE;
   Object.values(players).forEach(p => {
     if (p.id === myId || p.connected === false || p.alive === false) return;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.angle)) return;
     if (isInCloudBank(p.x, p.y)) return;
     if (!isInPlayerVision(p)) return;
     const dx = p.x - myState.x, dy = p.y - myState.y;
@@ -1809,6 +1823,7 @@ function spawnFlareSalvo(x, y, angle, ownerId = myId) {
       if (sessionGeneration !== localFlareScheduleGeneration) return;
       if (ownerId === myId && scheduleGeneration !== localFlareScheduleGeneration) return;
       if (ownerState && ownerState.isBot && scheduleGeneration !== ownerState.botScheduleGeneration) return;
+      if (ownerId !== myId && (!players[ownerId] || players[ownerId].connected === false)) return;
       const born = performance.now();
       // Re-read the aircraft at launch time. This makes every flare originate
       // from the plane's current position, even while the plane is turning or
@@ -2209,6 +2224,7 @@ function findHostLockTarget(p) {
   let best = null, bestDistance = Infinity;
   Object.values(players).forEach(target => {
     if (target.id === p.id || target.connected === false || target.alive === false || target.falling) return;
+    if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || !Number.isFinite(target.angle)) return;
     if (isInCloudBank(target.x, target.y)) return;
     const d = dist(p.x, p.y, target.x, target.y);
     const targetAngle = Math.atan2(target.y - p.y, target.x - p.x);
@@ -2798,18 +2814,22 @@ function handleBomb(fromId, data) {
 }
 
 function handleFlare(fromId, data) {
+  if (!Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+  const angle = Number.isFinite(data.angle) ? data.angle : 0;
   if (!samePlayerId(fromId, myId)) {
-    spawnFlareSalvo(data.x, data.y, data.angle || 0, fromId);
+    spawnFlareSalvo(data.x, data.y, angle, fromId);
   }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'flare', from: fromId, x: data.x, y: data.y, angle });
   });
 }
 
 function handleSonicBoom(fromId, data) {
-  if (!samePlayerId(fromId, myId)) triggerSonicBoom(data.x, data.y, data.angle || 0);
+  if (!Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+  const angle = Number.isFinite(data.angle) ? data.angle : 0;
+  if (!samePlayerId(fromId, myId)) triggerSonicBoom(data.x, data.y, angle);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'sonicBoom', from: fromId, x: data.x, y: data.y, angle: data.angle || 0 });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'sonicBoom', from: fromId, x: data.x, y: data.y, angle });
   });
 }
 
@@ -2927,13 +2947,21 @@ function handleClientReceive(data) {
   if (!data || typeof data.type !== 'string') return;
   if (data.type === 'full') { statusEl.textContent = 'That lobby is full.'; }
   else if (data.type === 'welcome') {
+    if (!Number.isInteger(data.id) || data.id < 1 || data.id >= MAX_PLAYERS || !connections.host) return;
     myId = data.id;
     debugLog('SESSION', 'Received player assignment', { id: myId });
     players[myId] = freshPlayerState(myId, myName);
     connections.host.send({ type: 'name', name: myName });
   }
   else if (data.type === 'roster') {
-    data.roster.forEach(p => { players[p.id] = players[p.id] || {}; Object.assign(players[p.id], p); });
+    if (!Array.isArray(data.roster)) return;
+    data.roster.forEach(raw => {
+      const id = Number(raw?.id);
+      if (!Number.isInteger(id) || id < 0 || id >= MAX_PLAYERS) return;
+      const p = players[id] || freshPlayerState(id, typeof raw?.name === 'string' ? raw.name : 'Player ' + (id + 1));
+      Object.assign(p, raw, { id });
+      players[id] = p;
+    });
     if (started && !botMode) setNetworkStatus('P2P // ' + data.roster.filter(p => p.connected !== false).length + ' PILOTS', 'ok');
     renderLobby(); renderLeaderboard();
   }
@@ -2949,36 +2977,47 @@ function handleClientReceive(data) {
     handleRemoteEffect(data);
   }
   else if (data.type === 'state') {
-    const p = players[data.from] = players[data.from] || freshPlayerState(data.from, 'Player ' + (data.from + 1));
+    const id = Number(data.from);
+    if (!Number.isInteger(id) || id < 0 || id >= MAX_PLAYERS) return;
+    const p = players[id] = players[id] || freshPlayerState(id, 'Player ' + (id + 1));
     applyRemoteState(p, data);
   }
   else if (data.type === 'shoot') {
-    if (data.id != null && !projectileExists('bullet', data.id)) {
+    if (data.id != null && Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.angle) &&
+        !projectileExists('bullet', data.id)) {
       bullets.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
       spawnExplosion(data.x, data.y, 'muzzle');
       playCannonSound(data.x, data.y);
     }
   }
   else if (data.type === 'missile') {
-    if (data.id != null && !projectileExists('missile', data.id)) {
-      missiles.push({ id: data.id, ownerId: data.from, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
+    if (data.id != null && Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.angle) &&
+        !projectileExists('missile', data.id)) {
+      const targetId = Number.isInteger(data.targetId) ? data.targetId : null;
+      missiles.push({ id: data.id, ownerId: data.from, targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
   }
   else if (data.type === 'bomb') {
-    if (data.id != null && !projectileExists('bomb', data.id)) {
+    if (data.id != null && Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.vx) && Number.isFinite(data.vy) &&
+        !projectileExists('bomb', data.id)) {
       bombs.push({ id: data.id, ownerId: data.from, x: data.x, y: data.y, vx: data.vx, vy: data.vy, born: performance.now() });
     }
   }
   else if (data.type === 'flare') {
-    spawnFlareSalvo(data.x, data.y, data.angle || 0, data.from);
+    if (Number.isFinite(data.x) && Number.isFinite(data.y)) {
+      spawnFlareSalvo(data.x, data.y, Number.isFinite(data.angle) ? data.angle : 0, data.from);
+    }
   }
   else if (data.type === 'sonicBoom') {
-    triggerSonicBoom(data.x, data.y, data.angle || 0);
+    if (Number.isFinite(data.x) && Number.isFinite(data.y)) {
+      triggerSonicBoom(data.x, data.y, Number.isFinite(data.angle) ? data.angle : 0);
+    }
   }
   else if (data.type === 'impact') {
-    if (rememberImpact(data.kind, data.id)) {
+    if (data.id != null && ['bullet', 'missile', 'bomb'].includes(data.kind) &&
+        Number.isFinite(data.x) && Number.isFinite(data.y) && rememberImpact(data.kind, data.id)) {
       if (data.kind === 'bomb') {
         const bomb = bombs.find(b => b.id === data.id);
         if (bomb) detonateBomb(bomb);
@@ -3242,6 +3281,7 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = 
 }
 
 function drawPlane(ctx, p, isMe, now) {
+  if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.angle)) return;
   if (isInCloudBank(p.x, p.y)) return;
   const flicker = now < p.invulnUntil && Math.floor(now / 100) % 2 === 0;
   ctx.save();
@@ -3362,6 +3402,7 @@ function drawBomb(ctx, b) {
 }
 
 function drawFlare(ctx, f, now) {
+  if (!f || !Number.isFinite(f.x) || !Number.isFinite(f.y) || !Number.isFinite(f.born)) return;
   const frac = clamp(1 - (now - f.born) / FLARE_ACTIVE_MS, 0, 1);
   if (frac <= 0 || now < f.born) return;
   ctx.save();
@@ -3387,6 +3428,7 @@ function drawFlare(ctx, f, now) {
 
 function drawExplosion(ctx, e, now) {
   const cfg = FX[e.kind];
+  if (!cfg || !Number.isFinite(e.x) || !Number.isFinite(e.y) || !Number.isFinite(e.born)) return;
   const t = clamp((now - e.born) / cfg.life, 0, 1);
   const r = cfg.r * (0.3 + t * 0.7);
   ctx.save();
@@ -3718,6 +3760,7 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
   const W = skyCanvas.width, H = skyCanvas.height;
   Object.values(players).forEach(p => {
     if (p.id === myId || p.connected === false || p.alive === false) return;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
     const sx = (p.x - camX) * viewScale, sy = (p.y - camY) * viewScale;
     const hidden = isInCloudBank(p.x, p.y);
     const onScreen = sx > 28 && sy > 28 && sx < W - 28 && sy < H - 28;
@@ -3791,12 +3834,13 @@ function render(now) {
   Object.values(players).forEach(p => {
     if (p.id === myId) return;
     if (p.connected === false) return;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.angle)) return;
     drawPlane(ctx, p, false, now);
   });
   drawPlane(ctx, myState, true, now);
 
   explosions.forEach(e => drawExplosion(ctx, e, now));
-  specialEffects.forEach(e => e.draw(ctx));
+  specialEffects.forEach(e => { if (e && typeof e.draw === 'function') e.draw(ctx); });
   // Cloud banks remain the only foreground concealment layer.
   drawCloudBanks(ctx, now, camX, camY, viewW, viewH);
   drawBoundaryFog(ctx, now, camX, camY, viewW, viewH);

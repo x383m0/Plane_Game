@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.48.1 (boundary fog and flat water patch)
+Current build: v1.48.2 (runtime hardening and multiplayer polish)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -139,6 +139,17 @@ damage once and clients only render the replicated impact.
   gameplay boundary at the bottom of the arena.
 - Flattened the water surface and its submerged highlight lines while keeping
   the high-speed wake aligned to that level surface.
+
+### v1.48.2 runtime hardening
+
+- Remote roster entries now receive safe placeholder state until their first
+  authoritative position arrives, preventing invisible or malformed planes.
+- Invalid projectile, flare, sonic-boom, impact, and state packets are ignored
+  instead of allowing `NaN` coordinates to poison rendering or lock-on logic.
+- Unknown or malformed visual effects are pruned before rendering, preventing
+  a single bad effect from interrupting the animation loop.
+- Delayed flare waves are cancelled when their owner disconnects, and lock-on
+  candidate checks now ignore incomplete remote state.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics
