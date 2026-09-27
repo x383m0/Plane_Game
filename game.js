@@ -87,7 +87,8 @@ const SONIC_WAVE_MAX_AMPLITUDE = 60;
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const NETWORK_INPUT_TIMEOUT_MS = 900; // tolerate short WebRTC jitter without dropping steering
-const NETWORK_SNAPSHOT_BUFFER_LIMIT = 180000;
+const NETWORK_SNAPSHOT_BUFFER_LIMIT = 48000;
+const NETWORK_PROJECTILE_SNAPSHOT_MS = 250; // projectiles extrapolate between authoritative updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;
 const CLOUD_BANK_COUNT = 4;
@@ -147,6 +148,8 @@ let cloudBanks = [];
 let started = false, nextBulletId = 0, nextMissileId = 0;
 let keyboardWired = false, mouseWired = false, resizeWired = false;
 let lastClientInputSend = 0, clientInputSeq = 0, clientActionSeq = 0;
+let clientInputTimer = null, lastProjectileBroadcast = 0;
+let lastHostInputAck = 0, lastHostActionAck = 0;
 let lastInputSendErrorAt = 0;
 
 let myState = null;               // local authoritative plane state
@@ -894,7 +897,9 @@ function debugSummaryText() {
       });
     lines.push('REMOTE INPUTS: ' + (remoteInputs.length ? remoteInputs.join(' | ') : 'none'));
   } else {
-    lines.push(`HOST SNAPSHOT: ${myState ? 'received' : 'waiting'}   actions=${clientActionSeq}`);
+    const backlog = Number(connections.host?.dataChannel?.bufferedAmount);
+    lines.push(`HOST SNAPSHOT: ${myState ? 'received' : 'waiting'}   input ack=${lastHostInputAck}/${clientInputSeq}   action ack=${lastHostActionAck}/${clientActionSeq}`);
+    if (Number.isFinite(backlog)) lines.push(`OUTBOUND QUEUE: ${Math.round(backlog / 1024)} KiB`);
   }
   return lines.join('\n');
 }
@@ -2630,6 +2635,7 @@ function updateHostCombat() {
 // ================= Networking: host side =================
 function resetForNewSession() {
   resetAllInput();
+  if (clientInputTimer) { clearInterval(clientInputTimer); clientInputTimer = null; }
   const stalePeer = peer;
   peer = null;
   if (stalePeer && !stalePeer.destroyed) {
@@ -2646,7 +2652,8 @@ function resetForNewSession() {
   missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
   currentCameraFovMult = CAMERA_FOV_MULT;
   lastClientInputSend = 0; clientInputSeq = 0; clientActionSeq = 0; lastInputSendErrorAt = 0;
-  lastTime = 0; lastBroadcast = 0; lastRuntimeErrorAt = 0;
+  lastHostInputAck = 0; lastHostActionAck = 0;
+  lastTime = 0; lastBroadcast = 0; lastProjectileBroadcast = 0; lastRuntimeErrorAt = 0;
   lastIncomingLock = false;
   if (engineCruiseAudio) { engineCruiseAudio.pause(); engineCruiseAudio.currentTime = 0; }
   if (engineBoostAudio) { engineBoostAudio.pause(); engineBoostAudio.currentTime = 0; }
@@ -2791,14 +2798,13 @@ function broadcastRoster() {
 function handleHostReceive(fromId, data) {
   lastNetworkActivityAt = performance.now();
   if (!data || typeof data.type !== 'string') return;
-  // Input is sent on the same reliable data channel as snapshots. A roster
-  // update can briefly mark a player stale before its next packet arrives;
-  // never discard a valid steering packet for that reason. The connection was
-  // reserved by the host, so a packet from this `fromId` is already scoped to
-  // the correct player.
+  // Only the host-reserved, currently open connection may control this slot.
+  // A stale roster flag can recover, but a disconnected connection must not
+  // resurrect a ghost pilot by sending a delayed steering packet.
+  if (!samePlayerId(fromId, myId) && !connections[fromId]?.open) return;
   if (data.type === 'input') {
-    if (!players[fromId]) players[fromId] = freshPlayerState(fromId, 'Player ' + (Number(fromId) + 1));
-    players[fromId].connected = true;
+    if (!players[fromId]) return;
+    if (players[fromId].connected === false) players[fromId].connected = true;
     handleClientInput(fromId, data);
     return;
   }
@@ -2807,8 +2813,7 @@ function handleHostReceive(fromId, data) {
   // impacts, deaths, and effects are host-owned and cannot be claimed by a
   // remote packet.
   if (!samePlayerId(fromId, myId) && ['state', 'shoot', 'missile', 'bomb', 'flare', 'sonicBoom', 'impact', 'died'].includes(data.type)) return;
-  if (data.type === 'input') handleClientInput(fromId, data);
-  else if (data.type === 'action') handleClientAction(fromId, data);
+  if (data.type === 'action') handleClientAction(fromId, data);
   else if (data.type === 'state') { if (samePlayerId(fromId, myId)) handleState(fromId, data); }
   else if (data.type === 'shoot') handleShoot(fromId, data);
   else if (data.type === 'missile') handleMissile(fromId, data);
@@ -2908,9 +2913,18 @@ function applyRemoteState(p, data) {
   p.stalled = !!data.stalled;
   p.boosting = !!data.boosting;
   if (data.roll != null) p.roll = data.roll;
-  ['speed', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'respawnAt', 'borderEnteredAt', 'borderRemaining'].forEach(key => {
+  ['speed', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'borderEnteredAt', 'borderRemaining'].forEach(key => {
     if (data[key] !== undefined) p[key] = data[key];
   });
+  // performance.now() has a different origin in each browser. Never compare
+  // the host's absolute respawnAt directly to the joiner's local clock.
+  if (Number.isFinite(data.respawnRemaining)) {
+    p.respawnAt = data.alive === false ? performance.now() + Math.max(0, data.respawnRemaining) : 0;
+  }
+  if (samePlayerId(p.id, myId)) {
+    if (Number.isSafeInteger(data.inputAck)) lastHostInputAck = Math.max(lastHostInputAck, data.inputAck);
+    if (Number.isSafeInteger(data.actionAck)) lastHostActionAck = Math.max(lastHostActionAck, data.actionAck);
+  }
   if (data.lockTargetId !== undefined) {
     p.hostLockTargetId = data.lockTargetId;
     p.hostLockProgress = data.lockProgress || 0;
@@ -2947,7 +2961,9 @@ function broadcastAuthoritativeSnapshot() {
       boosting: p.boosting, roll: p.roll, speed: p.speed, heat: p.heat,
       overheated: p.overheated, boost: p.boost, missiles: p.missiles,
       bombs: p.bombs, flares: p.flares, score: p.score, kills: p.kills,
-      deaths: p.deaths, respawnAt: p.respawnAt || 0,
+      deaths: p.deaths,
+      respawnRemaining: p.alive === false ? Math.max(0, (p.respawnAt || 0) - performance.now()) : 0,
+      inputAck: p.networkInputSeq || 0, actionAck: p.networkActionSeq || 0,
       borderEnteredAt: p.borderEnteredAt || 0,
       borderRemaining: p.borderRemaining || 0,
       lockTargetId: p.hostLockTargetId, lockProgress: p.hostLockProgress || 0,
@@ -2955,7 +2971,6 @@ function broadcastAuthoritativeSnapshot() {
       lockRemaining: Math.max(0, (p.hostLockExpiresAt || 0) - performance.now())
     });
   });
-  broadcastAuthoritativeProjectiles();
 }
 
 function broadcastAuthoritativeProjectiles() {
@@ -3329,8 +3344,13 @@ let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2 - 150; // ai
 function resetAllInput() { keysHeld.boost = false; keysHeld.airbrake = false; keysHeld.shoot = false; }
 function sendClientAction(action) {
   if (!isNetworkClient() || !connections.host || !connections.host.open) return;
-  clientActionSeq++;
-  connections.host.send({ type: 'action', seq: clientActionSeq, action });
+  const packet = { type: 'action', seq: clientActionSeq + 1, action };
+  try {
+    connections.host.send(packet);
+    clientActionSeq = packet.seq;
+  } catch (error) {
+    debugLog('PEER', 'Action send failed', { action: action?.type, message: error?.message || String(error) });
+  }
 }
 
 function sendClientInput(ts) {
@@ -4168,6 +4188,10 @@ function beginLocalGame() {
   if (isNetworkClient()) {
     lastClientInputSend = 0;
     sendClientInput(performance.now());
+    // Input must not depend on the render frame rate. In a busy tab the
+    // camera can draw slowly while this timer still feeds the host controls.
+    if (clientInputTimer) clearInterval(clientInputTimer);
+    clientInputTimer = setInterval(() => sendClientInput(performance.now()), 50);
   }
   requestAnimationFrame(loop);
 }
@@ -4201,7 +4225,7 @@ function loopFrame(ts) {
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
   if (isHost || botMode) updateLocalPlane(dtSec, keysHeld);
-  else sendClientInput(ts);
+  // Joiner input is sent by its own timer, independent of rendering.
   updateNetworkPlayers(dtSec, ts);
   updateBots(dtSec, ts);
   const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
@@ -4225,6 +4249,10 @@ function loopFrame(ts) {
   if (ts - lastBroadcast > 66) {
     lastBroadcast = ts;
     if (isHost) broadcastAuthoritativeSnapshot();
+  }
+  if (isHost && ts - lastProjectileBroadcast > NETWORK_PROJECTILE_SNAPSHOT_MS) {
+    lastProjectileBroadcast = ts;
+    broadcastAuthoritativeProjectiles();
   }
 
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';

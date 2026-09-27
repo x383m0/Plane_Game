@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.48.6 (multiplayer input and vertical-speed fix)
+Current build: v1.48.7 (joiner latency and respawn-clock fix)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -193,6 +193,22 @@ damage once and clients only render the replicated impact.
 - Straight-flight propulsion and sonic-speed acceleration now scale with the
   aircraft's horizontal flight component. Pointing straight up no longer
   receives the level-flight speed assist.
+
+### v1.48.7 joiner latency and respawn-clock fix
+
+- Input is sent every 50 ms independently of the joiner's rendering frame
+  rate. The host still owns movement, weapons, collision, and damage.
+- Full projectile snapshots now use a separate 250 ms cadence instead of
+  riding alongside every 66 ms player-state update. Projectiles continue to
+  move between snapshots and are corrected by the host; gun/missile spawn and
+  impact events still arrive immediately. This reduces reliable-channel
+  backlog during sustained fire.
+- The joiner respawn display uses the host's remaining countdown, translated
+  to the local clock. An absolute host `performance.now()` value is never
+  treated as the joiner's timestamp.
+- F2 diagnostics now show input and action acknowledgements from the host.
+  If TX advances but an ACK does not, the channel is delayed or blocked. If
+  both advance but movement/weapon effects do not, inspect host simulation.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics
