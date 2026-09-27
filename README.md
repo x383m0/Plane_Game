@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.51.0 (staged water impacts for bombs and missiles)
+Current build: v1.51.1 (water impact readability and performance pass)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -280,6 +280,16 @@ damage once and clients only render the replicated impact.
 - The host sends the exact waterline impact point to joiners; remote clients
   play the same staged effect once. Bomb damage and shrapnel remain controlled
   by the existing authoritative impact logic.
+
+### v1.51.1 water impact readability and performance pass
+
+- Enlarged the initial water splash and made the sinking weapon and bubble
+  trail easier to read at normal camera scale. The delayed surface wave stays
+  compact.
+- Capped simultaneous bomb/missile water effects at 24 to bound particle and
+  draw work during multi-player or bot-heavy matches.
+- Host/joiner impact packets retain the exact waterline point and duplicate
+  packets are ignored.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

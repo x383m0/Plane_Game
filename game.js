@@ -1,6 +1,6 @@
 // ================= Constants =================
 // v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
-// v1.51 adds staged bomb/missile water-impact effects.
+// v1.51.1 polishes the staged bomb/missile water-impact effects.
 const WORLD_W = 7200, WORLD_H = 4416;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
@@ -66,6 +66,7 @@ const BOMB_PROXIMITY_RADIUS = 132, BOMB_BLAST_RADIUS = 156, BOMB_BLAST_DAMAGE = 
 const SHRAPNEL_COUNT = 16, SHRAPNEL_SPEED = 500;
 const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 800, SHRAPNEL_DAMAGE = 18, SHRAPNEL_HIT_RADIUS = 22;
 const WATER_WEAPON_DETONATION_DELAY = 1.1;
+const MAX_ACTIVE_WATER_WEAPON_EFFECTS = 24;
 
 // Flares: a limited-charge countermeasure that redirects a locked missile
 // within FLARE_BREAK_RADIUS onto the actual moving flare.
@@ -1060,7 +1061,7 @@ class BulletHitEffect {
 class WaterSplashEffect {
   constructor(x, y) { this.x = x; this.y = y; this.age = 0; this.dead = false; this.drops = []; this.rings = [0, .08].map(delay => ({ delay, life: 0, maxLife: .5, maxR: 16 + Math.random() * 6 })); this.mist = []; for (let i = 0; i < 5; i++) this.mist.push({ x: (Math.random() - .5) * 4, r: 2 + Math.random() * 3, life: 0, maxLife: .25 + Math.random() * .15 }); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + (Math.random() - .5) * 1.7, speed = 45 + Math.random() * 95; this.drops.push({ x: 0, y: 0, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: .9 + Math.random() * 1.5, life: 0, maxLife: .3 + Math.random() * .25 }); } }
   update(dt) { this.age += dt; this.drops.forEach(d => { d.life += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 380 * dt; }); this.drops = this.drops.filter(d => d.life < d.maxLife && d.y < 40); this.rings.forEach(r => { if (r.delay > 0) r.delay -= dt; else r.life += dt; }); this.rings = this.rings.filter(r => r.life < r.maxLife); this.mist.forEach(m => { m.life += dt; m.r += dt * 30; }); this.mist = this.mist.filter(m => m.life < m.maxLife); this.dead = this.age > .9 && !this.drops.length && !this.rings.length && !this.mist.length; }
-  draw(ctx) { ctx.save(); ctx.translate(this.x, this.y); this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife; ctx.globalAlpha = (1 - t) * .55; ctx.strokeStyle = '#dff6ff'; ctx.lineWidth = 2 * (1 - t) + .5; ctx.beginPath(); ctx.ellipse(0, 0, t * r.maxR, t * r.maxR * .35, 0, 0, Math.PI * 2); ctx.stroke(); }); this.mist.forEach(m => { const t = m.life / m.maxLife; ctx.globalAlpha = (1 - t) * .5; ctx.fillStyle = '#eefbff'; ctx.beginPath(); ctx.ellipse(m.x, -m.r * .15, m.r, m.r * .6, 0, 0, Math.PI * 2); ctx.fill(); }); this.drops.forEach(d => { const t = d.life / d.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = '#bfeaff'; ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(.6, d.r * (1 - t * .4)), 0, Math.PI * 2); ctx.fill(); }); ctx.restore(); }
+  draw(ctx, scale = 1) { ctx.save(); ctx.translate(this.x, this.y); ctx.scale(scale, scale); this.rings.forEach(r => { if (r.delay > 0) return; const t = r.life / r.maxLife; ctx.globalAlpha = (1 - t) * .55; ctx.strokeStyle = '#dff6ff'; ctx.lineWidth = 2 * (1 - t) + .5; ctx.beginPath(); ctx.ellipse(0, 0, t * r.maxR, t * r.maxR * .35, 0, 0, Math.PI * 2); ctx.stroke(); }); this.mist.forEach(m => { const t = m.life / m.maxLife; ctx.globalAlpha = (1 - t) * .5; ctx.fillStyle = '#eefbff'; ctx.beginPath(); ctx.ellipse(m.x, -m.r * .15, m.r, m.r * .6, 0, 0, Math.PI * 2); ctx.fill(); }); this.drops.forEach(d => { const t = d.life / d.maxLife; ctx.globalAlpha = 1 - t; ctx.fillStyle = '#bfeaff'; ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(.6, d.r * (1 - t * .4)), 0, Math.PI * 2); ctx.fill(); }); ctx.restore(); }
 }
 
 // Staged water strike adapted from delayed-water-bomb-effect.html. It is a
@@ -1112,7 +1113,7 @@ class WaterWeaponImpactEffect {
       this.bubbleClock += dt;
       while (this.bubbleClock >= .14) {
         this.bubbleClock -= .14;
-        this.waitBubbles.push({ x: rand(-5, 5), y: rand(22, 64), r: rand(1.4, 3),
+        this.waitBubbles.push({ x: rand(-5, 5), y: rand(22, 64), r: rand(1.8, 3.6),
           vy: -rand(42, 78), life: 0, maxLife: .5 + Math.random() * .16 });
       }
       this.waitBubbles.forEach(b => { b.life += dt; b.y += b.vy * dt; });
@@ -1139,16 +1140,16 @@ class WaterWeaponImpactEffect {
     return (crest - wake) * (1 - clamp(this.blastAge / 1.5, 0, .8));
   }
   draw(ctx) {
-    if (this.splash && !this.splash.dead) this.splash.draw(ctx);
+    if (this.splash && !this.splash.dead) this.splash.draw(ctx, 1.9);
     ctx.save(); ctx.translate(this.x, this.y);
     if (this.phase === 'delay') {
       const progress = this.age / this.delay;
-      ctx.save(); ctx.globalAlpha = .42 * (1 - progress * .48);
-      ctx.translate(0, 10 + progress * 22); ctx.rotate(this.weapon === 'missile' ? this.angle : Math.PI / 2);
+      ctx.save(); ctx.globalAlpha = .68 * (1 - progress * .42);
+      ctx.translate(0, 10 + progress * 22); ctx.scale(1.3, 1.3); ctx.rotate(this.weapon === 'missile' ? this.angle : Math.PI / 2);
       ctx.fillStyle = '#43515a'; ctx.strokeStyle = '#c4d7dc'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.ellipse(0, 0, this.weapon === 'missile' ? 11 : 10, this.weapon === 'missile' ? 3.4 : 4.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       ctx.restore();
-      this.waitBubbles.forEach(b => { const t = b.life / b.maxLife; ctx.globalAlpha = (1 - t) * .48; ctx.strokeStyle = '#d7f7ff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.stroke(); });
+      this.waitBubbles.forEach(b => { const t = b.life / b.maxLife; ctx.globalAlpha = (1 - t) * .62; ctx.fillStyle = 'rgba(219,248,255,.48)'; ctx.strokeStyle = '#e8fbff'; ctx.lineWidth = 1.15; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); });
     } else {
       const t = this.blastAge;
       if (t < .26) {
@@ -1159,7 +1160,7 @@ class WaterWeaponImpactEffect {
       }
       ctx.globalCompositeOperation = 'source-over';
       const front = 22 + t * 92, sigma = 14 + t * 8, fade = 1 - .35 * clamp(t / 1.5, 0, 1);
-      ctx.globalAlpha = fade * .45; ctx.fillStyle = 'rgba(167,231,245,.38)';
+      ctx.globalAlpha = fade * .62; ctx.fillStyle = 'rgba(167,231,245,.52)';
       ctx.beginPath(); ctx.moveTo(-front - sigma, 0);
       for (let i = 0; i <= 28; i++) { const x = -front - sigma + i / 28 * (front + sigma) * 2; ctx.lineTo(x, -this.surfaceHeightAt(x)); }
       ctx.lineTo(front + sigma, 0); ctx.closePath(); ctx.fill();
@@ -1177,6 +1178,15 @@ class WaterWeaponImpactEffect {
 
 function spawnWaterWeaponImpact(x, y, weapon = 'bomb', angle = -Math.PI / 2) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  let active = 0;
+  for (let i = 0; i < specialEffects.length; i++) {
+    if (specialEffects[i] instanceof WaterWeaponImpactEffect) active++;
+  }
+  while (active >= MAX_ACTIVE_WATER_WEAPON_EFFECTS) {
+    const oldest = specialEffects.findIndex(e => e instanceof WaterWeaponImpactEffect);
+    if (oldest < 0) break;
+    specialEffects.splice(oldest, 1); active--;
+  }
   specialEffects.push(new WaterWeaponImpactEffect(x, waterSurfaceY(x), weapon, angle));
 }
 
