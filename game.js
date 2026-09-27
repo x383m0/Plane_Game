@@ -51,8 +51,8 @@ const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = Infinity, MISSILE_LOCK_CONE 
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
 const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS = 42;
-const BOMB_PROXIMITY_RADIUS = 108, SHRAPNEL_COUNT = 14, SHRAPNEL_SPEED = 430;
-const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 850, SHRAPNEL_DAMAGE = 14, SHRAPNEL_HIT_RADIUS = 18;
+const BOMB_PROXIMITY_RADIUS = 108, SHRAPNEL_COUNT = 10, SHRAPNEL_SPEED = 430;
+const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 650, SHRAPNEL_DAMAGE = 14, SHRAPNEL_HIT_RADIUS = 18;
 
 // Flares: a limited-charge countermeasure that redirects a locked missile
 // within FLARE_BREAK_RADIUS onto the actual moving flare.
@@ -75,11 +75,13 @@ const FX = {
   muzzle: { life: 115, r: 18, colors: ['rgba(255,255,230,1)', 'rgba(255,190,75,0.82)', 'rgba(255,70,20,0)'] },
   launch: { life: 420, r: 34, colors: ['rgba(255,255,255,0.95)', 'rgba(110,220,255,0.7)', 'rgba(25,95,150,0)'] },
   shock:  { life: 360, r: 72, colors: ['rgba(255,225,140,0.9)', 'rgba(255,90,30,0.5)', 'rgba(255,30,10,0)'] },
+  bomb:   { life: 420, r: 82, colors: ['rgba(255,248,205,1)', 'rgba(255,140,45,0.92)', 'rgba(105,25,10,0)'] },
   coin:   { life: 320, r: 14, colors: ['rgba(255,250,210,0.95)', 'rgba(255,209,102,0.85)','rgba(255,190,60,0)'] }
 };
 
 const MAX_HEALTH = 100, RESPAWN_DELAY = 2200, INVULN_TIME = 1500;
-const BOT_COUNT = 5;
+const DEFAULT_BOT_COUNT = 5;
+let botCount = DEFAULT_BOT_COUNT;
 const BOT_RESPAWN_DELAY = RESPAWN_DELAY;
 const BOT_FIRE_RANGE = 1050;
 const BOT_GUN_CONE = Math.PI / 10;
@@ -113,7 +115,7 @@ let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
 let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
-let statusEl, lobbyList, startBtn, botsBtn, chooseRole, lobby, menu, gameArea, waitHint;
+let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let lastSpawnTick = 0;
 let audioCtx = null, masterGain = null;
@@ -517,8 +519,8 @@ function createBotState(id, name, skill = .7) {
   });
 }
 
-function spawnBotSquadron() {
-  for (let i = 0; i < BOT_COUNT; i++) {
+function spawnBotSquadron(count = botCount) {
+  for (let i = 0; i < count; i++) {
     const id = i + 1;
     players[id] = createBotState(id, ['RAVEN', 'VIPER', 'NOVA', 'FALCON', 'WRAITH'][i], .58 + i * .055);
   }
@@ -1018,8 +1020,14 @@ function spawnBombShrapnel(x, y, ownerId) {
 
 function detonateBomb(b) {
   if (!b) return;
-  spawnExplosion(b.x, Math.min(b.y, GROUND_Y - 8), 'blast');
-  spawnBombShrapnel(b.x, Math.min(b.y, GROUND_Y - 8), b.ownerId);
+  const burstY = Math.min(b.y, GROUND_Y - 8);
+  // Bombs use a lightweight burst instead of the full missile/death particle
+  // explosion. The shrapnel remains gameplay-active, but detonation no longer
+  // allocates dozens of smoke/debris particles for every bot bomb.
+  spawnExplosion(b.x, burstY, 'bomb');
+  playExplosionSound('blast', b.x, burstY);
+  screenShake = Math.max(screenShake, 5);
+  spawnBombShrapnel(b.x, burstY, b.ownerId);
   removeProjectileLocal('bomb', b.id);
 }
 
@@ -1037,9 +1045,12 @@ function updateBombs(dtSec) {
 
     // Proximity detonation makes the bomb useful against moving aircraft
     // without turning it into a homing weapon.
-    const nearTarget = Object.values(players).some(p => p.id !== b.ownerId &&
-      p.connected !== false && p.alive !== false && !p.falling &&
-      dist(p.x, p.y, b.x, b.y) <= BOMB_PROXIMITY_RADIUS);
+    const proximitySq = BOMB_PROXIMITY_RADIUS * BOMB_PROXIMITY_RADIUS;
+    const nearTarget = Object.values(players).some(p => {
+      if (p.id === b.ownerId || p.connected === false || p.alive === false || p.falling) return false;
+      const dx = p.x - b.x, dy = p.y - b.y;
+      return dx * dx + dy * dy <= proximitySq;
+    });
     if (nearTarget) detonateBomb(b);
   }
 }
@@ -1599,7 +1610,8 @@ function startBotMode() {
   players = {}; coins = []; bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; started = true;
   players[0] = freshPlayerState(0, myName);
-  buildClouds(); spawnInitialCoins(); spawnBotSquadron();
+  botCount = clamp(Number.parseInt(botCountInputEl?.value, 10) || DEFAULT_BOT_COUNT, 1, MAX_PLAYERS - 1);
+  buildClouds(); spawnInitialCoins(); spawnBotSquadron(botCount);
   renderLeaderboard();
   beginLocalGame();
 }
@@ -1725,7 +1737,11 @@ function handleImpact(fromId, data) {
     if (data.kind === 'bomb') {
       const bomb = bombs.find(b => b.id === data.id);
       if (bomb) detonateBomb(bomb);
-      else { spawnExplosion(data.x, data.y, 'blast'); spawnBombShrapnel(data.x, data.y, fromId); }
+      else {
+        spawnExplosion(data.x, data.y, 'bomb');
+        playExplosionSound('blast', data.x, data.y);
+        spawnBombShrapnel(data.x, data.y, fromId);
+      }
     } else {
       removeProjectileLocal(data.kind, data.id);
       spawnExplosion(data.x, data.y, data.kind === 'missile' ? 'blast' : 'spark');
@@ -2262,7 +2278,7 @@ function drawExplosion(ctx, e, now) {
   ctx.beginPath();
   ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
   ctx.fill();
-  if (e.kind === 'blast' || e.kind === 'crash' || e.kind === 'shock') {
+  if (e.kind === 'blast' || e.kind === 'bomb' || e.kind === 'crash' || e.kind === 'shock') {
     ctx.globalAlpha = (1 - t) * .85; ctx.strokeStyle = e.kind === 'shock' ? '#9ceeff' : '#ffbd5d'; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(e.x, e.y, r * (.55 + t * .65), 0, Math.PI * 2); ctx.stroke();
   }
@@ -2740,6 +2756,8 @@ window.addEventListener('DOMContentLoaded', () => {
   lobbyList = document.getElementById('lobbyList');
   startBtn = document.getElementById('startBtn');
   botsBtn = document.getElementById('botsBtn');
+  botCountInputEl = document.getElementById('botCountInput');
+  botCountValueEl = document.getElementById('botCountValue');
   waitHint = document.getElementById('waitHint');
 
   skyCanvas = document.getElementById('sky');
@@ -2769,6 +2787,9 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('hostBtn').onclick = () => { captureName(); startHost(); };
   document.getElementById('joinBtn').onclick = () => { captureName(); startJoin(); };
   botsBtn.onclick = () => { captureName(); startBotMode(); };
+  botCountInputEl.addEventListener('input', () => {
+    botCountValueEl.textContent = botCountInputEl.value;
+  });
 });
 
 function captureName() {
