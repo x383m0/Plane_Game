@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.49.0 (multiplayer synchronization audit)
+Current build: v1.50.0 (edge fog, cloud size variation, and gun balance)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -250,6 +250,27 @@ damage once and clients only render the replicated impact.
   events; a partial correction cannot erase bullets omitted for bandwidth.
   A delayed fast shot cannot recreate a bullet already reported as hit.
 - Host and joiner must both use v1.49.0 for the batched flight packets.
+
+### v1.49.1 water bullet impact alignment
+
+- Bullets now hit the visible water surface on the frame they cross it. The
+  splash and host impact event use the segment's waterline intersection rather
+  than a point eight units above the sea on the following frame.
+- Water splash creation anchors older or delayed network impacts to the same
+  drawn waterline. A joiner shows one local splash and ignores the duplicate
+  host confirmation for that bullet.
+
+### v1.50.0 edge fog, cloud size variation, and gun balance
+
+- Removed the invisible flight-coordinate clamps that stopped aircraft at the
+  outside fog buffer. The boundary warning and five-second return timer remain
+  authoritative; the water remains the lower boundary.
+- Reworked the left, right, and top boundary fog with layered billows, depth
+  gradients, and fine wisps. The fog stays anchored to the arena edges, and no
+  bottom fog strip is drawn.
+- Ambient clouds now use varied elliptical sizes from 22 to 148 world units.
+- Reduced gun damage from 7 to 4.5 per hit (rear hits retain their existing
+  damage multiplier).
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

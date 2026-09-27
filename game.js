@@ -41,7 +41,7 @@ const BARREL_ROLL_DURATION = 720, BARREL_ROLL_SPEED = Math.PI * 2.8, BARREL_ROLL
 const STALL_SPIN_SPEED = 5.2, FALL_GRAVITY = 420;
 const STALL_DELAY = 320; // brief warning window before a sustained stall becomes uncontrolled
 
-const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = Infinity, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 7;
+const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = Infinity, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 4.5;
 const BULLET_SIGHT_TIME = .42;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 
@@ -92,6 +92,7 @@ const NETWORK_PROJECTILE_SNAPSHOT_MS = 250; // projectiles extrapolate between a
 const NETWORK_BULLETS_PER_SNAPSHOT = 48; // nearby bullet corrections; spawns/impacts use reliable events
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;
+const CLOUD_MIN_RADIUS = 22, CLOUD_MAX_RADIUS = 148;
 const CLOUD_BANK_COUNT = 4;
 const MAP_THEMES = {
   city: { label: 'NEON CITY', cloudBanks: 4 },
@@ -786,6 +787,9 @@ function triggerSonicBoom(x, y, angle, speed = HIGH_SPEED_THRESHOLD) {
 function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
   const validKind = ['blast', 'crash', 'spark', 'water', 'planeWater', 'muzzle', 'launch', 'shock', 'bomb'].includes(kind);
   if (!validKind || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  // Water rings belong to the visible waterline even if an old/late network
+  // impact sends a point slightly above or below the surface.
+  if (kind === 'water') y = waterSurfaceY(x);
   angle = Number.isFinite(angle) ? angle : -Math.PI / 2;
   if (kind === 'blast') specialEffects.push(new ImpactExplosion(x, y, 'missile'));
   else if (kind === 'crash') specialEffects.push(new ImpactExplosion(x, y, 'death'));
@@ -1067,9 +1071,11 @@ function buildClouds() {
   clouds = [];
   cloudBanks = [];
   for (let i = 0; i < CLOUD_COUNT; i++) {
+    const rx = rand(CLOUD_MIN_RADIUS, CLOUD_MAX_RADIUS);
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
-      r: rand(30, 90), a: rand(0.08, 0.22)
+      rx, ry: rx * rand(.28, .58), a: rand(.045, .16),
+      lobe: rand(.28, .52), tilt: rand(-.12, .12)
     });
   }
   // These fixed bank coordinates keep concealment and lock line-of-sight
@@ -1408,9 +1414,8 @@ function updateStalledFlight(dtSec, keys) {
   } else {
     myState.verticalVelocity *= Math.max(0, 1 - 5 * dtSec);
   }
-  myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * dtSec, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
+  myState.x += Math.cos(myState.angle) * myState.speed * dtSec;
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
-  myState.y = clamp(myState.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
 
   if (updateBoundaryState(myState, performance.now())) {
     beginDeathFall(null, 'Boundary lost — aircraft disabled');
@@ -1519,7 +1524,6 @@ function updateLocalPlane(dtSec, keys) {
   } else {
     myState.roll *= Math.max(0, 1 - 7 * dtSec);
   }
-  myState.x = clamp(myState.x, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
@@ -1559,8 +1563,6 @@ function updateLocalPlane(dtSec, keys) {
   }
   myState.x += Math.cos(myState.angle) * myState.speed * dtSec;
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
-  myState.y = clamp(myState.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
-
   if (updateBoundaryState(myState, performance.now())) {
     beginDeathFall(null, 'Boundary lost — aircraft disabled');
     return;
@@ -1746,23 +1748,35 @@ function tryDropBomb() {
 }
 
 function updateBullets(dtSec) {
-  const now = performance.now();
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    // Rounds persist indefinitely and are removed only when they reach the sea.
-    if (b.y >= GROUND_Y - 8) {
-      spawnExplosion(b.x, GROUND_Y - 8, 'water');
-      if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: GROUND_Y - 8, surface: 'water' });
-      removeProjectileLocal('bullet', b.id); continue;
-    }
-    b.prevX = b.x; b.prevY = b.y;
+    const startX = b.x, startY = b.y;
     if (b.vx == null) {
       b.vx = Math.cos(b.angle) * BULLET_SPEED;
       b.vy = Math.sin(b.angle) * BULLET_SPEED;
     }
-    b.vy += BULLET_GRAVITY * dtSec;
-    b.x += b.vx * dtSec;
-    b.y += b.vy * dtSec;
+    b.prevX = startX; b.prevY = startY;
+    const nextVy = b.vy + BULLET_GRAVITY * dtSec;
+    const endX = startX + b.vx * dtSec;
+    const endY = startY + nextVy * dtSec;
+    // Test the swept segment so a fast round splashes at the actual crossing
+    // in this frame, rather than a frame later at an elevated fixed offset.
+    const surfaceAtEnd = waterSurfaceY(endX);
+    if (startY >= waterSurfaceY(startX) ||
+        (endY >= surfaceAtEnd && endY > startY)) {
+      const t = startY >= waterSurfaceY(startX) ? 0 :
+        clamp((surfaceAtEnd - startY) / (endY - startY), 0, 1);
+      const hitX = startX + (endX - startX) * t;
+      const hitY = waterSurfaceY(hitX);
+      if (isHost || rememberImpact('bullet', b.id)) spawnExplosion(hitX, hitY, 'water');
+      if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id,
+        x: hitX, y: hitY, surface: 'water' });
+      removeProjectileLocal('bullet', b.id);
+      continue;
+    }
+    b.vy = nextVy;
+    b.x = endX;
+    b.y = endY;
     b.angle = Math.atan2(b.vy, b.vx);
   }
 }
@@ -2290,12 +2304,11 @@ function updateOneBot(bot, dtSec, now) {
     bot.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
   }
   bot.highSpeedActive = atHighSpeed;
-  bot.x = clamp(bot.x + Math.cos(bot.angle) * bot.speed * dtSec, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
+  bot.x += Math.cos(bot.angle) * bot.speed * dtSec;
   bot.y += Math.sin(bot.angle) * bot.speed * dtSec;
   if (bot.y < 0) bot.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-bot.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
   else bot.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
   bot.y += bot.verticalVelocity * dtSec;
-  bot.y = clamp(bot.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
   if (updateBoundaryState(bot, now)) { beginBotDeathFall(bot, null); return; }
   if (bot.y >= GROUND_Y - 12) { beginBotDeathFall(bot, null); return; }
 
@@ -2421,7 +2434,6 @@ function updateRemoteDeathFall(p, dtSec) {
   p.verticalVelocity += FALL_GRAVITY * dtSec;
   p.speed = 0; p.turnVelocity = 0;
   p.roll += p.fallSpinVelocity * dtSec;
-  p.x = clamp(p.x, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   p.y += p.verticalVelocity * dtSec;
   if (p.y >= GROUND_Y - 12) finishRemoteDeath(p);
 }
@@ -2535,9 +2547,8 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   p.highSpeedActive = atHighSpeed;
   if (p.y < 0) p.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-p.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
   else p.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
-  p.x = clamp(p.x + Math.cos(p.angle) * Math.max(0, p.speed) * dtSec, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
+  p.x += Math.cos(p.angle) * Math.max(0, p.speed) * dtSec;
   p.y += Math.sin(p.angle) * Math.max(0, p.speed) * dtSec + p.verticalVelocity * dtSec;
-  p.y = clamp(p.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
   if (updateBoundaryState(p, now)) { beginRemoteDeathFall(p, null, 'Boundary lost — aircraft disabled'); return; }
   if (p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
 
@@ -3043,8 +3054,6 @@ function updateClientVisualPlane(dtSec) {
     p.y += (projectedY - p.y) * blend;
     if (!p.falling) p.angle += angleDiff(p.angle, p.tangle + p.turnVelocity * horizon) * clamp(dtSec * 3, 0, .2);
   }
-  p.x = clamp(p.x, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
-  p.y = clamp(p.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
 }
 
 function handleState(fromId, data) {
@@ -4060,11 +4069,22 @@ function drawCloudBanks(ctx, now, camX, camY, viewW, viewH) {
   });
 }
 
+function drawFogPuff(ctx, x, y, rx, ry, phase) {
+  const breathe = .82 + Math.sin(phase) * .12;
+  const haze = ctx.createRadialGradient(x - rx * .16, y - ry * .12, rx * .04, x, y, rx);
+  haze.addColorStop(0, `rgba(230,242,245,${.19 * breathe})`);
+  haze.addColorStop(.32, `rgba(205,224,231,${.13 * breathe})`);
+  haze.addColorStop(.68, `rgba(174,202,214,${.055 * breathe})`);
+  haze.addColorStop(1, 'rgba(158,191,207,0)');
+  ctx.fillStyle = haze;
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+}
+
 function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
   const edge = BORDER_FOG_DEPTH;
-  const pulse = .88 + Math.sin(now / 520) * .06;
-  const solid = `rgba(205,226,225,${.72 * pulse})`;
-  const soft = `rgba(205,226,225,${.26 * pulse})`;
+  const pulse = .9 + Math.sin(now / 880) * .04;
+  const solid = `rgba(202,222,229,${.78 * pulse})`;
+  const soft = `rgba(198,221,229,${.23 * pulse})`;
   const clear = 'rgba(205,226,225,0)';
   const extra = 220;
   ctx.save();
@@ -4102,21 +4122,57 @@ function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
     }
   }
 
-  // Slow translucent wisps are also world-anchored. There is intentionally no
-  // bottom fog: the flat ocean is the visual and gameplay boundary there.
-  ctx.globalAlpha = .16 + Math.sin(now / 430) * .03;
-  ctx.fillStyle = '#efffff';
-  const wispSpan = WORLD_H + edge * 2 + 240;
-  const leftWispX = -edge * .45, rightWispX = WORLD_W + edge * .45;
-  for (let i = 0; i < 8; i++) {
-    const y = -edge + ((i * 173 + now * .018) % wispSpan);
-    if (y < camY - 180 || y > camY + viewH + 180) continue;
-    if (camX < edge) { ctx.beginPath(); ctx.ellipse(leftWispX, y, 150, 34 + (i % 3) * 12, -.08, 0, Math.PI * 2); ctx.fill(); }
-    if (camX + viewW > WORLD_W - edge) { ctx.beginPath(); ctx.ellipse(rightWispX, y, 150, 34 + (i % 3) * 12, .08, 0, Math.PI * 2); ctx.fill(); }
+  // Layered, irregular billows add structure to the fog while staying wholly
+  // outside the playable rectangle. Their centers are world anchored, so the
+  // haze stays on the map edge instead of following the camera.
+  const drift = now * .00016;
+  const firstY = Math.floor((camY - 180) / 210) * 210;
+  for (let y = firstY, i = 0; y <= camY + viewH + 180; y += 210, i++) {
+    const phase = i * 1.73 + drift;
+    if (camX < edge) {
+      const rx = edge * (.48 + .035 * Math.sin(i * 2.1));
+      drawFogPuff(ctx, -rx + 3, y + Math.sin(phase) * 24, rx, 105 + (i % 3) * 17, phase);
+    }
+    if (camX + viewW > WORLD_W - edge) {
+      const rx = edge * (.48 + .035 * Math.cos(i * 1.9));
+      drawFogPuff(ctx, WORLD_W + rx - 3, y + Math.cos(phase * .83) * 22, rx, 112 + (i % 2) * 19, phase + 1.2);
+    }
+  }
+  const firstX = Math.floor((camX - 180) / 230) * 230;
+  for (let x = firstX, i = 0; x <= camX + viewW + 180; x += 230, i++) {
+    const phase = i * 1.51 - drift;
+    if (camY < edge) {
+      const ry = edge * (.46 + .035 * Math.sin(i * 2.4));
+      drawFogPuff(ctx, x + Math.sin(phase) * 24, -ry + 3, edge * (.45 + (i % 2) * .04), ry, phase + .6);
+    }
+  }
 
-    const x = -edge + ((i * 257 + now * .02) % (WORLD_W + edge * 2 + 240));
-    if (camY < edge && x >= camX - 180 && x <= camX + viewW + 180) {
-      ctx.beginPath(); ctx.ellipse(x, -edge * .45, 34 + (i % 3) * 12, 150, .08, 0, Math.PI * 2); ctx.fill();
+  // Fine, low contrast filaments break up the smooth gradient. The sea remains
+  // the only lower boundary, with no fog strip or bottom wall.
+  ctx.globalAlpha = .105 + Math.sin(now / 510) * .018;
+  ctx.strokeStyle = '#e4f0f3'; ctx.lineWidth = 2;
+  const filamentY0 = Math.floor((camY - 120) / 145) * 145;
+  if (camX < edge || camX + viewW > WORLD_W - edge) {
+    for (let y = filamentY0; y < camY + viewH + 150; y += 145) {
+      if (camX < edge) {
+        ctx.beginPath(); ctx.moveTo(-edge * .92, y);
+        ctx.bezierCurveTo(-edge * .72, y - 36, -edge * .28, y + 38, -3, y + Math.sin(y * .03 + drift) * 18);
+        ctx.stroke();
+      }
+      if (camX + viewW > WORLD_W - edge) {
+        ctx.beginPath(); ctx.moveTo(WORLD_W + 3, y);
+        ctx.bezierCurveTo(WORLD_W + edge * .28, y + 36, WORLD_W + edge * .72, y - 38,
+          WORLD_W + edge * .92, y + Math.cos(y * .025 + drift) * 18);
+        ctx.stroke();
+      }
+    }
+  }
+  if (camY < edge) {
+    for (let x = firstX; x < camX + viewW + 180; x += 165) {
+      ctx.beginPath(); ctx.moveTo(x, -edge * .92);
+      ctx.bezierCurveTo(x - 34, -edge * .7, x + 38, -edge * .28,
+        x + Math.sin(x * .021 + drift) * 16, -3);
+      ctx.stroke();
     }
   }
   ctx.restore();
@@ -4333,9 +4389,20 @@ function render(now) {
   ctx.translate(-myState.x, -myState.y);
 
   clouds.forEach(c => {
-    if (c.x < camX - 100 || c.x > camX + viewW + 100 || c.y < camY - 100 || c.y > camY + viewH + 100) return;
-    ctx.fillStyle = `rgba(255,255,255,${c.a})`;
-    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
+    if (c.x < camX - c.rx * 1.5 || c.x > camX + viewW + c.rx * 1.5 ||
+        c.y < camY - c.ry * 2 || c.y > camY + viewH + c.ry * 2) return;
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.tilt);
+    const cloud = ctx.createRadialGradient(-c.rx * .12, -c.ry * .2, c.ry * .08, 0, 0, c.rx);
+    cloud.addColorStop(0, `rgba(245,252,255,${c.a})`);
+    cloud.addColorStop(.58, `rgba(208,229,239,${c.a * .66})`);
+    cloud.addColorStop(1, 'rgba(180,211,228,0)');
+    ctx.fillStyle = cloud;
+    ctx.beginPath(); ctx.ellipse(0, 0, c.rx, c.ry, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `rgba(247,252,255,${c.a * .34})`;
+    ctx.beginPath();
+    ctx.ellipse(-c.rx * .2, -c.ry * .08, c.rx * c.lobe, c.ry * .72, 0, 0, Math.PI * 2);
+    ctx.ellipse(c.rx * .28, c.ry * .04, c.rx * c.lobe * .78, c.ry * .62, 0, 0, Math.PI * 2);
+    ctx.fill(); ctx.restore();
   });
 
   drawSkyBackdrop(ctx, camX, camY, viewW, viewH);
