@@ -77,6 +77,13 @@ const WATER_WAKE_MIN_ALTITUDE = 18;
 const WATER_WAKE_MAX_ALTITUDE = 220;
 const WATER_WAKE_MIN_SPEED = 360;
 const WATER_WAKE_MAX_TRAIL = 280;
+// Sonic-boom water-wave tuning. The wave is only emitted when the boom is
+// close enough to the flat ocean to disturb it; it travels opposite the
+// aircraft's horizontal flight direction, like the supplied reference FX.
+const SONIC_WAVE_MIN_ALTITUDE = 18;
+const SONIC_WAVE_MAX_ALTITUDE = 280;
+const SONIC_WAVE_MIN_AMPLITUDE = 18;
+const SONIC_WAVE_MAX_AMPLITUDE = 60;
 
 const REMOTE_SMOOTH = 12;         // how fast other players' rendered planes catch up to network updates
 const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
@@ -405,6 +412,145 @@ class SonicBoomEffect {
   }
 }
 
+// Adapted from the supplied sonic-boom-water-wave-effect.html. Unlike the
+// standalone screen demo, this version lives in world coordinates, follows
+// the game's flat water surface, and scales with the boom's altitude and
+// speed. The wave is kept separate from flight physics: it is visual only.
+class SonicWaterWaveEffect {
+  constructor(x, baseY, direction, amplitude, speedFactor) {
+    this.center = x;
+    this.baseY = baseY;
+    this.direction = direction >= 0 ? 1 : -1;
+    this.amplitude = amplitude;
+    this.speed = 280 + speedFactor * 160;
+    this.age = 0;
+    this.maxLife = 2.8;
+    this.dead = false;
+    this.spray = [];
+    this.mist = [];
+    this.foam = [];
+    for (let i = 0; i < 24; i++) {
+      const a = -Math.PI / 2 + rand(-.82, .82);
+      const launchSpeed = rand(55, 210) * (.72 + speedFactor * .28);
+      this.spray.push({
+        x, y: baseY - rand(0, 8),
+        vx: Math.cos(a) * launchSpeed * .48 + this.direction * rand(25, 100),
+        vy: Math.sin(a) * launchSpeed,
+        radius: rand(.9, 2.8), age: 0, maxAge: rand(.5, .95)
+      });
+    }
+    for (let i = 0; i < 7; i++) {
+      this.foam.push({ along: (i / 6 - .45) * 1.25, length: rand(5, 15), rise: rand(1, 3) });
+      this.mist.push({
+        x: x + rand(-18, 18), y: baseY - rand(0, 10),
+        vx: this.direction * rand(5, 32) + rand(-12, 12),
+        vy: -rand(8, 34), radius: rand(6, 14), age: 0, maxAge: rand(.4, .7)
+      });
+    }
+  }
+  update(dtSec) {
+    this.age += dtSec;
+    this.center += this.direction * this.speed * dtSec;
+    this.baseY = waterSurfaceY(this.center);
+    this.spray.forEach(p => {
+      p.age += dtSec; p.x += p.vx * dtSec; p.y += p.vy * dtSec;
+      p.vy += 410 * dtSec; p.vx *= Math.exp(-dtSec * .36);
+    });
+    this.spray = this.spray.filter(p => p.age < p.maxAge && p.y < WORLD_H + 30);
+    this.mist.forEach(p => {
+      p.age += dtSec; p.x += p.vx * dtSec; p.y += p.vy * dtSec;
+      p.radius += dtSec * 22; p.vx *= Math.exp(-dtSec * .8);
+    });
+    this.mist = this.mist.filter(p => p.age < p.maxAge);
+    if (this.age > this.maxLife && !this.spray.length && !this.mist.length) this.dead = true;
+  }
+  heightAt(x) {
+    const ahead = (x - this.center) * this.direction;
+    const front = 32 + this.age * 12;
+    const back = 66 + this.age * 14;
+    const sigma = ahead >= 0 ? front : back;
+    const crest = this.amplitude * Math.exp(-.5 * (ahead / sigma) ** 2);
+    const trailingSwell = this.amplitude * .24 * Math.exp(-.5 * ((ahead + back * 1.45) / (back * .68)) ** 2);
+    const pulledTrough = -this.amplitude * .13 * Math.exp(-.5 * ((ahead - front * 1.35) / (front * .8)) ** 2);
+    const fade = 1 - .3 * clamp((this.age - 1.2) / 1.6, 0, 1);
+    return (crest + trailingSwell + pulledTrough) * fade;
+  }
+  surfaceY(x) { return this.baseY - this.heightAt(x); }
+  draw(ctx) {
+    const front = 32 + this.age * 12;
+    const back = 66 + this.age * 14;
+    const fade = 1 - .36 * clamp(this.age / this.maxLife, 0, 1);
+    ctx.save();
+
+    // A translucent raised-water body makes the wave readable against the
+    // existing ocean without replacing the game's flat water fill.
+    ctx.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const ahead = -back * 1.3 + (i / 40) * (back * 1.3 + front * 1.15);
+      const x = this.center + this.direction * ahead;
+      const y = this.surfaceY(x);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.lineTo(this.center + this.direction * front * 1.15, this.baseY + 10);
+    ctx.lineTo(this.center - this.direction * back * 1.3, this.baseY + 10);
+    ctx.closePath();
+    const body = ctx.createLinearGradient(0, this.baseY - this.amplitude, 0, this.baseY + 10);
+    body.addColorStop(0, `rgba(206,248,255,${.22 * fade})`);
+    body.addColorStop(.45, `rgba(92,188,205,${.14 * fade})`);
+    body.addColorStop(1, 'rgba(44,126,151,0)');
+    ctx.fillStyle = body; ctx.fill();
+
+    ctx.globalAlpha = fade * .62;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const ahead = -back * 1.3 + (i / 40) * (back * 1.3 + front * 1.15);
+      const x = this.center + this.direction * ahead;
+      const y = this.surfaceY(x) - 1.2;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    const foam = ctx.createLinearGradient(
+      this.center - this.direction * back, this.baseY,
+      this.center + this.direction * front, this.baseY
+    );
+    foam.addColorStop(0, 'rgba(205,246,255,0)');
+    foam.addColorStop(.42, 'rgba(218,250,255,.86)');
+    foam.addColorStop(1, 'rgba(172,232,245,.12)');
+    ctx.strokeStyle = foam; ctx.lineWidth = 2.5; ctx.stroke();
+
+    ctx.globalAlpha = fade * .42;
+    ctx.strokeStyle = '#d8f5fa'; ctx.lineWidth = .9;
+    this.foam.forEach(mark => {
+      const x = this.center - this.direction * mark.along * back;
+      const y = this.surfaceY(x) - 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - this.direction * mark.length, y - mark.rise);
+      ctx.stroke();
+    });
+
+    this.mist.forEach(p => {
+      const t = p.age / p.maxAge;
+      ctx.save(); ctx.globalAlpha = (1 - t) * .34;
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius);
+      g.addColorStop(0, 'rgba(230,251,255,.88)');
+      g.addColorStop(.55, 'rgba(179,232,242,.44)');
+      g.addColorStop(1, 'rgba(152,220,235,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+    this.spray.forEach(p => {
+      const t = p.age / p.maxAge;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(Math.atan2(p.vy, p.vx));
+      ctx.globalAlpha = 1 - t; ctx.fillStyle = t < .3 ? '#ecfcff' : '#b9eaf3';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, Math.max(.7, p.radius * (1 - t * .4)) * 1.55, Math.max(.45, p.radius * .62), 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.restore();
+    });
+    ctx.restore();
+  }
+}
+
 // Adapted from the supplied HIGH SPEED WAKE demo. This is deliberately a
 // world-space effect: the wake sits on the water surface while the aircraft
 // remains above it, so the wake can lag behind a fast plane without affecting
@@ -586,9 +732,33 @@ function updateHighSpeedWake(dtSec) {
   updateWaterWakeAudio(intensity, speedFactor, dtSec);
 }
 
-function triggerSonicBoom(x, y, angle) {
+function spawnSonicWaterWave(x, y, angle, speed = HIGH_SPEED_THRESHOLD) {
+  const altitude = waterSurfaceY(x) - y;
+  if (!Number.isFinite(altitude) || altitude < SONIC_WAVE_MIN_ALTITUDE || altitude > SONIC_WAVE_MAX_ALTITUDE) return;
+  const nearWater = clamp(
+    (SONIC_WAVE_MAX_ALTITUDE - altitude) /
+      (SONIC_WAVE_MAX_ALTITUDE - SONIC_WAVE_MIN_ALTITUDE),
+    0, 1
+  );
+  const speedFactor = clamp(
+    (speed - HIGH_SPEED_THRESHOLD) /
+      (HIGH_SPEED_MAX_SPEED - HIGH_SPEED_THRESHOLD),
+    0, 1
+  );
+  const amplitude = SONIC_WAVE_MIN_AMPLITUDE + nearWater *
+    (SONIC_WAVE_MAX_AMPLITUDE - SONIC_WAVE_MIN_AMPLITUDE) * (.72 + speedFactor * .28);
+  // The wave runs along the water surface, so use the sign of the plane's
+  // horizontal travel and send the surge in the opposite direction.
+  const waveDirection = Math.cos(angle) >= 0 ? -1 : 1;
+  specialEffects.push(new SonicWaterWaveEffect(
+    x, waterSurfaceY(x), waveDirection, amplitude, speedFactor
+  ));
+}
+
+function triggerSonicBoom(x, y, angle, speed = HIGH_SPEED_THRESHOLD) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   specialEffects.push(new SonicBoomEffect(x, y, angle));
+  spawnSonicWaterWave(x, y, Number.isFinite(angle) ? angle : 0, Number.isFinite(speed) ? speed : HIGH_SPEED_THRESHOLD);
   screenShake = Math.max(screenShake, 12);
   playSonicBoomSound(x, y);
 }
@@ -1335,8 +1505,8 @@ function updateLocalPlane(dtSec, keys) {
   myState.speed = clamp(myState.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, MIN_FLIGHT_SPEED, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = myState.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !myState.highSpeedActive && performance.now() >= (myState.sonicBoomReadyAt || 0)) {
-    triggerSonicBoom(myState.x, myState.y, myState.angle);
-    sendEvent({ type: 'sonicBoom', x: myState.x, y: myState.y, angle: myState.angle });
+    triggerSonicBoom(myState.x, myState.y, myState.angle, myState.speed);
+    sendEvent({ type: 'sonicBoom', x: myState.x, y: myState.y, angle: myState.angle, speed: myState.speed });
     myState.sonicBoomReadyAt = performance.now() + SONIC_BOOM_COOLDOWN_MS;
   }
   myState.highSpeedActive = atHighSpeed;
@@ -2093,7 +2263,7 @@ function updateOneBot(bot, dtSec, now) {
   bot.speed = clamp(bot.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = bot.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !bot.highSpeedActive && now >= bot.sonicBoomReadyAt) {
-    triggerSonicBoom(bot.x, bot.y, bot.angle);
+    triggerSonicBoom(bot.x, bot.y, bot.angle, bot.speed);
     bot.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
   }
   bot.highSpeedActive = atHighSpeed;
@@ -2335,8 +2505,8 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   p.speed = clamp(p.speed + (thrust + straightPropulsion + gravityAlongFlight + highSpeedAssist - drag) * dtSec, 0, HIGH_SPEED_MAX_SPEED);
   const atHighSpeed = p.speed >= HIGH_SPEED_THRESHOLD;
   if (atHighSpeed && !p.highSpeedActive && now >= (p.sonicBoomReadyAt || 0)) {
-    triggerSonicBoom(p.x, p.y, p.angle);
-    broadcast({ type: 'sonicBoom', from: p.id, x: p.x, y: p.y, angle: p.angle });
+    triggerSonicBoom(p.x, p.y, p.angle, p.speed);
+    broadcast({ type: 'sonicBoom', from: p.id, x: p.x, y: p.y, angle: p.angle, speed: p.speed });
     p.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
   }
   p.highSpeedActive = atHighSpeed;
@@ -2841,9 +3011,10 @@ function handleFlare(fromId, data) {
 function handleSonicBoom(fromId, data) {
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
   const angle = Number.isFinite(data.angle) ? data.angle : 0;
-  if (!samePlayerId(fromId, myId)) triggerSonicBoom(data.x, data.y, angle);
+  const speed = Number.isFinite(data.speed) ? data.speed : HIGH_SPEED_THRESHOLD;
+  if (!samePlayerId(fromId, myId)) triggerSonicBoom(data.x, data.y, angle, speed);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'sonicBoom', from: fromId, x: data.x, y: data.y, angle });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'sonicBoom', from: fromId, x: data.x, y: data.y, angle, speed });
   });
 }
 
@@ -3026,7 +3197,11 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'sonicBoom') {
     if (Number.isFinite(data.x) && Number.isFinite(data.y)) {
-      triggerSonicBoom(data.x, data.y, Number.isFinite(data.angle) ? data.angle : 0);
+      triggerSonicBoom(
+        data.x, data.y,
+        Number.isFinite(data.angle) ? data.angle : 0,
+        Number.isFinite(data.speed) ? data.speed : HIGH_SPEED_THRESHOLD
+      );
     }
   }
   else if (data.type === 'impact') {

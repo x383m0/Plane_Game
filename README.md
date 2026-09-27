@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.48.4 (straight-flight propulsion pass)
+Current build: v1.48.5 (near-water sonic wave pass)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -170,6 +170,18 @@ damage once and clients only render the replicated impact.
 - Preserved the 900 maximum speed, high-speed assist, boost, gravity, and
   host-authoritative multiplayer simulation. The same propulsion rule is used
   by the local plane, host-simulated joiners, and skirmish bots.
+
+### v1.48.5 near-water sonic wave
+
+- Integrated the supplied sonic-boom water-wave design into the world-space
+  effects system. A sonic boom now creates a visible wave only when the plane
+  is within the near-water altitude band.
+- Wave size scales with water proximity and sonic speed. The wave travels
+  along the flat ocean in the opposite direction of the aircraft's horizontal
+  flight direction, with foam, spray, and mist adapted from the supplied
+  reference effect.
+- The effect is triggered consistently for the local plane, host-simulated
+  joiners, skirmish bots, and replicated sonic-boom events.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics
