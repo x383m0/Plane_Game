@@ -5,6 +5,11 @@ const WORLD_W = 7200, WORLD_H = 4416;
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
 const CAMERA_FOV_MULT = 1.3225;
 const GROUND_Y = WORLD_H - 150;   // sea surface / crash boundary
+// The visible world continues beyond the playable rectangle so the city and
+// ocean never terminate on a hard vertical seam. Aircraft may enter this fog
+// buffer briefly before the boundary timer disables them.
+const BORDER_FOG_DEPTH = 340;
+const BORDER_WARNING_MS = 5000;
 const MAX_PLAYERS = 8;
 
 const PLANE_SPEED = 285;          // px/s forward, constant auto-flight
@@ -49,10 +54,11 @@ const MISSILE_LOCK_DELAY = 1000;  // continuous facing time required for a lock
 const MISSILE_LOCK_HOLD_MS = 2000; // completed lock remains usable this long
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = Infinity, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
-const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 62;
+const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 82;
 const BOMB_MAX = 2, BOMB_REGEN_MS = 8500, BOMB_COOLDOWN = 850, BOMB_HIT_RADIUS = 42;
-const BOMB_PROXIMITY_RADIUS = 108, SHRAPNEL_COUNT = 10, SHRAPNEL_SPEED = 430;
-const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 650, SHRAPNEL_DAMAGE = 14, SHRAPNEL_HIT_RADIUS = 18;
+const BOMB_PROXIMITY_RADIUS = 132, BOMB_BLAST_RADIUS = 156, BOMB_BLAST_DAMAGE = 92;
+const SHRAPNEL_COUNT = 16, SHRAPNEL_SPEED = 500;
+const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 800, SHRAPNEL_DAMAGE = 18, SHRAPNEL_HIT_RADIUS = 22;
 
 // Flares: a limited-charge countermeasure that redirects a locked missile
 // within FLARE_BREAK_RADIUS onto the actual moving flare.
@@ -87,7 +93,7 @@ const FX = {
   muzzle: { life: 115, r: 18, colors: ['rgba(255,255,230,1)', 'rgba(255,190,75,0.82)', 'rgba(255,70,20,0)'] },
   launch: { life: 420, r: 34, colors: ['rgba(255,255,255,0.95)', 'rgba(110,220,255,0.7)', 'rgba(25,95,150,0)'] },
   shock:  { life: 360, r: 72, colors: ['rgba(255,225,140,0.9)', 'rgba(255,90,30,0.5)', 'rgba(255,30,10,0)'] },
-  bomb:   { life: 420, r: 82, colors: ['rgba(255,248,205,1)', 'rgba(255,140,45,0.92)', 'rgba(105,25,10,0)'] },
+  bomb:   { life: 620, r: 148, colors: ['rgba(255,255,225,1)', 'rgba(255,145,35,0.95)', 'rgba(105,25,10,0)'] },
 };
 
 const MAX_HEALTH = 100, RESPAWN_DELAY = 2200, INVULN_TIME = 1500;
@@ -123,7 +129,7 @@ let lastClientInputSend = 0, clientInputSeq = 0, clientActionSeq = 0;
 
 let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
-let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, speedValueEl, speedNeedleEl, speedFillEl;
+let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, boundaryWarningEl, boundaryTimerEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
 let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, mapSelectEl, networkStatusEl, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
@@ -636,6 +642,47 @@ function randomSpawnPoint() {
   return { x: rand(200, WORLD_W - 200), y: rand(120, GROUND_Y - 160) };
 }
 
+function isOutsideArena(p) {
+  return !!p && (p.x < 0 || p.x > WORLD_W || p.y < 0 || p.y > WORLD_H);
+}
+
+// Boundary state is part of the authoritative aircraft state. This means a
+// joiner sees the same countdown as the host and cannot avoid the timer by
+// rendering or simulating the plane locally.
+function updateBoundaryState(p, now) {
+  if (!p) return false;
+  if (!p.alive || p.falling) {
+    p.borderEnteredAt = 0;
+    p.borderRemaining = 0;
+    return false;
+  }
+  if (!isOutsideArena(p)) {
+    if (p.borderEnteredAt) debugLog('BOUNDARY', 'Player returned to the arena', { id: p.id });
+    p.borderEnteredAt = 0;
+    p.borderRemaining = 0;
+    p.borderWarningSeen = false;
+    return false;
+  }
+  if (!p.borderEnteredAt) {
+    p.borderEnteredAt = now;
+    p.borderWarningSeen = false;
+    debugLog('BOUNDARY', 'Player entered border fog', { id: p.id, x: Math.round(p.x), y: Math.round(p.y) });
+  }
+  p.borderRemaining = clamp(BORDER_WARNING_MS - (now - p.borderEnteredAt), 0, BORDER_WARNING_MS);
+  if (!p.borderWarningSeen) p.borderWarningSeen = true;
+  return p.borderRemaining <= 0;
+}
+
+function updateBoundaryWarningUI() {
+  const remaining = myState && myState.alive && !myState.falling
+    ? Math.max(0, Number(myState.borderRemaining) || 0)
+    : 0;
+  const warning = remaining > 0;
+  if (boundaryWarningEl) boundaryWarningEl.style.display = warning ? 'flex' : 'none';
+  if (boundaryTimerEl && warning) boundaryTimerEl.textContent = (remaining / 1000).toFixed(1);
+  if (gameArea) gameArea.classList.toggle('boundary-warning', warning);
+}
+
 function freshPlayerState(id, name) {
   const p = randomSpawnPoint();
   const angle = rand(0, Math.PI * 2);
@@ -646,6 +693,7 @@ function freshPlayerState(id, name) {
     health: MAX_HEALTH, score: 0, kills: 0, deaths: 0,
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0,
     respawnAt: 0, boosting: false, airbraking: false,
+    borderEnteredAt: 0, borderRemaining: 0, borderWarningSeen: false,
     speed: PLANE_SPEED, verticalVelocity: 0, turnVelocity: 0,
     stallTime: 0, stallRecoverTime: 0, roll: 0,
     barrelRollUntil: 0, barrelRollCooldown: 0, barrelRollDirection: 1,
@@ -692,6 +740,9 @@ function ensureNetworkPlayerState(p) {
   if (p.falling == null) p.falling = false;
   if (p.stalled == null) p.stalled = false;
   if (p.respawnAt == null) p.respawnAt = 0;
+  if (!Number.isFinite(p.borderEnteredAt)) p.borderEnteredAt = 0;
+  if (!Number.isFinite(p.borderRemaining)) p.borderRemaining = 0;
+  if (p.borderWarningSeen == null) p.borderWarningSeen = false;
   if (!Number.isFinite(p.barrelRollCooldown)) p.barrelRollCooldown = 0;
   if (!Number.isFinite(p.barrelRollUntil)) p.barrelRollUntil = 0;
   if (!Number.isFinite(p.barrelRollDirection)) p.barrelRollDirection = 1;
@@ -764,6 +815,7 @@ function respawnLocal() {
   myState.falling = false; myState.stalled = false; myState.stallRecoverTime = 0; myState.deathKiller = null; myState.fallSpinVelocity = 0;
   myState.highSpeedActive = false;
   myState.sonicBoomReadyAt = 0;
+  myState.borderEnteredAt = 0; myState.borderRemaining = 0; myState.borderWarningSeen = false;
   localFlareScheduleGeneration++;
   myState.boosting = false;
   currentCameraFovMult = CAMERA_FOV_MULT;
@@ -784,6 +836,7 @@ function respawnBot(bot) {
   bot.stallTime = 0; bot.stallRecoverTime = 0; bot.roll = 0;
   bot.barrelRollUntil = 0; bot.barrelRollCooldown = 0; bot.barrelRollDirection = 1;
   bot.highSpeedActive = false; bot.sonicBoomReadyAt = 0;
+  bot.borderEnteredAt = 0; bot.borderRemaining = 0; bot.borderWarningSeen = false;
   bot.botTargetId = null; bot.botTargetLockUntil = 0; bot.botLockTargetId = null; bot.botLockProgress = 0;
   bot.botNextThink = performance.now() + rand(100, 450);
   bot.botScheduleGeneration++;
@@ -800,6 +853,7 @@ function beginBotDeathFall(bot, killerId) {
   bot.deathKiller = killerId; bot.speed = 0; bot.turnVelocity = 0;
   bot.verticalVelocity = Math.max(45, bot.verticalVelocity);
   bot.fallSpinVelocity = STALL_SPIN_SPEED * (bot.id % 2 ? 1 : -1);
+  bot.borderEnteredAt = 0; bot.borderRemaining = 0;
   bot.botScheduleGeneration++;
 }
 
@@ -837,6 +891,7 @@ function beginDeathFall(killerId, message = 'Aircraft disabled') {
   myState.turnVelocity = 0;
   myState.verticalVelocity = Math.max(45, myState.verticalVelocity);
   myState.fallSpinVelocity = STALL_SPIN_SPEED * (Math.random() < .5 ? -1 : 1);
+  myState.borderEnteredAt = 0; myState.borderRemaining = 0;
   respawnMsgEl.textContent = message;
 }
 
@@ -892,8 +947,14 @@ function updateStalledFlight(dtSec, keys) {
   } else {
     myState.verticalVelocity *= Math.max(0, 1 - 5 * dtSec);
   }
-  myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * dtSec, 30, WORLD_W - 30);
+  myState.x = clamp(myState.x + Math.cos(myState.angle) * myState.speed * dtSec, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
+  myState.y = clamp(myState.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
+
+  if (updateBoundaryState(myState, performance.now())) {
+    beginDeathFall(null, 'Boundary lost — aircraft disabled');
+    return;
+  }
 
   if (myState.speed >= 90 && Math.sin(myState.angle) > .22) {
     myState.stallRecoverTime += dtSec * 1000;
@@ -997,7 +1058,7 @@ function updateLocalPlane(dtSec, keys) {
   } else {
     myState.roll *= Math.max(0, 1 - 7 * dtSec);
   }
-  myState.x = clamp(myState.x, 30, WORLD_W - 30);
+  myState.x = clamp(myState.x, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   const gravityAlongFlight = GRAVITY_ACCEL * Math.sin(myState.angle);
   const drag = (myState.speed - PLANE_SPEED) * .82;
   const thrust = boosting ? 250 : airbraking ? -300 : 0;
@@ -1036,6 +1097,12 @@ function updateLocalPlane(dtSec, keys) {
   }
   myState.x += Math.cos(myState.angle) * myState.speed * dtSec;
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
+  myState.y = clamp(myState.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
+
+  if (updateBoundaryState(myState, performance.now())) {
+    beginDeathFall(null, 'Boundary lost — aircraft disabled');
+    return;
+  }
   if (myState.y >= GROUND_Y - 12) {
     crashLocal('You hit the sea.');
     return;
@@ -1105,13 +1172,15 @@ function updateLocalPlane(dtSec, keys) {
       const b = bombs[i];
       if (b.ownerId === myId) continue;
       if (dist(myState.x, myState.y, b.x, b.y) < BOMB_HIT_RADIUS) {
-        detonateBomb(b);
-        sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
+      detonateBomb(b);
+      sendEvent({ type: 'impact', kind: 'bomb', id: b.id, x: b.x, y: b.y });
+      // The host's central blast already applied the authoritative damage.
+      // This branch only remains for a non-authoritative local fallback.
+      if (!isHost && !botMode) {
         myState.health -= BOMB_DAMAGE;
-        if (myState.health <= 0) {
-          beginDeathFall(b.ownerId, 'Aircraft disabled');
-        }
-        break;
+        if (myState.health <= 0) beginDeathFall(b.ownerId, 'Aircraft disabled');
+      }
+      break;
       }
     }
   }
@@ -1248,15 +1317,26 @@ function spawnBombShrapnel(x, y, ownerId) {
   }
 }
 
+function applyBombBlastDamage(x, y, ownerId) {
+  if (!isHost && !botMode) return;
+  Object.values(players).forEach(target => {
+    if (!target || samePlayerId(target.id, ownerId) || target.connected === false || !target.alive) return;
+    const distance = dist(target.x, target.y, x, y);
+    if (distance >= BOMB_BLAST_RADIUS) return;
+    const falloff = 1 - (distance / BOMB_BLAST_RADIUS) * .45;
+    applyHostDamage(target, BOMB_BLAST_DAMAGE * falloff, ownerId);
+  });
+}
+
 function detonateBomb(b) {
   if (!b) return;
   const burstY = Math.min(b.y, GROUND_Y - 8);
-  // Bombs use a lightweight burst instead of the full missile/death particle
-  // explosion. The shrapnel remains gameplay-active, but detonation no longer
-  // allocates dozens of smoke/debris particles for every bot bomb.
+  // The center blast is authoritative and runs once on the host. Clients only
+  // receive the visual/fragment event, preventing duplicate damage in P2P.
+  if (isHost || botMode) applyBombBlastDamage(b.x, burstY, b.ownerId);
   spawnExplosion(b.x, burstY, 'bomb');
   playExplosionSound('blast', b.x, burstY);
-  screenShake = Math.max(screenShake, 5);
+  screenShake = Math.max(screenShake, 9);
   spawnBombShrapnel(b.x, burstY, b.ownerId);
   if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY });
   removeProjectileLocal('bomb', b.id);
@@ -1286,7 +1366,7 @@ function updateBombs(dtSec) {
     // without turning it into a homing weapon.
     const proximitySq = BOMB_PROXIMITY_RADIUS * BOMB_PROXIMITY_RADIUS;
     const nearTarget = Object.values(players).some(p => {
-      if (p.id === b.ownerId || p.connected === false || p.alive === false || p.falling) return false;
+      if (samePlayerId(p.id, b.ownerId) || p.connected === false || p.alive === false) return false;
       const dx = p.x - b.x, dy = p.y - b.y;
       return dx * dx + dy * dy <= proximitySq;
     });
@@ -1742,11 +1822,13 @@ function updateOneBot(bot, dtSec, now) {
     bot.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
   }
   bot.highSpeedActive = atHighSpeed;
-  bot.x = clamp(bot.x + Math.cos(bot.angle) * bot.speed * dtSec, 30, WORLD_W - 30);
+  bot.x = clamp(bot.x + Math.cos(bot.angle) * bot.speed * dtSec, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   bot.y += Math.sin(bot.angle) * bot.speed * dtSec;
   if (bot.y < 0) bot.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-bot.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
   else bot.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
   bot.y += bot.verticalVelocity * dtSec;
+  bot.y = clamp(bot.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
+  if (updateBoundaryState(bot, now)) { beginBotDeathFall(bot, null); return; }
   if (bot.y >= GROUND_Y - 12) { beginBotDeathFall(bot, null); return; }
 
   bot.fireTimer = Math.max(0, bot.fireTimer - dtSec * 1000);
@@ -1841,6 +1923,7 @@ function respawnNetworkPlayer(p) {
   p.bombs = BOMB_MAX; p.bombCooldown = 0; p.bombRegenTimer = 0;
   p.flares = FLARE_MAX; p.flareCooldown = 0; p.flareRegenTimer = 0;
   p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
+  p.borderEnteredAt = 0; p.borderRemaining = 0; p.borderWarningSeen = false;
   p.respawnAt = 0; p.invulnUntil = performance.now() + INVULN_TIME;
 }
 
@@ -1851,6 +1934,7 @@ function beginRemoteDeathFall(p, killerId, message = 'Aircraft disabled') {
   p.deathKiller = killerId; p.speed = 0; p.turnVelocity = 0;
   p.verticalVelocity = Math.max(45, p.verticalVelocity);
   p.fallSpinVelocity = STALL_SPIN_SPEED * (p.id % 2 ? 1 : -1);
+  p.borderEnteredAt = 0; p.borderRemaining = 0;
   p.networkInput = { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false };
   p.networkInputAt = 0;
   p.deathMessage = message;
@@ -1869,7 +1953,7 @@ function updateRemoteDeathFall(p, dtSec) {
   p.verticalVelocity += FALL_GRAVITY * dtSec;
   p.speed = 0; p.turnVelocity = 0;
   p.roll += p.fallSpinVelocity * dtSec;
-  p.x = clamp(p.x, 30, WORLD_W - 30);
+  p.x = clamp(p.x, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   p.y += p.verticalVelocity * dtSec;
   if (p.y >= GROUND_Y - 12) finishRemoteDeath(p);
 }
@@ -1981,8 +2065,10 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   p.highSpeedActive = atHighSpeed;
   if (p.y < 0) p.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-p.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
   else p.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
-  p.x = clamp(p.x + Math.cos(p.angle) * Math.max(0, p.speed) * dtSec, 30, WORLD_W - 30);
+  p.x = clamp(p.x + Math.cos(p.angle) * Math.max(0, p.speed) * dtSec, -BORDER_FOG_DEPTH, WORLD_W + BORDER_FOG_DEPTH);
   p.y += Math.sin(p.angle) * Math.max(0, p.speed) * dtSec + p.verticalVelocity * dtSec;
+  p.y = clamp(p.y, -BORDER_FOG_DEPTH, WORLD_H + BORDER_FOG_DEPTH);
+  if (updateBoundaryState(p, now)) { beginRemoteDeathFall(p, null, 'Boundary lost — aircraft disabled'); return; }
   if (p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
 
   if (!p.debugSimulationSeen) {
@@ -2021,14 +2107,19 @@ function updateNetworkPlayers(dtSec, now) {
 function applyHostDamage(target, amount, killerId) {
   if (!target || !target.alive || performance.now() < (target.invulnUntil || 0)) return;
   if (target.falling) {
-    // A crashing remote aircraft must still be finishable. The old host path
-    // ignored all damage once `falling` was set, leaving joiners immortal if
-    // their fall state failed to reach the water.
-    finishRemoteDeath(target);
+    // A crashing aircraft must still be finishable. Route the finalization to
+    // the correct authority path for a host pilot, bot, or remote joiner.
+    if (samePlayerId(target.id, myId)) finishDeath(killerId, 'Aircraft destroyed');
+    else if (target.isBot) finishBotDeath(target);
+    else finishRemoteDeath(target);
     return;
   }
   target.health -= amount;
-  if (target.health <= 0) beginRemoteDeathFall(target, killerId);
+  if (target.health <= 0) {
+    if (samePlayerId(target.id, myId)) beginDeathFall(killerId);
+    else if (target.isBot) beginBotDeathFall(target, killerId);
+    else beginRemoteDeathFall(target, killerId);
+  }
 }
 
 function updateHostCombat() {
@@ -2305,7 +2396,7 @@ function applyRemoteState(p, data) {
   p.stalled = !!data.stalled;
   p.boosting = !!data.boosting;
   if (data.roll != null) p.roll = data.roll;
-  ['speed', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'respawnAt'].forEach(key => {
+  ['speed', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'respawnAt', 'borderEnteredAt', 'borderRemaining'].forEach(key => {
     if (data[key] !== undefined) p[key] = data[key];
   });
   if (data.lockTargetId !== undefined) {
@@ -2345,6 +2436,8 @@ function broadcastAuthoritativeSnapshot() {
       overheated: p.overheated, boost: p.boost, missiles: p.missiles,
       bombs: p.bombs, flares: p.flares, score: p.score, kills: p.kills,
       deaths: p.deaths, respawnAt: p.respawnAt || 0,
+      borderEnteredAt: p.borderEnteredAt || 0,
+      borderRemaining: p.borderRemaining || 0,
       lockTargetId: p.hostLockTargetId, lockProgress: p.hostLockProgress || 0,
       lockExpiresAt: p.hostLockExpiresAt || 0,
       lockRemaining: Math.max(0, (p.hostLockExpiresAt || 0) - performance.now())
@@ -2982,11 +3075,17 @@ function drawBomb(ctx, b) {
   ctx.save();
   ctx.translate(b.x, b.y);
   ctx.rotate(Math.atan2(b.vy, b.vx));
-  ctx.shadowColor = '#ff9d5c'; ctx.shadowBlur = 10;
-  ctx.fillStyle = '#1b2934'; ctx.strokeStyle = '#d3e7ed'; ctx.lineWidth = 1;
+  ctx.scale(1.25, 1.25);
+  ctx.shadowColor = '#ff9d5c'; ctx.shadowBlur = 15;
+  ctx.fillStyle = '#1b2934'; ctx.strokeStyle = '#d3e7ed'; ctx.lineWidth = 1.4;
   ctx.beginPath(); ctx.ellipse(0, 0, 8, 4.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   ctx.fillStyle = '#ff9d5c';
-  ctx.beginPath(); ctx.moveTo(-7, -3); ctx.lineTo(-15, 0); ctx.lineTo(-7, 3); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-7, -3); ctx.lineTo(-22, 0); ctx.lineTo(-7, 3); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ffd08a';
+  ctx.beginPath(); ctx.moveTo(5, -3); ctx.lineTo(-1, -9); ctx.lineTo(-5, -3); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(5, 3); ctx.lineTo(-1, 9); ctx.lineTo(-5, 3); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,231,171,.8)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-1, -2); ctx.lineTo(6, -2); ctx.stroke();
   ctx.restore();
 }
 
@@ -3035,22 +3134,24 @@ function drawExplosion(ctx, e, now) {
   ctx.restore();
 }
 
-function drawGround(ctx) {
+function drawGround(ctx, startX = 0, endX = WORLD_W) {
   const grad = ctx.createLinearGradient(0, GROUND_Y, 0, WORLD_H);
   grad.addColorStop(0, '#3f8c91');
   grad.addColorStop(.35, '#246875');
   grad.addColorStop(1, '#102f42');
   ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.moveTo(0, WORLD_H);
-  ctx.lineTo(0, GROUND_Y);
   const step = 120;
-  for (let x = 0; x <= WORLD_W; x += step) {
-    const h = Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
-    ctx.lineTo(x, GROUND_Y + h);
+  const first = Math.floor((startX - step) / step) * step;
+  const last = Math.ceil((endX + step) / step) * step;
+  const bottom = WORLD_H + BORDER_FOG_DEPTH;
+  const waveHeight = x => Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
+  ctx.beginPath();
+  ctx.moveTo(first, bottom);
+  ctx.lineTo(first, GROUND_Y + waveHeight(first));
+  for (let x = first + step; x <= last; x += step) {
+    ctx.lineTo(x, GROUND_Y + waveHeight(x));
   }
-  ctx.lineTo(WORLD_W, GROUND_Y);
-  ctx.lineTo(WORLD_W, WORLD_H);
+  ctx.lineTo(last, bottom);
   ctx.closePath();
   ctx.fill();
 
@@ -3058,9 +3159,9 @@ function drawGround(ctx) {
   ctx.strokeStyle = 'rgba(173,238,226,0.30)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  for (let x = 0; x <= WORLD_W; x += step) {
-    const h = Math.sin(x / 260) * 6 + Math.sin(x / 90 + 1.3) * 3;
-    if (x === 0) ctx.moveTo(x, GROUND_Y + h); else ctx.lineTo(x, GROUND_Y + h);
+  for (let x = first; x <= last; x += step) {
+    const h = waveHeight(x);
+    if (x === first) ctx.moveTo(x, GROUND_Y + h); else ctx.lineTo(x, GROUND_Y + h);
   }
   ctx.stroke();
 
@@ -3069,9 +3170,9 @@ function drawGround(ctx) {
   ctx.lineWidth = 1.5;
   [18, 40].forEach((depth, di) => {
     ctx.beginPath();
-    for (let x = 0; x <= WORLD_W; x += step) {
+    for (let x = first; x <= last; x += step) {
       const h = Math.sin(x / 260 + di + 1) * 5 + Math.sin(x / 100 + di * 2) * 3;
-      if (x === 0) ctx.moveTo(x, GROUND_Y + depth + h); else ctx.lineTo(x, GROUND_Y + depth + h);
+      if (x === first) ctx.moveTo(x, GROUND_Y + depth + h); else ctx.lineTo(x, GROUND_Y + depth + h);
     }
     ctx.stroke();
   });
@@ -3145,6 +3246,48 @@ function drawCloudBanks(ctx, now, camX, camY, viewW, viewH) {
     ctx.beginPath(); ctx.ellipse(b.rx * .2, -b.ry * .08, b.rx * .42, b.ry * .35, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   });
+}
+
+function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
+  const edge = BORDER_FOG_DEPTH;
+  const pulse = .88 + Math.sin(now / 520) * .06;
+  const solid = `rgba(205,226,225,${.72 * pulse})`;
+  const soft = `rgba(205,226,225,${.26 * pulse})`;
+  const extra = 220;
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+
+  if (camX < edge) {
+    const g = ctx.createLinearGradient(0, 0, edge, 0);
+    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
+    ctx.fillStyle = g; ctx.fillRect(camX - extra, camY - extra, edge + extra, viewH + extra * 2);
+  }
+  if (camX + viewW > WORLD_W - edge) {
+    const g = ctx.createLinearGradient(WORLD_W, 0, WORLD_W - edge, 0);
+    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
+    ctx.fillStyle = g; ctx.fillRect(WORLD_W - edge, camY - extra, viewW + extra, viewH + extra * 2);
+  }
+  if (camY < edge) {
+    const g = ctx.createLinearGradient(0, 0, 0, edge);
+    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
+    ctx.fillStyle = g; ctx.fillRect(camX - extra, camY - extra, viewW + extra * 2, edge + extra);
+  }
+  if (camY + viewH > WORLD_H - edge) {
+    const g = ctx.createLinearGradient(0, WORLD_H, 0, WORLD_H - edge);
+    g.addColorStop(0, solid); g.addColorStop(.35, soft); g.addColorStop(1, 'rgba(205,226,225,0)');
+    ctx.fillStyle = g; ctx.fillRect(camX - extra, WORLD_H - edge, viewW + extra * 2, viewH + extra);
+  }
+
+  // Slow translucent wisps keep the boundary reading as thick atmosphere,
+  // rather than a static rectangle or a hard map line.
+  ctx.globalAlpha = .16 + Math.sin(now / 430) * .03;
+  ctx.fillStyle = '#efffff';
+  for (let i = 0; i < 8; i++) {
+    const y = camY + ((i * 173 + now * .018) % Math.max(1, viewH + 180)) - 90;
+    if (camX < edge) { ctx.beginPath(); ctx.ellipse(Math.min(0, camX + 110), y, 150, 34 + (i % 3) * 12, -.08, 0, Math.PI * 2); ctx.fill(); }
+    if (camX + viewW > WORLD_W - edge) { ctx.beginPath(); ctx.ellipse(Math.max(WORLD_W, camX + viewW - 110), y, 150, 34 + (i % 3) * 12, .08, 0, Math.PI * 2); ctx.fill(); }
+  }
+  ctx.restore();
 }
 
 function drawSpeedLines(ctx, now) {
@@ -3364,7 +3507,7 @@ function render(now) {
 
   drawSkyBackdrop(ctx, camX, camY, viewW, viewH);
 
-  drawGround(ctx);
+  drawGround(ctx, camX - BORDER_FOG_DEPTH - 180, camX + viewW + BORDER_FOG_DEPTH + 180);
 
   flares.forEach(f => drawFlare(ctx, f, now));
   bullets.forEach(b => drawBullet(ctx, b));
@@ -3383,6 +3526,7 @@ function render(now) {
   specialEffects.forEach(e => e.draw(ctx));
   // Cloud banks remain the only foreground concealment layer.
   drawCloudBanks(ctx, now, camX, camY, viewW, viewH);
+  drawBoundaryFog(ctx, now, camX, camY, viewW, viewH);
 
   ctx.restore();
 
@@ -3532,6 +3676,8 @@ function loopFrame(ts) {
     respawnTimerEl.textContent = 'Respawning in ' + (remain / 1000).toFixed(1) + 's';
   }
 
+  updateBoundaryWarningUI();
+
   render(ts);
   requestAnimationFrame(loop);
 }
@@ -3576,6 +3722,8 @@ window.addEventListener('DOMContentLoaded', () => {
   respawnOverlay = document.getElementById('respawnOverlay');
   respawnMsgEl = document.getElementById('respawnMsg');
   respawnTimerEl = document.getElementById('respawnTimer');
+  boundaryWarningEl = document.getElementById('boundaryWarning');
+  boundaryTimerEl = document.getElementById('boundaryTimer');
   debugPanelEl = document.getElementById('debugPanel');
   debugSummaryEl = document.getElementById('debugSummary');
   debugLogEl = document.getElementById('debugLog');

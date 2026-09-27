@@ -6,9 +6,10 @@ repeat. There are no coins, stars, or other collectibles. No server, no build
 step, and no dependencies to install — PeerJS is loaded from its CDN.
 
 The current arena uses the sky/background and water, with the world-space city
-buildings and cloud banks restored. Canyon/island/storm geometry, border lines,
-and other decorative map props remain disabled so the flight space stays
-visually clean.
+buildings and cloud banks restored. The city and ocean continue beyond the
+playable rectangle into a soft animated boundary fog instead of ending on a
+hard seam. Canyon/island/storm geometry, border lines, and other decorative
+map props remain disabled so the flight space stays visually clean.
 
 ## Dependencies to install
 
@@ -88,6 +89,14 @@ heat bar and the gun locks up until it cools back down, so short controlled
 bursts beat holding the trigger. Heat drains when you let off fire and drains
 faster after overheating. In multiplayer the host owns each player's heat and
 fire cooldown.
+
+### Boundary fog and bombs
+
+The outer map is a five-second warning zone. Entering it displays a return
+warning and countdown; staying outside until the timer expires disables the
+aircraft. Bombs now have a larger model, a stronger central blast, 16 active
+shrapnel fragments, and a larger explosion radius. The host applies the blast
+damage once and clients only render the replicated impact.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

@@ -42,7 +42,7 @@
       <button id="startBtn" style="display:none;"><span>LAUNCH SORTIE</span><b>→</b></button>
       <p class="hint" id="waitHint">Waiting for the flight leader…</p>
     </div>
-    <div class="menu-footer"><span>WINGS ARENA v1.45.0</span><span>VECTOR COCKPIT // BEST WITH MOUSE + KEYBOARD</span></div>
+    <div class="menu-footer"><span>WINGS ARENA v1.46.0</span><span>VECTOR COCKPIT // BEST WITH MOUSE + KEYBOARD</span></div>
   </div>
 
   <div id="gameArea" style="display:none;">
@@ -78,6 +78,11 @@
       </div>
 
       <div id="lockWarning" style="display:none;">⚠ MISSILE LOCK — PRESS F TO FLARE!</div>
+      <div id="boundaryWarning" style="display:none;" role="status" aria-live="assertive">
+        <span class="boundary-kicker">⚠ OUTSIDE ARENA</span>
+        <strong>RETURN TO THE BATTLE AREA</strong>
+        <small>BOUNDARY FAILURE IN <b id="boundaryTimer">5.0</b>s</small>
+      </div>
       <div id="networkStatus">P2P // OFFLINE</div>
 
       <div id="leaderboard">
@@ -103,7 +108,7 @@
         <div id="respawnTimer"></div>
       </div>
     </div>
-    <div id="gameVersion">WINGS ARENA // v1.45.0</div>
+    <div id="gameVersion">WINGS ARENA // v1.46.0</div>
   </div>
 
   <section id="debugPanel" aria-hidden="true">
