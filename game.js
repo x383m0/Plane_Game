@@ -54,11 +54,16 @@ const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 const HEAT_MAX = 300, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
-// Homing missiles: limited ammo, regenerates slowly, turns faster than a
-// plane can (so out-turning one alone is hard) but can be decoyed by a flare.
+// Homing missiles: a short unpowered separation drop gives the target a dodge
+// window before the motor lights and the seeker begins guiding.
 const MISSILE_INITIAL_SPEED = 760;
 const MISSILE_MAX_SPEED = 1120;
 const MISSILE_ACCELERATION = 145;
+const MISSILE_LAUNCH_COAST_MS = 420;
+const MISSILE_COAST_MIN_SPEED = 180, MISSILE_COAST_MAX_SPEED = 520;
+const MISSILE_COAST_GRAVITY = 240, MISSILE_BOOST_START_SPEED = 620;
+const MISSILE_SEEKER_RANGE = 3200, MISSILE_SEEKER_CONE = 1.18;
+const MISSILE_TARGET_MEMORY_MS = 550;
 const MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
 const MISSILE_LOCK_DELAY = 1000;  // continuous facing time required for a lock
 const MISSILE_LOCK_HOLD_MS = 2000; // completed lock remains usable this long
@@ -72,8 +77,8 @@ const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 800, SHRAPNEL_DAMAGE = 18, SHRAPNE
 const WATER_WEAPON_DETONATION_DELAY = 1.1;
 const MAX_ACTIVE_WATER_WEAPON_EFFECTS = 24;
 
-// Flares: a limited-charge countermeasure that redirects a locked missile
-// within FLARE_BREAK_RADIUS onto the actual moving flare.
+// Flares can divert a missile when the seeker sees the flare but loses sight
+// of the aircraft. If both are visible, the seeker prefers the aircraft.
 const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
 const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
 const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each two-sided flare wave
@@ -1817,7 +1822,7 @@ function checkFallingHits() {
   }
   for (let i = missiles.length - 1; i >= 0; i--) {
     const m = missiles[i];
-    if (m.ownerId === myId || (m.targetId != null && m.targetId !== myId)) continue;
+    if (!m.ignited || m.ownerId === myId || m.decoyTarget || (m.targetId != null && m.targetId !== myId)) continue;
     if (dist(myState.x, myState.y, m.x, m.y) < MISSILE_HIT_RADIUS) {
       removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
       sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
@@ -2028,7 +2033,7 @@ function updateLocalPlane(dtSec, keys) {
   if (!invuln && myState.alive) {
     for (let i = missiles.length - 1; i >= 0; i--) {
       const m = missiles[i];
-      if (m.ownerId === myId) continue;
+      if (!m.ignited || m.ownerId === myId || m.decoyTarget) continue;
       if (m.targetId != null && m.targetId !== myId) continue;
       if (dist(myState.x, myState.y, m.x, m.y) < MISSILE_HIT_RADIUS) {
         removeProjectileLocal('missile', m.id);
@@ -2396,18 +2401,29 @@ function fireMissileFor(state, ownerId, targetId = null, replicate = false) {
   state.missileCooldown = MISSILE_COOLDOWN;
   state.missiles--;
   const nose = 22;
+  const born = performance.now();
+  const inheritedSpeed = Number.isFinite(state.speed) ? Math.max(0, state.speed) : PLANE_SPEED;
+  const coastSpeed = clamp(inheritedSpeed * .86, MISSILE_COAST_MIN_SPEED, MISSILE_COAST_MAX_SPEED);
+  const lockedTarget = targetId == null ? null : players[targetId];
   const m = {
     id: ownerId + '-m' + (nextMissileId++), ownerId, targetId,
     x: state.x + Math.cos(state.angle) * nose,
     y: state.y + Math.sin(state.angle) * nose,
-    angle: state.angle, speed: MISSILE_INITIAL_SPEED, born: performance.now(),
-    lockReadyAt: performance.now(), trail: [], exhaust: 1
+    angle: state.angle, speed: coastSpeed, coastSpeed, dropVelocity: 0,
+    born, boostAt: born + MISSILE_LAUNCH_COAST_MS,
+    lockReadyAt: born + MISSILE_LAUNCH_COAST_MS, ignited: false,
+    lastTargetX: lockedTarget?.x, lastTargetY: lockedTarget?.y,
+    lastTargetSeenAt: lockedTarget ? born : 0,
+    trail: [], exhaust: 0
   };
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
   playMissileLaunchSound(m.x, m.y); screenShake = Math.max(screenShake, ownerId === myId ? 7 : 3);
   if (replicate) {
-    const packet = { type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, locked: targetId != null };
+    const packet = { type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle,
+      speed: m.speed, coastSpeed: m.coastSpeed, coastRemaining: MISSILE_LAUNCH_COAST_MS,
+      dropVelocity: 0, lastTargetX: m.lastTargetX, lastTargetY: m.lastTargetY,
+      locked: targetId != null };
     if (isHost && ownerId !== myId) broadcast({ ...packet, from: ownerId });
     else sendEvent(packet);
   }
@@ -2485,7 +2501,6 @@ function spawnFlareSalvo(x, y, angle, ownerId = myId) {
           born
         };
         flares.push(f);
-        resolveFlare(ownerId, f.x, f.y, f);
         const volume = proximityVolume(f.x, f.y, .18);
         if (volume > .005) playAsset('flare', volume, 1.02 + flareNumber * .015);
       });
@@ -2493,17 +2508,61 @@ function spawnFlareSalvo(x, y, angle, ownerId = myId) {
   }
 }
 
-// A nearby locked missile is redirected to the actual flare object. It keeps
-// homing on that moving flare and detonates only when it reaches it.
-function resolveFlare(fromId, fx, fy, flare = null) {
-  for (let i = missiles.length - 1; i >= 0; i--) {
-    const m = missiles[i];
-    if (m.targetId === fromId && !m.decoyTarget && dist(m.x, m.y, fx, fy) < FLARE_BREAK_RADIUS) {
-      m.decoyTarget = flare || { x: fx, y: fy };
-      m.decoyed = true;
-      m.targetId = null;
-    }
+function missileCanSeePoint(m, x, y) {
+  const distance = dist(m.x, m.y, x, y);
+  if (distance > MISSILE_SEEKER_RANGE || distance < 1) return false;
+  const bearing = Math.atan2(y - m.y, x - m.x);
+  if (Math.abs(angleDiff(m.angle, bearing)) > MISSILE_SEEKER_CONE) return false;
+  if (isInCloudBank(m.x, m.y) || isInCloudBank(x, y)) return false;
+  if (activeMapId === 'canyon' && canyonFirstRockCollision(m.x, m.y, x, y, 0, 24)) return false;
+  return true;
+}
+
+function findMissileVisibleFlare(m, ownerId, now) {
+  let best = null, bestAngle = Infinity;
+  for (const flare of flares) {
+    if (!samePlayerId(flare.ownerId, ownerId) || now < flare.born || now - flare.born > FLARE_ACTIVE_MS) continue;
+    if (dist(m.x, m.y, flare.x, flare.y) > FLARE_BREAK_RADIUS || !missileCanSeePoint(m, flare.x, flare.y)) continue;
+    const bearing = Math.atan2(flare.y - m.y, flare.x - m.x);
+    const angle = Math.abs(angleDiff(m.angle, bearing));
+    if (angle < bestAngle) { best = flare; bestAngle = angle; }
   }
+  return best;
+}
+
+function updateMissileGuidance(m, now) {
+  if (m.decoyTarget) return { x: m.decoyTarget.x, y: m.decoyTarget.y };
+  if (m.targetId == null) return null;
+  const target = players[m.targetId];
+  if (!target || target.alive === false || target.connected === false) {
+    m.targetId = null;
+    m.decoyed = true;
+    return null;
+  }
+
+  const planeVisible = Number.isFinite(target.x) && Number.isFinite(target.y) &&
+    missileCanSeePoint(m, target.x, target.y);
+  // Aircraft take priority if both signatures are in the seeker's view. A
+  // flare only wins when it is visible and the aircraft is currently hidden
+  // by distance, cloud, cave rock, or the seeker's forward field of view.
+  const flare = findMissileVisibleFlare(m, target.id, now);
+  if (!planeVisible && flare) {
+    m.decoyTarget = flare;
+    m.decoyed = true;
+    m.targetId = null;
+    return { x: flare.x, y: flare.y };
+  }
+  if (planeVisible) {
+    m.lastTargetX = target.x; m.lastTargetY = target.y; m.lastTargetSeenAt = now;
+    return { x: target.x, y: target.y };
+  }
+  if (Number.isFinite(m.lastTargetX) && Number.isFinite(m.lastTargetY) &&
+      now - (m.lastTargetSeenAt || m.born) <= MISSILE_TARGET_MEMORY_MS) {
+    return { x: m.lastTargetX, y: m.lastTargetY };
+  }
+  m.targetId = null;
+  m.decoyed = true;
+  return null;
 }
 
 function updateMissiles(dtSec) {
@@ -2527,48 +2586,46 @@ function updateMissiles(dtSec) {
       }
     }
 
-    if (!m.decoyTarget && m.targetId != null) {
-      const nearbyFlare = flares.find(f => f.ownerId === m.targetId && dist(m.x, m.y, f.x, f.y) < FLARE_BREAK_RADIUS);
-      if (nearbyFlare) {
-        m.decoyTarget = nearbyFlare;
-        m.decoyed = true;
-        m.targetId = null;
+    const boostAt = Number.isFinite(m.boostAt) ? m.boostAt :
+      (Number.isFinite(m.lockReadyAt) ? m.lockReadyAt : m.born + MISSILE_LAUNCH_COAST_MS);
+    m.ignited = now >= boostAt;
+    let aimPoint = null;
+    if (m.ignited) {
+      if (!m.boosted) {
+        m.speed = Math.max(Number.isFinite(m.speed) ? m.speed : MISSILE_INITIAL_SPEED, MISSILE_BOOST_START_SPEED);
+        m.boosted = true;
       }
+      aimPoint = updateMissileGuidance(m, now);
+      m.dropVelocity = Math.max(0, (m.dropVelocity || 0) - 620 * dtSec);
+      m.speed = Math.min(MISSILE_MAX_SPEED,
+        (Number.isFinite(m.speed) ? m.speed : MISSILE_BOOST_START_SPEED) + MISSILE_ACCELERATION * dtSec);
+    } else {
+      // The missile inherits a little of the aircraft's velocity, stays
+      // parallel during separation, and drops slightly before motor ignition.
+      m.speed = clamp(Number.isFinite(m.coastSpeed) ? m.coastSpeed : m.speed,
+        MISSILE_COAST_MIN_SPEED, MISSILE_COAST_MAX_SPEED);
+      m.dropVelocity = Math.min(250, (m.dropVelocity || 0) + MISSILE_COAST_GRAVITY * dtSec);
     }
 
-    // A flare redirects the missile to the flare itself. The missile remains
-    // active until it physically reaches that flare, then explodes there.
-    if (m.decoyTarget) {
-      const decoyDistance = dist(m.x, m.y, m.decoyTarget.x, m.decoyTarget.y);
-      if (decoyDistance < MISSILE_HIT_RADIUS && authoritative) {
-        spawnExplosion(m.decoyTarget.x, m.decoyTarget.y, 'blast');
-        if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.decoyTarget.x, y: m.decoyTarget.y });
-        removeProjectileLocal('missile', m.id);
-        continue;
-      }
-      const desired = Math.atan2(m.decoyTarget.y - m.y, m.decoyTarget.x - m.x);
+    // Flare decoys only explode when the missile physically reaches the flare.
+    if (m.decoyTarget && dist(m.x, m.y, m.decoyTarget.x, m.decoyTarget.y) < MISSILE_HIT_RADIUS && authoritative) {
+      spawnExplosion(m.decoyTarget.x, m.decoyTarget.y, 'blast');
+      if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.decoyTarget.x, y: m.decoyTarget.y });
+      removeProjectileLocal('missile', m.id);
+      continue;
+    }
+    if (aimPoint) {
+      const desired = Math.atan2(aimPoint.y - m.y, aimPoint.x - m.x);
       const step = MISSILE_TURN_RATE * dtSec;
       const diff = angleDiff(m.angle, desired);
       m.angle += Math.abs(diff) < step ? diff : Math.sign(diff) * step;
-    } else if (m.targetId != null && now >= (m.lockReadyAt || m.born)) {
-      const target = players[m.targetId];
-      if (target && target.alive !== false && target.connected !== false) {
-        const desired = Math.atan2(target.y - m.y, target.x - m.x);
-        const step = MISSILE_TURN_RATE * dtSec;
-        const diff = angleDiff(m.angle, desired);
-        m.angle += Math.abs(diff) < step ? diff : Math.sign(diff) * step;
-      } else {
-        m.targetId = null; // target died or left: missile goes dumb/ballistic
-        m.decoyed = true;
-      }
     }
 
-    m.speed = Math.min(MISSILE_MAX_SPEED, (Number.isFinite(m.speed) ? m.speed : MISSILE_INITIAL_SPEED) + MISSILE_ACCELERATION * dtSec);
     m.trail.push({ x: m.x, y: m.y });
     if (m.trail.length > 20) m.trail.shift();
     const startX = m.x, startY = m.y;
     const endX = startX + Math.cos(m.angle) * m.speed * dtSec;
-    const endY = startY + Math.sin(m.angle) * m.speed * dtSec;
+    const endY = startY + Math.sin(m.angle) * m.speed * dtSec + (m.dropVelocity || 0) * dtSec;
     if (activeMapId === 'canyon') {
       const rockHit = canyonFirstRockCollision(startX, startY, endX, endY, 7, 8);
       if (rockHit) {
@@ -2597,6 +2654,28 @@ function updateMissiles(dtSec) {
     }
     m.x = endX; m.y = endY;
   }
+}
+
+function createMissileReplica(data, ownerId) {
+  const now = performance.now();
+  const coastRemaining = Number.isFinite(data.coastRemaining)
+    ? clamp(data.coastRemaining, 0, MISSILE_LAUNCH_COAST_MS)
+    : MISSILE_LAUNCH_COAST_MS;
+  const speed = Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED;
+  const coastSpeed = Number.isFinite(data.coastSpeed)
+    ? data.coastSpeed
+    : clamp(speed, MISSILE_COAST_MIN_SPEED, MISSILE_COAST_MAX_SPEED);
+  const boostAt = now + coastRemaining;
+  return {
+    id: data.id, ownerId, targetId: data.targetId ?? null,
+    x: data.x, y: data.y, angle: data.angle, speed, coastSpeed,
+    dropVelocity: Number.isFinite(data.dropVelocity) ? data.dropVelocity : 0,
+    born: now, boostAt, lockReadyAt: boostAt,
+    ignited: coastRemaining <= 0, boosted: coastRemaining <= 0,
+    lastTargetX: data.lastTargetX, lastTargetY: data.lastTargetY,
+    lastTargetSeenAt: Number.isFinite(data.lastTargetX) && Number.isFinite(data.lastTargetY) ? now : 0,
+    trail: [], exhaust: 0
+  };
 }
 
 function updateFlares(dtSec) {
@@ -2818,7 +2897,7 @@ function updateBotHits() {
     if (!bot.alive) return;
     for (let i = missiles.length - 1; i >= 0; i--) {
       const m = missiles[i];
-      if (m.ownerId === bot.id || m.decoyTarget || (m.targetId != null && m.targetId !== bot.id)) continue;
+      if (!m.ignited || m.ownerId === bot.id || m.decoyTarget || (m.targetId != null && m.targetId !== bot.id)) continue;
       if (dist(bot.x, bot.y, m.x, m.y) >= MISSILE_HIT_RADIUS) continue;
       removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
       sendEvent({ type: 'impact', kind: 'missile', id: m.id, x: m.x, y: m.y });
@@ -3086,7 +3165,8 @@ function updateHostCombat() {
     if (!target.alive || target.falling) return;
     for (let i = missiles.length - 1; i >= 0; i--) {
       const m = missiles[i];
-      if (samePlayerId(m.ownerId, target.id) || (m.targetId != null && !samePlayerId(m.targetId, target.id))) continue;
+      if (!m.ignited || samePlayerId(m.ownerId, target.id) || m.decoyTarget ||
+          (m.targetId != null && !samePlayerId(m.targetId, target.id))) continue;
       if (dist(target.x, target.y, m.x, m.y) >= MISSILE_HIT_RADIUS) continue;
       removeProjectileLocal('missile', m.id); spawnExplosion(m.x, m.y, 'blast');
       broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id, x: m.x, y: m.y });
@@ -3561,7 +3641,17 @@ function broadcastAuthoritativeProjectiles() {
       (a.x - viewer.x) ** 2 + (a.y - viewer.y) ** 2 -
       ((b.x - viewer.x) ** 2 + (b.y - viewer.y) ** 2)).slice(0, count);
   const other = {
-    missiles: missiles.map(m => ({ id: m.id, ownerId: m.ownerId, targetId: m.targetId, x: m.x, y: m.y, angle: m.angle, speed: m.speed, decoyed: !!m.decoyed, decoyTarget: m.decoyTarget ? { x: m.decoyTarget.x, y: m.decoyTarget.y } : null, age: age(m) })),
+    missiles: missiles.map(m => ({
+      id: m.id, ownerId: m.ownerId, targetId: m.targetId,
+      x: m.x, y: m.y, angle: m.angle, speed: m.speed,
+      coastSpeed: m.coastSpeed, dropVelocity: m.dropVelocity || 0,
+      coastRemaining: Math.max(0, (m.boostAt || (m.born + MISSILE_LAUNCH_COAST_MS)) - now),
+      decoyed: !!m.decoyed,
+      decoyTarget: m.decoyTarget ? { x: m.decoyTarget.x, y: m.decoyTarget.y } : null,
+      lastTargetX: m.lastTargetX, lastTargetY: m.lastTargetY,
+      lastTargetSeenAgo: m.lastTargetSeenAt ? Math.max(0, now - m.lastTargetSeenAt) : null,
+      age: age(m)
+    })),
     bombs: bombs.map(b => ({ id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, vx: b.vx, vy: b.vy, age: age(b) })),
     shrapnels: shrapnels.map(s => ({ id: s.id, ownerId: s.ownerId, x: s.x, y: s.y, prevX: s.prevX, prevY: s.prevY, vx: s.vx, vy: s.vy, age: age(s) }))
   };
@@ -3617,7 +3707,16 @@ function reconcileAuthoritativeProjectiles(data) {
     shotAt: old?.shotAt || 0, traveled: Number.isFinite(p.traveled) ? p.traveled : (old?.traveled || 0)
   }));
   sync('missile', data.missiles, ['x', 'y', 'angle', 'speed'], (p, old, t) => ({
-    ...p, born: t - (p.age || 0), lockReadyAt: t, trail: old?.trail || [], exhaust: 1,
+    ...p,
+    born: t - (p.age || 0),
+    boostAt: t + (Number.isFinite(p.coastRemaining) ? clamp(p.coastRemaining, 0, MISSILE_LAUNCH_COAST_MS) : Math.max(0, MISSILE_LAUNCH_COAST_MS - (p.age || 0))),
+    lockReadyAt: t + (Number.isFinite(p.coastRemaining) ? clamp(p.coastRemaining, 0, MISSILE_LAUNCH_COAST_MS) : Math.max(0, MISSILE_LAUNCH_COAST_MS - (p.age || 0))),
+    coastSpeed: Number.isFinite(p.coastSpeed) ? p.coastSpeed : Math.min(p.speed, MISSILE_COAST_MAX_SPEED),
+    dropVelocity: Number.isFinite(p.dropVelocity) ? p.dropVelocity : 0,
+    ignited: Number.isFinite(p.coastRemaining) ? p.coastRemaining <= 0 : (p.age || 0) >= MISSILE_LAUNCH_COAST_MS,
+    boosted: Number.isFinite(p.coastRemaining) ? p.coastRemaining <= 0 : (p.age || 0) >= MISSILE_LAUNCH_COAST_MS,
+    lastTargetSeenAt: Number.isFinite(p.lastTargetSeenAgo) ? t - p.lastTargetSeenAgo : (old?.lastTargetSeenAt || 0),
+    trail: old?.trail || [], exhaust: 0,
     decoyTarget: p.decoyTarget && Number.isFinite(p.decoyTarget.x) && Number.isFinite(p.decoyTarget.y) ? p.decoyTarget : null
   }));
   sync('bomb', data.bombs, ['x', 'y', 'vx', 'vy'], (p, old, t) => ({ ...p, born: t - (p.age || 0) }));
@@ -3643,12 +3742,16 @@ function handleShoot(fromId, data) {
 function handleMissile(fromId, data) {
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle)) return;
   if (!samePlayerId(fromId, myId) && data.id != null && !projectileExists('missile', data.id)) {
-    missiles.push({ id: data.id, ownerId: fromId, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
+    missiles.push(createMissileReplica(data, fromId));
     spawnExplosion(data.x, data.y, 'launch');
     playMissileLaunchSound(data.x, data.y);
   }
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id, targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: data.speed, locked: true });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'missile', from: fromId, id: data.id,
+      targetId: data.targetId, x: data.x, y: data.y, angle: data.angle, speed: data.speed,
+      coastSpeed: data.coastSpeed, coastRemaining: data.coastRemaining, dropVelocity: data.dropVelocity,
+      lastTargetX: data.lastTargetX, lastTargetY: data.lastTargetY,
+      locked: data.targetId != null });
   });
 }
 
@@ -3927,7 +4030,7 @@ function handleClientReceive(data) {
     if (data.id != null && Number.isFinite(data.x) && Number.isFinite(data.y) && Number.isFinite(data.angle) &&
         !projectileExists('missile', data.id)) {
       const targetId = Number.isInteger(data.targetId) ? data.targetId : null;
-      missiles.push({ id: data.id, ownerId: data.from, targetId, x: data.x, y: data.y, angle: data.angle, speed: Number.isFinite(data.speed) ? data.speed : MISSILE_INITIAL_SPEED, born: performance.now(), lockReadyAt: performance.now(), trail: [] });
+      missiles.push(createMissileReplica({ ...data, targetId }, data.from));
       spawnExplosion(data.x, data.y, 'launch');
       playMissileLaunchSound(data.x, data.y);
     }
@@ -4565,7 +4668,7 @@ function drawBullet(ctx, b) {
 }
 
 function drawMissile(ctx, m) {
-  const incoming = m.targetId === myId && m.ownerId !== myId;
+  const incoming = m.targetId === myId && m.ownerId !== myId && m.ignited;
   if (incoming) {
     const pulse = 22 + Math.sin(performance.now() / 90) * 5;
     ctx.save(); ctx.globalAlpha = .28; ctx.strokeStyle = '#ff4558'; ctx.lineWidth = 2;
@@ -4575,37 +4678,56 @@ function drawMissile(ctx, m) {
   for (let i = 0; i < m.trail.length; i++) {
     const t = m.trail[i];
     const frac = (i + 1) / (m.trail.length + 1);
-    ctx.fillStyle = `rgba(255,${Math.round(125 + frac * 100)},${Math.round(55 + frac * 80)},${frac * .55})`;
+    ctx.fillStyle = m.ignited
+      ? `rgba(255,${Math.round(115 + frac * 105)},${Math.round(48 + frac * 90)},${frac * .52})`
+      : `rgba(184,203,211,${frac * .2})`;
     ctx.beginPath();
-    ctx.arc(t.x, t.y, 2 + frac * 4, 0, Math.PI * 2);
+    ctx.arc(t.x, t.y, m.ignited ? 2 + frac * 4 : 1 + frac * 2, 0, Math.PI * 2);
     ctx.fill();
   }
 
   ctx.save();
   ctx.translate(m.x, m.y);
   ctx.rotate(m.angle);
-  ctx.shadowColor = m.decoyed ? '#9aa5b1' : '#ff9d5c'; ctx.shadowBlur = 14;
-  ctx.fillStyle = m.decoyed ? '#9aa5b1' : '#1b2934';
-  ctx.strokeStyle = m.decoyed ? '#d6e0e5' : '#d3e7ed'; ctx.lineWidth = 1;
+  if (m.ignited) {
+    const flicker = .82 + Math.sin(performance.now() * .055 + (Number(m.ownerId) || 0)) * .12;
+    ctx.globalAlpha = flicker;
+    ctx.shadowColor = m.decoyed ? '#c2d1d6' : '#ff8a3d'; ctx.shadowBlur = m.decoyed ? 7 : 16;
+    ctx.fillStyle = m.decoyed ? '#d5e0e4' : '#ffd073';
+    ctx.beginPath(); ctx.moveTo(-13, -2.2); ctx.lineTo(-25, 0); ctx.lineTo(-13, 2.2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = m.decoyed ? '#aab9bf' : '#ff5635';
+    ctx.beginPath(); ctx.moveTo(-13, -1.25); ctx.lineTo(-20, 0); ctx.lineTo(-13, 1.25); ctx.closePath(); ctx.fill();
+  } else {
+    ctx.shadowColor = 'rgba(160,190,202,.28)'; ctx.shadowBlur = 5;
+  }
+  const body = ctx.createLinearGradient(-13, -4, 16, 4);
+  body.addColorStop(0, m.decoyed ? '#8899a0' : '#53666e');
+  body.addColorStop(.42, m.decoyed ? '#d0dadd' : '#dce6e8');
+  body.addColorStop(.72, m.decoyed ? '#9eafb5' : '#83969d');
+  body.addColorStop(1, m.decoyed ? '#718188' : '#33454d');
+  ctx.fillStyle = body;
+  ctx.strokeStyle = m.decoyed ? '#e1eaed' : '#f0f6f7'; ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.ellipse(1, 0, 12, 4.1, 0, 0, Math.PI * 2);
+  ctx.moveTo(-15, -2.7); ctx.lineTo(9, -2.7);
+  ctx.quadraticCurveTo(14, -2.5, 21, 0);
+  ctx.quadraticCurveTo(14, 2.5, 9, 2.7); ctx.lineTo(-15, 2.7);
+  ctx.quadraticCurveTo(-18, 0, -15, -2.7);
   ctx.fill(); ctx.stroke();
   ctx.shadowBlur = 0;
-  // Bomb-like orange nose and rear fins, plus a center stripe for a more
-  // readable high-speed silhouette.
-  ctx.fillStyle = m.decoyed ? '#b9c3ca' : '#ff9d5c';
-  ctx.beginPath(); ctx.moveTo(-8,-3); ctx.lineTo(-22,0); ctx.lineTo(-8,3); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = m.decoyed ? '#87949d' : '#ffd08a';
-  ctx.beginPath();
-  ctx.moveTo(4, -3); ctx.lineTo(-2, -8); ctx.lineTo(-5, -3); ctx.closePath(); ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(4, 3); ctx.lineTo(-2, 8); ctx.lineTo(-5, 3); ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = 'rgba(255,226,160,.72)'; ctx.lineWidth = 1.1;
-  ctx.beginPath(); ctx.moveTo(-1, -2.2); ctx.lineTo(8, -2.2); ctx.stroke();
-  ctx.fillStyle = m.decoyed ? '#b9c3ca' : '#ffb347';
-  ctx.beginPath(); ctx.moveTo(-7, -1.3); ctx.lineTo(-13, 0); ctx.lineTo(-7, 1.3);
-  ctx.closePath();
-  ctx.fill();
+  // Forward seeker nose and swept cruciform fins give the missile a slender
+  // guided-rocket silhouette that is distinct from the game's bomb shape.
+  ctx.fillStyle = m.decoyed ? '#65777e' : '#23343b';
+  ctx.beginPath(); ctx.moveTo(8, -3); ctx.lineTo(21, 0); ctx.lineTo(8, 3); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = m.decoyed ? '#71838a' : '#a44537';
+  ctx.beginPath(); ctx.moveTo(2, -2.5); ctx.lineTo(-5, -8); ctx.lineTo(-8, -2.5); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(2, 2.5); ctx.lineTo(-5, 8); ctx.lineTo(-8, 2.5); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = m.decoyed ? '#63747a' : '#a9bac0';
+  ctx.beginPath(); ctx.moveTo(-7, -2.5); ctx.lineTo(-15, -7); ctx.lineTo(-13, -2.5); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-7, 2.5); ctx.lineTo(-15, 7); ctx.lineTo(-13, 2.5); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#e2a24d'; ctx.fillRect(-8, -2.65, 2, 5.3);
+  ctx.fillStyle = '#52636a'; ctx.fillRect(-17, -2.3, 3, 4.6);
+  ctx.fillStyle = m.decoyed ? '#dbe4e7' : '#f6d17e';
+  ctx.beginPath(); ctx.ellipse(2, 0, 2.1, .85, 0, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
 

@@ -1,6 +1,20 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.53.1 (A-10 cannon burst audio)
+Current build: v1.53.2 (staged missiles and smarter flare counterplay)
+
+### v1.53.2 Missile launch and seeker pass
+- Reworked the missile as a slender guided rocket with a forward seeker nose,
+  swept fins, and a motor flame that appears only after ignition.
+- Missiles coast parallel to the launching plane and drop slightly for 0.42 s,
+  then ignite, accelerate, and begin homing if they were locked.
+- The seeker has forward vision, a 3,200-unit range, and short target memory.
+  It favors the aircraft when it can see both aircraft and flare; flares can
+  divert it if the aircraft is hidden or outside its view.
+- Existing lock time, two-second lock hold, dumb-fire launch, missile damage,
+  and exact flare-contact detonation remain in place.
+- The staged movement and seeker phase are included in host projectile sync.
+
+### v1.53.1 A-10 cannon audio
 
 ### v1.53.1 A-10 cannon audio
 - Replaced the per-bullet gun sound with the first firing burst from the
