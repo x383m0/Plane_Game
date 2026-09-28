@@ -1,15 +1,16 @@
 // ================= Constants =================
-// v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
-// v1.52.1 added the Red Canyon cave system; v1.52.3 speeds up menu dogfights.
-const WORLD_W = 7200, WORLD_H = 4416;
+// v1.27 enlarged the original arena by 20%; v1.53 expands that layout again
+// while keeping map proportions, terrain, and shared multiplayer coordinates aligned.
+const WORLD_SCALE = 1.2;
+const WORLD_W = 7200 * WORLD_SCALE, WORLD_H = 4416 * WORLD_SCALE;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
 const CAMERA_FOV_MULT = 1.3225;
-const GROUND_Y = WORLD_H - 150;   // sea surface / crash boundary
+const GROUND_Y = WORLD_H - 150 * WORLD_SCALE;   // sea surface / crash boundary
 // The visible world continues beyond the playable rectangle so the city and
 // ocean never terminate on a hard vertical seam. Aircraft may enter this fog
 // buffer briefly before the boundary timer disables them.
-const BORDER_FOG_DEPTH = 340;
+const BORDER_FOG_DEPTH = 340 * WORLD_SCALE;
 const BORDER_WARNING_MS = 5000;
 const MAX_PLAYERS = 8;
 
@@ -22,7 +23,7 @@ const AIRBRAKE_MULT = 0.58;
 const AIRBRAKE_TURN_MULT = 0.82;  // Shift slows turning instead of making air-braking over-agile
 const GRAVITY_ACCEL = 180;        // very forgiving climb penalty; diving still gains speed
 const TOP_BOUNDARY_GRAVITY = 1250; // strong downward pull once the plane crosses the top edge
-const TOP_BOUNDARY_DEPTH = 260;
+const TOP_BOUNDARY_DEPTH = 260 * WORLD_SCALE;
 const MIN_FLIGHT_SPEED = -220, MAX_FLIGHT_SPEED = 720;
 // High-speed flight tuning. The assist only engages after the aircraft has
 // already reached the threshold, so ordinary handling stays unchanged.
@@ -43,6 +44,9 @@ const STALL_SPIN_SPEED = 5.2, FALL_GRAVITY = 420;
 const STALL_DELAY = 320; // brief warning window before a sustained stall becomes uncontrolled
 
 const BULLET_SPEED = 1850, BULLET_GRAVITY = 260, BULLET_LIFE = Infinity, FIRE_COOLDOWN = 32, BULLET_DAMAGE = 4.5;
+const BULLET_FULL_DAMAGE_RANGE = 650;
+const BULLET_FALLOFF_DISTANCE = 3000;
+const BULLET_MIN_DAMAGE_MULT = 0.24;
 const BULLET_SIGHT_TIME = .42;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 
@@ -93,7 +97,7 @@ const NETWORK_INPUT_TIMEOUT_MS = 900; // tolerate short WebRTC jitter without dr
 const NETWORK_SNAPSHOT_BUFFER_LIMIT = 48000;
 const NETWORK_PROJECTILE_SNAPSHOT_MS = 250; // projectiles extrapolate between authoritative updates
 const NETWORK_BULLETS_PER_SNAPSHOT = 48; // nearby bullet corrections; spawns/impacts use reliable events
-const SOUND_MAX_DISTANCE = 1400;  // world units; sounds beyond this are silent
+const SOUND_MAX_DISTANCE = 1400 * WORLD_SCALE;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;
 const CLOUD_MIN_RADIUS = 22, CLOUD_MAX_RADIUS = 148;
 const CLOUD_BANK_COUNT = 4;
@@ -140,8 +144,9 @@ const CANYON_CAVE_PROFILE = [
   [4800, 2080, 2480, 3980], [5400, 1940, 2360, 4080],
   [6000, 2100, 2510, 4140], [6600, 2190, 2580, 4050],
   [7200, 1990, 2390, 4010]
-];
-const CANYON_CAVE_ENTRANCES = [[520, 1040], [2920, 3480], [5500, 6100]];
+].map(([x, surface, ceiling, floor]) => [x * WORLD_SCALE, surface * WORLD_SCALE, ceiling * WORLD_SCALE, floor * WORLD_SCALE]);
+const CANYON_CAVE_ENTRANCES = [[520, 1040], [2920, 3480], [5500, 6100]]
+  .map(([left, right]) => [left * WORLD_SCALE, right * WORLD_SCALE]);
 // x, attachment edge, half-width, intrusion length, tip offset. These are
 // visible stalactites and stalagmites, and the same triangles stop aircraft.
 const CANYON_CAVE_SPIRES = [
@@ -151,7 +156,7 @@ const CANYON_CAVE_SPIRES = [
   [3860, 'ceiling', 76, 315, 18], [4450, 'floor', 88, 380, -15],
   [5050, 'ceiling', 100, 415, 25], [5630, 'floor', 72, 330, -20],
   [6260, 'ceiling', 90, 380, 10], [6860, 'floor', 92, 410, -22]
-];
+].map(([x, edge, width, length, offset]) => [x * WORLD_SCALE, edge, width * WORLD_SCALE, length * WORLD_SCALE, offset * WORLD_SCALE]);
 const CANYON_PLANE_COLLISION_RADIUS = 36;
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
@@ -376,15 +381,15 @@ function canyonFirstRockCollision(x1, y1, x2, y2, radius = 0, maxStep = 12) {
 
 function randomCanyonSpawnPoint() {
   for (let attempt = 0; attempt < 160; attempt++) {
-    const x = rand(180, WORLD_W - 180);
+    const x = rand(180 * WORLD_SCALE, WORLD_W - 180 * WORLD_SCALE);
     const profile = canyonProfileAt(x);
     const inSky = Math.random() < .45;
     const y = inSky
-      ? rand(150, profile.surfaceY - 160)
-      : rand(profile.ceilingY + 150, profile.floorY - 180);
+      ? rand(150 * WORLD_SCALE, profile.surfaceY - 160 * WORLD_SCALE)
+      : rand(profile.ceilingY + 150 * WORLD_SCALE, profile.floorY - 180 * WORLD_SCALE);
     if (!canyonPositionCollides(x, y, CANYON_PLANE_COLLISION_RADIUS + 10)) return { x, y };
   }
-  const x = 3600, profile = canyonProfileAt(x);
+  const x = 3600 * WORLD_SCALE, profile = canyonProfileAt(x);
   return { x, y: (profile.ceilingY + profile.floorY) * .5 };
 }
 
@@ -1355,9 +1360,9 @@ function buildClouds() {
   clouds = [];
   cloudBanks = [];
   const mapId = validMapId(activeMapId);
-  const cloudTop = mapId === 'canyon' ? 1800 : GROUND_Y - 40;
+  const cloudTop = mapId === 'canyon' ? 1800 * WORLD_SCALE : GROUND_Y - 40 * WORLD_SCALE;
   for (let i = 0; i < CLOUD_COUNT; i++) {
-    const rx = rand(CLOUD_MIN_RADIUS, CLOUD_MAX_RADIUS);
+    const rx = rand(CLOUD_MIN_RADIUS, CLOUD_MAX_RADIUS) * WORLD_SCALE;
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, cloudTop),
       rx, ry: rx * rand(.28, .58), a: rand(.045, .16),
@@ -1369,8 +1374,8 @@ function buildClouds() {
   const bankLayout = MAP_CLOUD_BANK_LAYOUTS[mapId] || MAP_CLOUD_BANK_LAYOUTS.city;
   const bankCount = MAP_THEMES[mapId]?.cloudBanks || CLOUD_BANK_COUNT;
   cloudBanks = bankLayout.slice(0, bankCount).map(([nx, ny, rx, ry], i) => ({
-    x: WORLD_W * nx, y: (GROUND_Y - 160) * ny + 180,
-    rx, ry, alpha: .72 + (i % 3) * .07
+    x: WORLD_W * nx, y: (GROUND_Y - 160 * WORLD_SCALE) * ny + 180 * WORLD_SCALE,
+    rx: rx * WORLD_SCALE, ry: ry * WORLD_SCALE, alpha: .72 + (i % 3) * .07
   }));
 }
 
@@ -1383,7 +1388,7 @@ function isInCloudBank(x, y) {
 
 function randomSpawnPoint() {
   if (activeMapId === 'canyon') return randomCanyonSpawnPoint();
-  return { x: rand(200, WORLD_W - 200), y: rand(120, GROUND_Y - 160) };
+  return { x: rand(200 * WORLD_SCALE, WORLD_W - 200 * WORLD_SCALE), y: rand(120 * WORLD_SCALE, GROUND_Y - 160 * WORLD_SCALE) };
 }
 
 function isOutsideArena(p) {
@@ -1943,7 +1948,7 @@ function updateLocalPlane(dtSec, keys) {
         spawnExplosion(b.x, b.y, 'spark', b.angle);
         sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
         const rearHit = Math.abs(angleDiff(myState.angle, b.angle)) < Math.PI / 3;
-        myState.health -= BULLET_DAMAGE * (rearHit ? 1.35 : 1);
+        myState.health -= bulletDamageAtDistance(b) * (rearHit ? 1.35 : 1);
         if (myState.health <= 0) {
           beginDeathFall(b.ownerId, 'Aircraft disabled');
         }
@@ -2002,7 +2007,7 @@ function fireBulletFor(state, ownerId, replicate = false) {
     prevX: state.x, prevY: state.y, angle: state.angle,
     vx: Math.cos(state.angle) * BULLET_SPEED,
     vy: Math.sin(state.angle) * BULLET_SPEED,
-    born: performance.now()
+    born: performance.now(), traveled: 0
   };
   bullets.push(b);
   spawnExplosion(b.x, b.y, 'muzzle');
@@ -2111,8 +2116,15 @@ function updateBullets(dtSec) {
     b.vy = nextVy;
     b.x = endX;
     b.y = endY;
+    b.traveled = (Number.isFinite(b.traveled) ? b.traveled : 0) + Math.hypot(endX - startX, endY - startY);
     b.angle = Math.atan2(b.vy, b.vx);
   }
+}
+
+function bulletDamageAtDistance(bullet) {
+  const distance = Math.max(0, Number.isFinite(bullet?.traveled) ? bullet.traveled : 0);
+  const fade = clamp((distance - BULLET_FULL_DAMAGE_RANGE) / BULLET_FALLOFF_DISTANCE, 0, 1);
+  return BULLET_DAMAGE * (1 - fade * (1 - BULLET_MIN_DAMAGE_MULT));
 }
 
 function spawnBombShrapnel(x, y, ownerId) {
@@ -2754,7 +2766,7 @@ function updateBotHits() {
       if (pointSegmentDistance(bot.x, bot.y, b.prevX ?? b.x, b.prevY ?? b.y, b.x, b.y) >= HIT_RADIUS) continue;
       removeProjectileLocal('bullet', b.id); spawnExplosion(b.x, b.y, 'spark', b.angle);
       sendEvent({ type: 'impact', kind: 'bullet', id: b.id, x: b.x, y: b.y });
-      if (bot.falling) finishBotDeath(bot); else damageBot(bot, BULLET_DAMAGE, b.ownerId);
+      if (bot.falling) finishBotDeath(bot); else damageBot(bot, bulletDamageAtDistance(b), b.ownerId);
       break;
     }
     if (!bot.alive) return;
@@ -3022,7 +3034,7 @@ function updateHostCombat() {
       removeProjectileLocal('bullet', b.id); spawnExplosion(b.x, b.y, 'spark', b.angle);
       broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id, x: b.x, y: b.y });
       const rearHit = Math.abs(angleDiff(target.angle, b.angle)) < Math.PI / 3;
-      applyHostDamage(target, BULLET_DAMAGE * (rearHit ? 1.35 : 1), b.ownerId);
+      applyHostDamage(target, bulletDamageAtDistance(b) * (rearHit ? 1.35 : 1), b.ownerId);
       break;
     }
     if (!target.alive || target.falling) return;
@@ -3512,7 +3524,7 @@ function broadcastAuthoritativeProjectiles() {
       type: 'projectiles', snapshotAt: now, bulletsPartial: bullets.length > NETWORK_BULLETS_PER_SNAPSHOT,
       bullets: nearest(bullets, players[id], NETWORK_BULLETS_PER_SNAPSHOT).map(b => ({
         id: b.id, ownerId: b.ownerId, x: b.x, y: b.y, prevX: b.prevX, prevY: b.prevY,
-        angle: b.angle, vx: b.vx, vy: b.vy, age: age(b)
+        angle: b.angle, vx: b.vx, vy: b.vy, traveled: Number.isFinite(b.traveled) ? b.traveled : 0, age: age(b)
       })), ...other
     };
     // Never build a queue of stale world corrections ahead of actions or
@@ -3555,7 +3567,7 @@ function reconcileAuthoritativeProjectiles(data) {
   sync('bullet', data.bullets, ['x', 'y', 'angle', 'vx', 'vy'], (p, old, t) => ({ ...p,
     born: t - (p.age || 0), renderDx: old?.renderDx || 0, renderDy: old?.renderDy || 0,
     renderAngle: old?.renderAngle || 0, visualBorn: old?.visualBorn || 0,
-    shotAt: old?.shotAt || 0
+    shotAt: old?.shotAt || 0, traveled: Number.isFinite(p.traveled) ? p.traveled : (old?.traveled || 0)
   }));
   sync('missile', data.missiles, ['x', 'y', 'angle', 'speed'], (p, old, t) => ({
     ...p, born: t - (p.age || 0), lockReadyAt: t, trail: old?.trail || [], exhaust: 1,
@@ -3574,7 +3586,7 @@ function handleShoot(fromId, data) {
   // added it there.
   if (!Number.isFinite(data.x) || !Number.isFinite(data.y) || !Number.isFinite(data.angle)) return;
   if (!samePlayerId(fromId, myId) && data.id != null && !projectileExists('bullet', data.id)) {
-    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now() });
+    bullets.push({ id: data.id, ownerId: fromId, x: data.x, y: data.y, prevX: data.x, prevY: data.y, angle: data.angle, vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED, born: performance.now(), traveled: 0 });
     spawnExplosion(data.x, data.y, 'muzzle');
   }
   broadcast({ type: 'shoot', from: fromId, id: data.id, x: data.x, y: data.y,
@@ -3845,7 +3857,7 @@ function handleClientReceive(data) {
       const b = { id: data.id, ownerId: data.from, x: data.x, y: data.y,
         prevX: data.x, prevY: data.y, angle: data.angle,
         vx: Math.cos(data.angle) * BULLET_SPEED, vy: Math.sin(data.angle) * BULLET_SPEED,
-        born: performance.now(), shotAt: Number.isFinite(data.shotAt) ? data.shotAt : 0 };
+        born: performance.now(), shotAt: Number.isFinite(data.shotAt) ? data.shotAt : 0, traveled: 0 };
       // The joiner's displayed plane is predicted between host snapshots.
       // Correct only the first frames of this bullet's drawing; its physics
       // and damage still use the host's x/y/angle.
@@ -4677,25 +4689,26 @@ function drawGround(ctx, startX = 0, endX = WORLD_W) {
 function drawCityWorldMap(ctx, start, end) {
   // Keep the city anchored in world space so it follows the camera naturally
   // instead of behaving like a fixed overlay or a border strip.
-  const first = Math.floor((start - 260) / 132) * 132;
-  const backBase = GROUND_Y - 220;
-  const frontBase = GROUND_Y - 70;
+  const cityStep = 132 * WORLD_SCALE;
+  const first = Math.floor((start - 260 * WORLD_SCALE) / cityStep) * cityStep;
+  const backBase = GROUND_Y - 220 * WORLD_SCALE;
+  const frontBase = GROUND_Y - 70 * WORLD_SCALE;
   const drawLayer = (base, layer, color, windowColor) => {
-    for (let x = first; x <= end + 260; x += 132) {
+    for (let x = first; x <= end + 260 * WORLD_SCALE; x += cityStep) {
       const seed = Math.abs(Math.sin(x * .017 + layer * 2.3));
-      const width = 64 + Math.abs(Math.sin(x * .031 + layer)) * 46;
-      const height = (95 + seed * 160 + Math.abs(Math.sin(x * .009)) * 90) * layer;
+      const width = (64 + Math.abs(Math.sin(x * .031 + layer)) * 46) * WORLD_SCALE;
+      const height = (95 + seed * 160 + Math.abs(Math.sin(x * .009)) * 90) * layer * WORLD_SCALE;
       const y = base - height;
       ctx.fillStyle = color;
-      ctx.fillRect(x, y, width, height + 90);
+      ctx.fillRect(x, y, width, height + 90 * WORLD_SCALE);
       ctx.fillStyle = 'rgba(104,224,221,.16)';
-      ctx.fillRect(x + 9, y + 13, 3, Math.max(12, height - 20));
-      ctx.fillRect(x + width - 12, y + 13, 3, Math.max(12, height - 20));
+      ctx.fillRect(x + 9 * WORLD_SCALE, y + 13 * WORLD_SCALE, 3 * WORLD_SCALE, Math.max(12, height - 20 * WORLD_SCALE));
+      ctx.fillRect(x + width - 12 * WORLD_SCALE, y + 13 * WORLD_SCALE, 3 * WORLD_SCALE, Math.max(12, height - 20 * WORLD_SCALE));
       ctx.fillStyle = windowColor;
-      const rows = Math.floor(height / 30);
+      const rows = Math.floor(height / (30 * WORLD_SCALE));
       for (let row = 0; row < rows; row++) {
-        if ((Math.floor(x / 132) + row * 3) % 4 < 2) {
-          ctx.fillRect(x + 18, y + 18 + row * 30, Math.max(7, width - 34), 4);
+        if ((Math.floor(x / cityStep) + row * 3) % 4 < 2) {
+          ctx.fillRect(x + 18 * WORLD_SCALE, y + 18 * WORLD_SCALE + row * 30 * WORLD_SCALE, Math.max(7, width - 34 * WORLD_SCALE), 4 * WORLD_SCALE);
         }
       }
     }
@@ -4703,7 +4716,7 @@ function drawCityWorldMap(ctx, start, end) {
   drawLayer(backBase, .72, 'rgba(9,34,48,.68)', 'rgba(255,205,108,.18)');
   drawLayer(frontBase, 1, 'rgba(6,25,39,.9)', 'rgba(255,205,108,.34)');
   ctx.fillStyle = 'rgba(7,22,32,.65)';
-  ctx.fillRect(first, GROUND_Y - 42, end - first + 260, 44);
+  ctx.fillRect(first, GROUND_Y - 42 * WORLD_SCALE, end - first + 260 * WORLD_SCALE, 44 * WORLD_SCALE);
 }
 
 function mapHash01(index, salt = 0) {
@@ -4741,16 +4754,16 @@ function drawCanyonWorldMap(ctx, start, end) {
   // The cave air is a connected lower-half flight space. A dark, warm
   // gradient gives it depth while leaving the sky above the roof untouched.
   traceBand(first, last, x => canyonProfileAt(x).ceilingY, x => canyonProfileAt(x).floorY);
-  const air = ctx.createLinearGradient(0, 2280, 0, WORLD_H);
+  const air = ctx.createLinearGradient(0, 2280 * WORLD_SCALE, 0, WORLD_H);
   air.addColorStop(0, '#514047');
   air.addColorStop(.35, '#352f38');
   air.addColorStop(1, '#1b202a');
   ctx.fillStyle = air; ctx.fill();
 
-  const roof = ctx.createLinearGradient(0, 1850, 0, 2730);
+  const roof = ctx.createLinearGradient(0, 1850 * WORLD_SCALE, 0, 2730 * WORLD_SCALE);
   roof.addColorStop(0, '#be7653'); roof.addColorStop(.25, '#995541');
   roof.addColorStop(.72, '#56383b'); roof.addColorStop(1, '#302d37');
-  const floor = ctx.createLinearGradient(0, 3700, 0, WORLD_H + BORDER_FOG_DEPTH);
+  const floor = ctx.createLinearGradient(0, 3700 * WORLD_SCALE, 0, WORLD_H + BORDER_FOG_DEPTH);
   floor.addColorStop(0, '#68433c'); floor.addColorStop(.24, '#56383a');
   floor.addColorStop(1, '#252832');
   solidRuns.forEach(([left, right]) => {
@@ -4765,10 +4778,10 @@ function drawCanyonWorldMap(ctx, start, end) {
   const drawStrata = (left, right, upper, lower) => {
     ctx.save(); traceBand(left, right, upper, lower); ctx.clip();
     for (let band = 0; band < 10; band++) {
-      const y = 1940 + band * 206;
+      const y = (1940 + band * 206) * WORLD_SCALE;
       ctx.beginPath();
       for (let x = left; x <= right; x += step) {
-        const wobble = Math.sin(x * (.0018 + band * .00006) + band * 1.7) * 23;
+        const wobble = Math.sin(x * (.0018 + band * .00006) / WORLD_SCALE + band * 1.7) * 23 * WORLD_SCALE;
         if (x === left) ctx.moveTo(x, y + wobble); else ctx.lineTo(x, y + wobble);
       }
       ctx.strokeStyle = band % 3 === 0 ? 'rgba(255,193,145,.21)' : 'rgba(27,26,34,.22)';
@@ -4786,12 +4799,12 @@ function drawCanyonWorldMap(ctx, start, end) {
     const x = (left + right) * .5;
     if (right < first || left > last) return;
     const profile = canyonProfileAt(x);
-    const centerY = profile.ceilingY + 380;
-    const glow = ctx.createRadialGradient(x, centerY, 18, x, centerY, 720);
+    const centerY = profile.ceilingY + 380 * WORLD_SCALE;
+    const glow = ctx.createRadialGradient(x, centerY, 18 * WORLD_SCALE, x, centerY, 720 * WORLD_SCALE);
     glow.addColorStop(0, 'rgba(255,213,166,.16)');
     glow.addColorStop(.48, 'rgba(237,177,131,.075)');
     glow.addColorStop(1, 'rgba(224,160,125,0)');
-    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, centerY, 720, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, centerY, 720 * WORLD_SCALE, 0, Math.PI * 2); ctx.fill();
   });
 
   // Silhouette rims and shadowed wall seams make the ceiling and floor read
@@ -4851,13 +4864,14 @@ function drawCanyonWorldMap(ctx, start, end) {
 function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
   // Distant squall shelves sit behind aircraft and foreground concealment.
   // Their positions are world-anchored, so they do not slide with the camera.
-  const firstCell = Math.floor((camX - 800) / 1800);
-  const lastCell = Math.ceil((camX + viewW + 800) / 1800);
+  const stormCell = 1800 * WORLD_SCALE;
+  const firstCell = Math.floor((camX - 800 * WORLD_SCALE) / stormCell);
+  const lastCell = Math.ceil((camX + viewW + 800 * WORLD_SCALE) / stormCell);
   for (let i = firstCell; i <= lastCell; i++) {
-    const centerX = i * 1800 + 900;
-    const centerY = 1350 + mapHash01(i, 22) * 1200;
-    const rx = 580 + mapHash01(i, 29) * 230;
-    const ry = 250 + mapHash01(i, 31) * 130;
+    const centerX = i * stormCell + 900 * WORLD_SCALE;
+    const centerY = (1350 + mapHash01(i, 22) * 1200) * WORLD_SCALE;
+    const rx = (580 + mapHash01(i, 29) * 230) * WORLD_SCALE;
+    const ry = (250 + mapHash01(i, 31) * 130) * WORLD_SCALE;
     if (centerY + ry < camY - 80 || centerY - ry > camY + viewH + 80) continue;
     ctx.save();
     const cloud = ctx.createRadialGradient(centerX, centerY - ry * .18, 30,
@@ -4901,7 +4915,7 @@ function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
 
   // Sparse, low-contrast rain gives the front motion without washing out the
   // sight picture. It is decorative only and does not change flight physics.
-  const rainStepX = 118, rainStepY = 154;
+  const rainStepX = 118 * WORLD_SCALE, rainStepY = 154 * WORLD_SCALE;
   const rainStartX = Math.floor(camX / rainStepX) * rainStepX;
   const rainEndX = camX + viewW;
   const rainStartY = Math.floor(camY / rainStepY) * rainStepY;
@@ -4915,7 +4929,7 @@ function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
       const drift = (now * .045 + seed * rainStepY) % rainStepY;
       const rx = x + (seed - .5) * 52 + drift * .12;
       const ry = y + drift;
-      ctx.moveTo(rx, ry); ctx.lineTo(rx - 20, ry + 56);
+      ctx.moveTo(rx, ry); ctx.lineTo(rx - 20 * WORLD_SCALE, ry + 56 * WORLD_SCALE);
     }
   }
   ctx.stroke(); ctx.restore();
@@ -4924,14 +4938,14 @@ function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
   // brief and restrained, and never covers the whole screen at once.
   const strikes = [WORLD_W * .17, WORLD_W * .48, WORLD_W * .79];
   strikes.forEach((x, i) => {
-    const y = 1700 + mapHash01(i, 45) * 900;
+    const y = (1700 + mapHash01(i, 45) * 900) * WORLD_SCALE;
     if (x < camX - 100 || x > camX + viewW + 100 || y + 450 < camY || y > camY + viewH + 120) return;
     const phase = (now + i * 3671) % 12600;
     const flash = phase < 95 ? 1 - phase / 95 :
       (phase >= 185 && phase < 245 ? .38 * (1 - (phase - 185) / 60) : 0);
     if (flash <= .015) return;
-    const length = 240 + mapHash01(i, 52) * 190;
-    const bend = (mapHash01(i, 61) - .5) * 130;
+    const length = (240 + mapHash01(i, 52) * 190) * WORLD_SCALE;
+    const bend = (mapHash01(i, 61) - .5) * 130 * WORLD_SCALE;
     ctx.save(); ctx.globalAlpha = flash * .62;
     const glow = ctx.createRadialGradient(x, y + length * .38, 4,
       x, y + length * .38, 260);
@@ -4947,7 +4961,7 @@ function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
     ctx.lineTo(x - bend * .18, y + length * .43); ctx.lineTo(x + bend, y + length * .66);
     ctx.lineTo(x + bend * .62, y + length); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x - bend * .18, y + length * .43);
-    ctx.lineTo(x - 74, y + length * .52); ctx.lineTo(x - 104, y + length * .69); ctx.stroke();
+    ctx.lineTo(x - 74 * WORLD_SCALE, y + length * .52); ctx.lineTo(x - 104 * WORLD_SCALE, y + length * .69); ctx.stroke();
     ctx.restore();
   });
 }
@@ -4955,7 +4969,7 @@ function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
 function drawSkyBackdrop(ctx, camX, camY, W, H) {
   // Signature backgrounds are world-anchored so scenery scrolls naturally
   // with the arena while the sky remains uncluttered around the aircraft.
-  const sunX = WORLD_W * .72, sunY = 560;
+  const sunX = WORLD_W * .72, sunY = 560 * WORLD_SCALE;
   if (activeMapId === 'city' && sunX > camX - 220 && sunX < camX + W + 220 && sunY > camY - 220 && sunY < camY + H + 220) {
     const sun = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 210);
     sun.addColorStop(0, 'rgba(255,246,190,.9)'); sun.addColorStop(.18, 'rgba(255,215,120,.35)'); sun.addColorStop(1, 'rgba(255,180,80,0)');
@@ -4963,7 +4977,8 @@ function drawSkyBackdrop(ctx, camX, camY, W, H) {
     ctx.fillStyle = 'rgba(255,246,200,.85)'; ctx.beginPath(); ctx.arc(sunX, sunY, 34, 0, Math.PI * 2); ctx.fill();
   }
   if (activeMapId === 'city') {
-    const start = Math.floor((camX - 260) / 132) * 132;
+    const cityStep = 132 * WORLD_SCALE;
+    const start = Math.floor((camX - 260 * WORLD_SCALE) / cityStep) * cityStep;
     const end = camX + W + 260;
     drawCityWorldMap(ctx, start, end);
   } else if (activeMapId === 'canyon') {
@@ -5293,6 +5308,33 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
   });
 }
 
+function drawAmbientBirds(ctx, now, camX, camY, viewW, viewH) {
+  const speedClock = now / 1000;
+  for (let flock = 0; flock < 30; flock++) {
+    const drift = 22 + (flock % 5) * 6;
+    const x = ((flock * WORLD_W / 30 + speedClock * drift) % WORLD_W + WORLD_W) % WORLD_W;
+    const y = (0.12 + mapHash01(flock, 91) * .48) * GROUND_Y;
+    if (x < camX - 90 || x > camX + viewW + 90 || y < camY - 70 || y > camY + viewH + 70) continue;
+    if (activeMapId === 'canyon' && y > canyonProfileAt(x).surfaceY && !canyonIsEntrance(x)) continue;
+    const count = 3 + (flock % 3), direction = flock % 4 === 0 ? -1 : 1;
+    const flap = Math.sin(now * .009 + flock) * 3.2;
+    ctx.save(); ctx.translate(x, y); ctx.scale(direction, 1);
+    ctx.strokeStyle = activeMapId === 'storm' ? 'rgba(222,239,244,.48)' : 'rgba(14,36,46,.48)';
+    ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+    for (let bird = 0; bird < count; bird++) {
+      const offsetX = (bird - (count - 1) / 2) * 16;
+      const offsetY = Math.sin(flock + bird * 1.9) * 7;
+      const size = 7 + mapHash01(flock * 7 + bird, 18) * 4;
+      ctx.beginPath();
+      ctx.moveTo(offsetX - size, offsetY + flap * .25);
+      ctx.quadraticCurveTo(offsetX - size * .35, offsetY - flap, offsetX, offsetY);
+      ctx.quadraticCurveTo(offsetX + size * .35, offsetY - flap, offsetX + size, offsetY + flap * .25);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
 function render(now) {
   const ctx = skyCtx;
   const W = skyCanvas.width, H = skyCanvas.height;
@@ -5344,6 +5386,7 @@ function render(now) {
   });
 
   drawSkyBackdrop(ctx, camX, camY, viewW, viewH);
+  drawAmbientBirds(ctx, now, camX, camY, viewW, viewH);
 
   drawGround(ctx, camX - BORDER_FOG_DEPTH - 180, camX + viewW + BORDER_FOG_DEPTH + 180);
   highSpeedWake.draw(ctx);
@@ -5388,71 +5431,108 @@ function render(now) {
 
 function drawMinimap(now) {
   const ctx = miniCtx, W = miniCanvas.width, H = miniCanvas.height;
-  const scaleX = W / WORLD_W, scaleY = H / WORLD_H;
-  ctx.clearRect(0, 0, W, H);
+  if (!ctx || W < 1 || H < 1) return;
+  const frame = { x: 3, y: 3, w: W - 6, h: H - 6 };
+  const scope = { x: 20, y: 40, w: W - 40, h: H - 60 };
+  const scaleX = scope.w / WORLD_W, scaleY = scope.h / WORLD_H;
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, W, H);
+  const rounded = (x, y, w, h, r) => {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r); ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h); ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r); ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
+  };
+
+  rounded(frame.x, frame.y, frame.w, frame.h, 18);
+  const bezel = ctx.createLinearGradient(0, frame.y, 0, frame.y + frame.h);
+  bezel.addColorStop(0, 'rgba(25,64,75,.98)'); bezel.addColorStop(.5, 'rgba(8,27,37,.99)'); bezel.addColorStop(1, 'rgba(5,18,28,.99)');
+  ctx.fillStyle = bezel; ctx.fill(); ctx.strokeStyle = 'rgba(126,224,213,.65)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#9cebdd'; ctx.font = 'bold 17px Space Mono, monospace'; ctx.textAlign = 'left';
+  ctx.fillText('TACTICAL RADAR', 22, 27);
+  ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(183,223,220,.72)'; ctx.font = '11px Space Mono, monospace';
+  ctx.fillText('FULL ARENA // LIVE', W - 20, 26);
+
+  rounded(scope.x, scope.y, scope.w, scope.h, 8); ctx.save(); ctx.clip();
+  const background = ctx.createLinearGradient(0, scope.y, 0, scope.y + scope.h);
+  background.addColorStop(0, activeMapId === 'storm' ? '#102b38' : '#092d33');
+  background.addColorStop(1, activeMapId === 'canyon' ? '#222331' : '#061c2b');
+  ctx.fillStyle = background; ctx.fillRect(scope.x, scope.y, scope.w, scope.h);
   if (activeMapId === 'canyon') {
-    // Blue upper half is open sky; the lower passage and its roof/floor use
-    // the same profile and entrances as the large map view. Canyon has no sea.
-    ctx.fillStyle = 'rgba(91,132,160,.72)'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(37,33,41,.92)';
-    ctx.beginPath();
-    CANYON_CAVE_PROFILE.forEach(([x, , ceiling], i) => {
-      if (i === 0) ctx.moveTo(x * scaleX, ceiling * scaleY);
-      else ctx.lineTo(x * scaleX, ceiling * scaleY);
-    });
+    ctx.fillStyle = 'rgba(117,166,185,.55)'; ctx.fillRect(scope.x, scope.y, scope.w, scope.h);
+    ctx.fillStyle = 'rgba(38,34,44,.94)'; ctx.beginPath();
+    CANYON_CAVE_PROFILE.forEach(([x, , ceiling], i) => i ? ctx.lineTo(scope.x + x * scaleX, scope.y + ceiling * scaleY) : ctx.moveTo(scope.x + x * scaleX, scope.y + ceiling * scaleY));
     for (let i = CANYON_CAVE_PROFILE.length - 1; i >= 0; i--) {
-      const [x, , , floorY] = CANYON_CAVE_PROFILE[i];
-      ctx.lineTo(x * scaleX, floorY * scaleY);
+      const [x, , , floorY] = CANYON_CAVE_PROFILE[i]; ctx.lineTo(scope.x + x * scaleX, scope.y + floorY * scaleY);
     }
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = 'rgba(172,89,65,.9)';
-    for (let x = 0; x < WORLD_W; x += 60) {
-      const profile = canyonProfileAt(x);
-      if (!canyonIsEntrance(x)) {
-        ctx.fillRect(x * scaleX, profile.surfaceY * scaleY, Math.max(1, 60 * scaleX),
-          Math.max(1, (profile.ceilingY - profile.surfaceY) * scaleY));
-      }
-      ctx.fillRect(x * scaleX, profile.floorY * scaleY, Math.max(1, 60 * scaleX),
-        Math.max(1, (WORLD_H - profile.floorY) * scaleY));
+    ctx.fillStyle = 'rgba(181,94,66,.92)';
+    for (let x = 0; x < WORLD_W; x += 60 * WORLD_SCALE) {
+      const wall = canyonProfileAt(x);
+      if (!canyonIsEntrance(x)) ctx.fillRect(scope.x + x * scaleX, scope.y + wall.surfaceY * scaleY,
+        Math.max(1, 60 * WORLD_SCALE * scaleX), Math.max(1, (wall.ceilingY - wall.surfaceY) * scaleY));
+      ctx.fillRect(scope.x + x * scaleX, scope.y + wall.floorY * scaleY,
+        Math.max(1, 60 * WORLD_SCALE * scaleX), Math.max(1, (WORLD_H - wall.floorY) * scaleY));
     }
-    ctx.strokeStyle = 'rgba(255,203,158,.7)'; ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    CANYON_CAVE_PROFILE.forEach(([x, , , floorY], i) => {
-      if (i === 0) ctx.moveTo(x * scaleX, floorY * scaleY);
-      else ctx.lineTo(x * scaleX, floorY * scaleY);
-    });
+    ctx.strokeStyle = 'rgba(255,199,151,.72)'; ctx.lineWidth = 2; ctx.beginPath();
+    CANYON_CAVE_PROFILE.forEach(([x, , , floorY], i) => i ? ctx.lineTo(scope.x + x * scaleX, scope.y + floorY * scaleY) : ctx.moveTo(scope.x + x * scaleX, scope.y + floorY * scaleY));
     ctx.stroke();
-    CANYON_CAVE_SPIRES.forEach(spire => {
-      const points = canyonSpireTriangle(spire);
-      ctx.fillStyle = 'rgba(196,113,79,.95)'; ctx.beginPath();
-      ctx.moveTo(points[0][0] * scaleX, points[0][1] * scaleY);
-      points.slice(1).forEach(point => ctx.lineTo(point[0] * scaleX, point[1] * scaleY));
-      ctx.closePath(); ctx.fill();
-    });
   } else {
-    ctx.fillStyle = 'rgba(20,30,50,0.4)'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(31,95,143,0.7)';
-    ctx.fillRect(0, GROUND_Y * scaleY, W, H - GROUND_Y * scaleY);
+    // City map grid / storm cells / island water remain subdued under the scan.
+    ctx.fillStyle = 'rgba(20,77,105,.66)'; ctx.fillRect(scope.x, scope.y + GROUND_Y * scaleY, scope.w, scope.h - GROUND_Y * scaleY);
+    ctx.strokeStyle = activeMapId === 'storm' ? 'rgba(168,205,222,.18)' : 'rgba(103,227,213,.18)'; ctx.lineWidth = 1;
+    const blocks = 18;
+    for (let i = 1; i < blocks; i++) {
+      const x = scope.x + scope.w * i / blocks;
+      ctx.beginPath(); ctx.moveTo(x, scope.y); ctx.lineTo(x, scope.y + scope.h); ctx.stroke();
+    }
+    for (let i = 1; i < 8; i++) {
+      const y = scope.y + scope.h * i / 8;
+      ctx.beginPath(); ctx.moveTo(scope.x, y); ctx.lineTo(scope.x + scope.w, y); ctx.stroke();
+    }
   }
-  if (activeMapId === 'canyon' || activeMapId === 'storm') {
-    ctx.save();
-    ctx.fillStyle = activeMapId === 'storm' ? 'rgba(145,180,198,.55)' : 'rgba(255,220,187,.5)';
+  if (activeMapId === 'storm' || activeMapId === 'canyon') {
+    ctx.fillStyle = activeMapId === 'storm' ? 'rgba(166,203,220,.22)' : 'rgba(255,220,187,.26)';
     cloudBanks.forEach(bank => {
-      ctx.beginPath();
-      ctx.ellipse(bank.x * scaleX, bank.y * scaleY,
-        Math.max(2, bank.rx * scaleX), Math.max(1.5, bank.ry * scaleY), 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.beginPath(); ctx.ellipse(scope.x + bank.x * scaleX, scope.y + bank.y * scaleY,
+        Math.max(2, bank.rx * scaleX), Math.max(1.5, bank.ry * scaleY), 0, 0, Math.PI * 2); ctx.fill();
     });
-    ctx.restore();
   }
 
+  // Range rings, azimuth axes, and the rotating scan sector give the map a
+  // readable radar language while preserving the full-map player positions.
+  const cx = scope.x + scope.w * .5, cy = scope.y + scope.h * .5;
+  ctx.strokeStyle = 'rgba(139,237,220,.29)'; ctx.lineWidth = 1;
+  for (const fraction of [.2, .4, .6, .8, 1]) {
+    ctx.beginPath(); ctx.ellipse(cx, cy, scope.w * fraction * .5, scope.h * fraction * .5, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(cx, scope.y); ctx.lineTo(cx, scope.y + scope.h);
+  ctx.moveTo(scope.x, cy); ctx.lineTo(scope.x + scope.w, cy); ctx.stroke();
+  const sweepAngle = now * .00038;
+  const sweepRadius = Math.hypot(scope.w, scope.h) * .55;
+  ctx.save(); ctx.globalAlpha = .34; ctx.fillStyle = 'rgba(99,255,213,.45)'; ctx.beginPath();
+  ctx.moveTo(cx, cy); ctx.arc(cx, cy, sweepRadius, sweepAngle - .34, sweepAngle); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha = .82; ctx.strokeStyle = '#8dffdd'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(sweepAngle) * sweepRadius, cy + Math.sin(sweepAngle) * sweepRadius); ctx.stroke();
+  ctx.restore();
+
   Object.values(players).forEach(p => {
-    if (p.connected === false || p.alive === false) return;
-    ctx.fillStyle = p.id === myId ? '#fff' : (p.color || colorFor(p.id));
-    ctx.beginPath();
-    ctx.arc(p.x * scaleX, p.y * scaleY, p.id === myId ? 3 : 2.2, 0, Math.PI * 2);
-    ctx.fill();
+    if (p.connected === false || p.alive === false || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+    const px = scope.x + p.x * scaleX, py = scope.y + p.y * scaleY;
+    const heading = Math.atan2(Math.sin(p.angle || 0) * scaleY, Math.cos(p.angle || 0) * scaleX);
+    const color = p.id === myId ? '#effffb' : (p.color || colorFor(p.id));
+    ctx.save(); ctx.translate(px, py); ctx.rotate(heading);
+    ctx.globalAlpha = .34; ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.arc(0, 0, p.id === myId ? 13 : 11, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1; ctx.shadowBlur = 0; ctx.beginPath();
+    ctx.moveTo(p.id === myId ? 12 : 10, 0); ctx.lineTo(-7, -6); ctx.lineTo(-4, 0); ctx.lineTo(-7, 6); ctx.closePath();
+    ctx.fillStyle = color; ctx.fill(); ctx.restore();
   });
+  ctx.restore();
+  rounded(scope.x, scope.y, scope.w, scope.h, 8); ctx.strokeStyle = 'rgba(120,236,218,.54)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = 'rgba(174,230,223,.8)'; ctx.textAlign = 'left'; ctx.font = '10px Space Mono, monospace'; ctx.fillText('N ↑', 24, H - 9);
+  ctx.textAlign = 'right'; ctx.fillText(`TRACKS ${Object.values(players).filter(p => p.connected !== false && p.alive !== false).length}`, W - 22, H - 9);
 }
 
 function interpolateRemotePlayers(dtSec) {

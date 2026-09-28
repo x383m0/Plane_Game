@@ -1,6 +1,16 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.52.3 (faster menu dogfight, missiles and flares)
+Current build: v1.53.0 (radar HUD, expanded arena and ambient birds)
+
+### v1.53.0 Radar and range pass
+- Replaced the small map panel with a larger tactical radar scope, sweep,
+  range rings, terrain silhouettes, and heading markers.
+- Expanded the arena by 20% in both dimensions and scaled its map geometry,
+  spawns, concealment zones, and scenery with it.
+- Added ambient animated bird flocks to the sky; canyon birds remain outside
+  solid rock.
+- Bullets retain full damage through 650 world units, then taper smoothly to
+  24% over the next 3,000 units. Projectile travel distance syncs in multiplayer.
 
 ### v1.52.2 Animated menu dogfight
 - Added a full-screen animated background behind the main menu, using the
