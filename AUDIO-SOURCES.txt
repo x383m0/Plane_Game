@@ -1,13 +1,14 @@
-WINGS ARENA — TEMPORARY AUDIO SOURCES
+WINGS ARENA — AUDIO SOURCES
 
 The current audio pass is intentionally modular so individual sounds can be
 replaced later without changing game logic.
 
-Sci-fi pack combat replacement:
-- shoot_01.ogg -> gun layer
+Gun sound:
+- a10-gun-burst.ogg -> a 0.98-second excerpt (source time 0.43–1.41 s) from
+  the user-supplied BRRRRRRT.wav, covering the initial A-10 cannon firing
+  burst. It loops only while gunfire is active.
 
-Flight audio is currently disabled: no engine, boost, or flyby sound is loaded.
-No A-10 recordings are used in this build.
+Flight audio remains disabled: no engine, boost, or flyby sound is loaded.
 
 Temporary combat effects from the uploaded sndfx.zip / War on Water: SNDFX:
 - Airplanes/aiplaneexplode.ogg -> audio/airplane-explosion.ogg

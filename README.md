@@ -1,6 +1,16 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.53.0 (radar HUD, expanded arena and ambient birds)
+Current build: v1.53.1 (A-10 cannon burst audio)
+
+### v1.53.1 A-10 cannon audio
+- Replaced the per-bullet gun sound with the first firing burst from the
+  supplied A-10 recording, trimmed to 0.98 seconds.
+- One burst sound loops while a gun is firing and fades shortly after firing
+  stops. Other aircraft use distance-based volume and are silent out of range.
+- The sound is shared across local, bot, host-simulated, and network-received
+  gunfire without cloning a new audio clip for every bullet.
+
+### v1.53.0 Radar and range pass
 
 ### v1.53.0 Radar and range pass
 - Replaced the small map panel with a larger tactical radar scope, sweep,

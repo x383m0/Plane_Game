@@ -221,6 +221,8 @@ let audioCtx = null, masterGain = null;
 let audioBank = {}, audioAssetsStarted = false;
 let engineCruiseAudio = null, engineBoostAudio = null;
 let waterWakeChurnAudio = null, waterWakeSprayAudio = null;
+const gunfireAudioByPlayer = new Map();
+const GUN_AUDIO_RELEASE_MS = 150;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 let currentCameraFovMult = CAMERA_FOV_MULT;
 let selectedMapId = 'city';
@@ -238,7 +240,7 @@ let lastDebugNoConnectionLogAt = 0;
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
   // Keep these paths flat so the deployed game can actually resolve them.
-  cannon: 'shoot_01.ogg',
+  cannon: 'a10-gun-burst.ogg',
   missile: 'missile-launch.ogg',
   explosion: 'airplane-explosion.ogg',
   impact: 'heavy-impact.ogg',
@@ -397,9 +399,8 @@ function canyonGroundContactY(x) {
   return canyonProfileAt(x).floorY;
 }
 
-// Small procedural sound rig: it starts only after a user gesture and keeps
-// the game self-contained. The cannon uses layered low oscillators + clipped
-// noise to suggest a fast, heavy rotary cannon without shipping an audio file.
+// Small procedural sound rig for fallback effects. It starts only after a
+// user gesture; the cannon uses its trimmed A-10 audio asset below.
 function unlockAudio() {
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -514,10 +515,55 @@ function noiseBurst(duration, volume, filterType = 'bandpass', frequency = 900) 
   g.gain.setValueAtTime(volume, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + duration);
   source.connect(filter); filter.connect(g); g.connect(masterGain); source.start();
 }
-function playCannonSound(x = null, y = null) {
-  const volume = x == null || y == null ? .34 : proximityVolume(x, y, .34);
-  if (volume <= .005) return;
-  if (!playAsset('cannon', volume, 1.22)) { noiseBurst(.055, volume * .35, 'bandpass', 1100); tone(82, .09, volume * .26, 'sawtooth', -32); }
+function markGunfire(ownerId, x = null, y = null) {
+  if (ownerId == null) return;
+  const key = String(ownerId);
+  let burst = gunfireAudioByPlayer.get(key);
+  if (!burst) {
+    burst = { ownerId, lastShotAt: 0, x: null, y: null, audio: null };
+    gunfireAudioByPlayer.set(key, burst);
+  }
+  burst.lastShotAt = performance.now();
+  if (Number.isFinite(x) && Number.isFinite(y)) { burst.x = x; burst.y = y; }
+}
+function stopGunfireAudio() {
+  gunfireAudioByPlayer.forEach(burst => {
+    if (!burst.audio) return;
+    burst.audio.pause(); burst.audio.currentTime = 0; burst.audio.volume = 0;
+  });
+  gunfireAudioByPlayer.clear();
+}
+function updateGunfireAudio(now = performance.now(), dtSec = 1 / 60) {
+  const blend = clamp(dtSec * 16, 0, 1);
+  gunfireAudioByPlayer.forEach((burst, key) => {
+    const firing = now - burst.lastShotAt <= GUN_AUDIO_RELEASE_MS;
+    if (!burst.audio && audioBank.cannon) {
+      burst.audio = audioBank.cannon.cloneNode();
+      burst.audio.loop = true;
+      burst.audio.volume = 0;
+    }
+    const player = samePlayerId(burst.ownerId, myId) ? myState : (players[burst.ownerId] || players[key]);
+    const x = Number.isFinite(player?.x) ? player.x : burst.x;
+    const y = Number.isFinite(player?.y) ? player.y : burst.y;
+    const targetVolume = !firing ? 0 : samePlayerId(burst.ownerId, myId) ? .27 :
+      (Number.isFinite(x) && Number.isFinite(y) ? proximityVolume(x, y, .27) : 0);
+    const audio = burst.audio;
+    if (audio) {
+      if (firing && targetVolume <= .005) {
+        audio.pause(); audio.currentTime = 0; audio.volume = 0;
+      } else if (targetVolume > .005 && audio.paused) {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      }
+      audio.volume += (targetVolume - audio.volume) * blend;
+      if (!firing && audio.volume < .005) {
+        audio.pause(); audio.currentTime = 0;
+        gunfireAudioByPlayer.delete(key);
+      }
+    } else if (!firing) {
+      gunfireAudioByPlayer.delete(key);
+    }
+  });
 }
 function playMissileLaunchSound(x = null, y = null) {
   const volume = x == null || y == null ? .36 : proximityVolume(x, y, .36);
@@ -2011,7 +2057,7 @@ function fireBulletFor(state, ownerId, replicate = false) {
   };
   bullets.push(b);
   spawnExplosion(b.x, b.y, 'muzzle');
-  playCannonSound(ownerId === myId ? null : b.x, ownerId === myId ? null : b.y);
+  markGunfire(ownerId, b.x, b.y);
   if (ownerId === myId) recoilKick = Math.min(10, recoilKick + 3.2);
   if (replicate) {
     const packet = { type: 'shoot', id: b.id, x: b.x, y: b.y, angle: b.angle, shotAt: b.born };
@@ -3111,6 +3157,7 @@ function resetForNewSession() {
   explosions = []; specialEffects = []; seenImpactKeys.clear();
   highSpeedWake.reset();
   stopWaterWakeAudio();
+  stopGunfireAudio();
   localFlareScheduleGeneration++;
   missileLockTargetId = null; missileLockAcquireId = null; missileLockCandidateId = null;
   missileLockCandidateAligned = false; missileLockProgress = 0; missileLockExpiresAt = 0;
@@ -3873,7 +3920,7 @@ function handleClientReceive(data) {
       }
       bullets.push(b);
       spawnExplosion(b.x + (b.renderDx || 0), b.y + (b.renderDy || 0), 'muzzle');
-      playCannonSound(data.x, data.y);
+      markGunfire(data.from, data.x, data.y);
     }
   }
   else if (data.type === 'missile') {
@@ -5620,6 +5667,7 @@ function loopFrame(ts) {
   const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
   currentCameraFovMult += (fovTarget - currentCameraFovMult) * clamp(dtSec * HIGH_SPEED_FOV_SMOOTHING, 0, 1);
   updateEngineAudio();
+  updateGunfireAudio(ts, dtSec);
   // Update smoothed remote positions before lock and homing calculations so
   // targeting uses the same positions the player sees on screen.
   interpolateRemotePlayers(dtSec);
