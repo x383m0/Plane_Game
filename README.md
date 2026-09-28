@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.52.0 (Red Canyon and Storm Front map pass)
+Current build: v1.52.1 (Red Canyon cave system and terrain collision)
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
@@ -8,11 +8,12 @@ repeat. There are no coins, stars, or other collectibles. No server, no build
 step, and no dependencies to install — PeerJS is loaded from its CDN.
 
 The default city arena uses world-space buildings and cloud banks. Red Canyon
-adds layered sandstone mesas and visible flight gaps; Storm Front adds distant
-squall shelves, light rain, occasional lightning, and darker concealment banks.
-The map scenery is visual-only, so there are no invisible rock collisions. The
-flat ocean remains the lower crash boundary, and the city and ocean continue
-beyond the playable rectangle into a soft animated boundary fog.
+keeps open sky above a connected lower-half cave network, with lit entrances,
+layered sandstone, stalactites, and a solid rock floor; planes and weapons
+collide with its visible rock. Canyon has no ocean or water effects. Storm Front
+adds distant squall shelves, light rain, occasional lightning, and darker
+concealment banks. The city and ocean continue beyond the playable rectangle
+into a soft animated boundary fog.
 
 ## Dependencies to install
 
@@ -292,17 +293,26 @@ damage once and clients only render the replicated impact.
 - Host/joiner impact packets retain the exact waterline point and duplicate
   packets are ignored.
 
+### v1.52.1 Red Canyon cave network and collision
+
+- Rebuilt Red Canyon with clear sky above the lower cave, three broad sky
+  entrances, varied connected chambers, layered rock, and stalactites and
+  stalagmites. Removed the ocean from this map and updated its minimap.
+- Plane movement, falling, bullets, missiles, bombs, and shrapnel now test the
+  same rock shapes as the renderer. Plane impact is handled by the host for
+  local pilots, bots, and network joiners; spawn and respawn positions avoid
+  cave walls.
+- Disabled water wake, sonic water waves, and water impact effects in this map.
+
 ### v1.52.0 Red Canyon and Storm Front maps
 
-- Red Canyon now has layered, world-anchored sandstone walls, eroded strata,
-  shaded clefts, and broad gaps between near mesas. The minimap mirrors the
-  mesa layout and marks the canyon cloud cover.
+- Red Canyon first shipped as layered, world-anchored sandstone mesas; v1.52.1
+  replaces that scenery with a traversable cave system.
 - Storm Front now has distant squall shelves, subtle moving rain, staggered
   lightning in the distance, and dark cloud banks that preserve the existing
   concealment and missile-lock rules. Its minimap marks the cloud cover.
 - Both maps use fixed world-space scenery and concealment layouts on every
-  client. Scenery does not create unseen collision hazards or change flight
-  physics; the flat waterline remains the crash boundary.
+  client. Storm remains over the shared flat-water arena.
 
 ## Diagnostics and known limitations
 - Click **LOGS** at any time, or press **F2**, to open the local diagnostics

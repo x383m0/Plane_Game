@@ -1,6 +1,6 @@
 // ================= Constants =================
 // v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
-// v1.52.0 adds world-anchored Red Canyon and Storm Front arena art.
+// v1.52.1 turns Red Canyon into a lower-half cave system with solid rock.
 const WORLD_W = 7200, WORLD_H = 4416;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
@@ -111,7 +111,7 @@ const MAP_CLOUD_BANK_LAYOUTS = {
     [.62, .18, 280, 170], [.82, .36, 330, 210]
   ],
   canyon: [
-    [.19, .23, 320, 185], [.51, .48, 290, 170], [.82, .58, 330, 195]
+    [.16, .23, 300, 170], [.50, .29, 320, 180], [.84, .20, 290, 165]
   ],
   storm: [
     [.12, .28, 350, 220], [.32, .52, 340, 220], [.53, .35, 370, 230],
@@ -123,10 +123,36 @@ const MAP_CLOUD_BANK_LAYOUTS = {
 };
 const MAP_PALETTES = {
   city: ['#07131d', '#173f4c', '#78afb1'],
-  canyon: ['#1a1720', '#70464a', '#c28769'],
+  canyon: ['#718fa9', '#b4c5c9', '#dfc19e'],
   storm: ['#050b18', '#152a43', '#466f86'],
   islands: ['#082031', '#1b6173', '#80c4bd']
 };
+
+// Red Canyon is split into open sky above and a connected cave network below.
+// Each profile node stores the roof's outside edge, its cave-side ceiling,
+// and the cave floor. Rendering, spawning, and authoritative collision all
+// read this same fixed world geometry.
+const CANYON_CAVE_PROFILE = [
+  [0, 1960, 2340, 4020], [600, 2050, 2440, 4060],
+  [1200, 1990, 2380, 4120], [1800, 2180, 2580, 4050],
+  [2400, 2070, 2480, 3980], [3000, 1910, 2310, 4040],
+  [3600, 2060, 2470, 4120], [4200, 2220, 2640, 4050],
+  [4800, 2080, 2480, 3980], [5400, 1940, 2360, 4080],
+  [6000, 2100, 2510, 4140], [6600, 2190, 2580, 4050],
+  [7200, 1990, 2390, 4010]
+];
+const CANYON_CAVE_ENTRANCES = [[520, 1040], [2920, 3480], [5500, 6100]];
+// x, attachment edge, half-width, intrusion length, tip offset. These are
+// visible stalactites and stalagmites, and the same triangles stop aircraft.
+const CANYON_CAVE_SPIRES = [
+  [350, 'ceiling', 68, 275, -20], [860, 'floor', 84, 380, 16],
+  [1450, 'ceiling', 92, 430, 20], [2040, 'floor', 76, 310, -25],
+  [2580, 'ceiling', 88, 360, -18], [3180, 'floor', 100, 440, 14],
+  [3860, 'ceiling', 76, 315, 18], [4450, 'floor', 88, 380, -15],
+  [5050, 'ceiling', 100, 415, 25], [5630, 'floor', 72, 330, -20],
+  [6260, 'ceiling', 90, 380, 10], [6860, 'floor', 92, 410, -22]
+];
+const CANYON_PLANE_COLLISION_RADIUS = 36;
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
 // fixed lifetime, used for gun/missile impacts, launches, and kills.
@@ -259,6 +285,111 @@ function waterSurfaceY(x) {
   // Keep the ocean surface level. It is also the crash boundary and the
   // reference plane for the high-speed wake effect.
   return GROUND_Y;
+}
+
+function canyonProfileAt(x) {
+  const px = clamp(Number.isFinite(x) ? x : 0, 0, WORLD_W);
+  let i = 0;
+  while (i < CANYON_CAVE_PROFILE.length - 2 && px > CANYON_CAVE_PROFILE[i + 1][0]) i++;
+  const a = CANYON_CAVE_PROFILE[i], b = CANYON_CAVE_PROFILE[i + 1];
+  const t = b[0] === a[0] ? 0 : (px - a[0]) / (b[0] - a[0]);
+  return {
+    surfaceY: a[1] + (b[1] - a[1]) * t,
+    ceilingY: a[2] + (b[2] - a[2]) * t,
+    floorY: a[3] + (b[3] - a[3]) * t
+  };
+}
+
+function canyonIsEntrance(x) {
+  return CANYON_CAVE_ENTRANCES.some(([left, right]) => x >= left && x <= right);
+}
+
+function canyonSpireTriangle(spire) {
+  const [x, edge, halfWidth, length, tipOffset] = spire;
+  const profile = canyonProfileAt(x);
+  const baseY = edge === 'ceiling' ? profile.ceilingY : profile.floorY;
+  const tipY = baseY + (edge === 'ceiling' ? length : -length);
+  return [[x - halfWidth, baseY], [x + halfWidth, baseY], [x + tipOffset, tipY]];
+}
+
+function canyonPointInTriangle(x, y, triangle) {
+  const cross = (a, b, px, py) => (px - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (py - b[1]);
+  const d1 = cross(triangle[0], triangle[1], x, y);
+  const d2 = cross(triangle[1], triangle[2], x, y);
+  const d3 = cross(triangle[2], triangle[0], x, y);
+  return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+}
+
+function canyonCircleHitsTriangle(x, y, radius, triangle) {
+  if (canyonPointInTriangle(x, y, triangle)) return true;
+  for (let i = 0; i < 3; i++) {
+    const a = triangle[i], b = triangle[(i + 1) % 3];
+    if (pointSegmentDistance(x, y, a[0], a[1], b[0], b[1]) <= radius) return true;
+  }
+  return false;
+}
+
+function canyonPointHitsWall(x, y) {
+  const profile = canyonProfileAt(x);
+  if (y >= profile.floorY) return true;
+  return !canyonIsEntrance(x) && y >= profile.surfaceY && y <= profile.ceilingY;
+}
+
+function canyonPositionCollides(x, y, radius = CANYON_PLANE_COLLISION_RADIUS) {
+  if (activeMapId !== 'canyon' || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+  if (canyonPointHitsWall(x, y)) return true;
+  for (let i = 0; i < 8; i++) {
+    const angle = Math.PI * 2 * i / 8;
+    if (canyonPointHitsWall(x + Math.cos(angle) * radius, y + Math.sin(angle) * radius)) return true;
+  }
+  for (const spire of CANYON_CAVE_SPIRES) {
+    if (Math.abs(spire[0] - x) > spire[2] + radius) continue;
+    if (canyonCircleHitsTriangle(x, y, radius, canyonSpireTriangle(spire))) return true;
+  }
+  return false;
+}
+
+// Sample movement paths so fast aircraft and weapons cannot tunnel through
+// narrow rock faces between frames. `safeX/safeY` is the last clear point.
+function canyonFirstRockCollision(x1, y1, x2, y2, radius = 0, maxStep = 12) {
+  if (activeMapId !== 'canyon') return null;
+  const distance = Math.hypot(x2 - x1, y2 - y1);
+  const steps = Math.max(1, Math.ceil(distance / maxStep));
+  let safeT = 0;
+  if (canyonPositionCollides(x1, y1, radius)) {
+    return { safeX: x1, safeY: y1, hitX: x1, hitY: y1, t: 0 };
+  }
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t;
+    if (canyonPositionCollides(x, y, radius)) {
+      return {
+        safeX: x1 + (x2 - x1) * safeT,
+        safeY: y1 + (y2 - y1) * safeT,
+        hitX: x, hitY: y, t
+      };
+    }
+    safeT = t;
+  }
+  return null;
+}
+
+function randomCanyonSpawnPoint() {
+  for (let attempt = 0; attempt < 160; attempt++) {
+    const x = rand(180, WORLD_W - 180);
+    const profile = canyonProfileAt(x);
+    const inSky = Math.random() < .45;
+    const y = inSky
+      ? rand(150, profile.surfaceY - 160)
+      : rand(profile.ceilingY + 150, profile.floorY - 180);
+    if (!canyonPositionCollides(x, y, CANYON_PLANE_COLLISION_RADIUS + 10)) return { x, y };
+  }
+  const x = 3600, profile = canyonProfileAt(x);
+  return { x, y: (profile.ceilingY + profile.floorY) * .5 };
+}
+
+function canyonGroundContactY(x) {
+  return canyonProfileAt(x).floorY;
 }
 
 // Small procedural sound rig: it starts only after a user gesture and keeps
@@ -742,6 +873,11 @@ const highSpeedWake = new HighSpeedWakeEffect();
 
 function updateHighSpeedWake(dtSec) {
   highSpeedWake.update(dtSec);
+  if (activeMapId === 'canyon') {
+    highSpeedWake.reset();
+    updateWaterWakeAudio(0, 0, dtSec);
+    return;
+  }
   const p = myState;
   if (!p || !p.alive || p.falling || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
     updateWaterWakeAudio(0, 0, dtSec);
@@ -775,6 +911,7 @@ function updateHighSpeedWake(dtSec) {
 }
 
 function spawnSonicWaterWave(x, y, angle, speed = HIGH_SPEED_THRESHOLD) {
+  if (activeMapId === 'canyon') return;
   const altitude = waterSurfaceY(x) - y;
   if (!Number.isFinite(altitude) || altitude < SONIC_WAVE_MIN_ALTITUDE || altitude > SONIC_WAVE_MAX_ALTITUDE) return;
   const nearWater = clamp(
@@ -1217,17 +1354,18 @@ class WaterCrashEffect {
 function buildClouds() {
   clouds = [];
   cloudBanks = [];
+  const mapId = validMapId(activeMapId);
+  const cloudTop = mapId === 'canyon' ? 1800 : GROUND_Y - 40;
   for (let i = 0; i < CLOUD_COUNT; i++) {
     const rx = rand(CLOUD_MIN_RADIUS, CLOUD_MAX_RADIUS);
     clouds.push({
-      x: rand(0, WORLD_W), y: rand(0, GROUND_Y - 40),
+      x: rand(0, WORLD_W), y: rand(0, cloudTop),
       rx, ry: rx * rand(.28, .58), a: rand(.045, .16),
       lobe: rand(.28, .52), tilt: rand(-.12, .12)
     });
   }
   // Each arena gets a deliberate route through its concealment zones. The
   // coordinates are fixed in world space so host and joiners agree on cover.
-  const mapId = validMapId(activeMapId);
   const bankLayout = MAP_CLOUD_BANK_LAYOUTS[mapId] || MAP_CLOUD_BANK_LAYOUTS.city;
   const bankCount = MAP_THEMES[mapId]?.cloudBanks || CLOUD_BANK_COUNT;
   cloudBanks = bankLayout.slice(0, bankCount).map(([nx, ny, rx, ry], i) => ({
@@ -1244,6 +1382,7 @@ function isInCloudBank(x, y) {
 }
 
 function randomSpawnPoint() {
+  if (activeMapId === 'canyon') return randomCanyonSpawnPoint();
   return { x: rand(200, WORLD_W - 200), y: rand(120, GROUND_Y - 160) };
 }
 
@@ -1471,12 +1610,38 @@ function finishBotDeath(bot) {
   handleDied(bot.id, bot.deathKiller);
 }
 
+function crashPlaneIntoCanyon(state, collision) {
+  if (!state || !collision) return;
+  state.x = collision.safeX; state.y = collision.safeY;
+  if (state === myState) {
+    if (isHost) broadcast({ type: 'effect', kind: 'crash', x: collision.hitX, y: collision.hitY });
+    finishDeath(null, 'You hit the cave wall.', 'crash');
+    return;
+  }
+  spawnExplosion(collision.hitX, collision.hitY, 'crash');
+  if (isHost) broadcast({ type: 'effect', kind: 'crash', x: collision.hitX, y: collision.hitY });
+  if (state.isBot) finishBotDeath(state);
+  else finishRemoteDeath(state);
+}
+
+function finishCanyonDeathFall(state, collision = null) {
+  if (!state) return;
+  if (collision) { state.x = collision.safeX; state.y = collision.safeY; }
+  if (state === myState) finishDeath(state.deathKiller, 'Aircraft lost in the cave.', 'crash');
+  else if (state.isBot) finishBotDeath(state);
+  else finishRemoteDeath(state);
+}
+
 function updateBotDeathFall(bot, dtSec) {
+  const previousY = bot.y;
   bot.verticalVelocity += FALL_GRAVITY * dtSec;
   bot.speed = 0; bot.turnVelocity = 0;
   bot.roll += bot.fallSpinVelocity * dtSec;
   bot.y += bot.verticalVelocity * dtSec;
-  if (bot.y >= GROUND_Y - 12) finishBotDeath(bot);
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(bot.x, previousY, bot.x, bot.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) finishCanyonDeathFall(bot, collision);
+  } else if (bot.y >= GROUND_Y - 12) finishBotDeath(bot);
 }
 
 function crashLocal(message = 'You crashed.') {
@@ -1517,6 +1682,7 @@ function finishDeath(killerId, message = 'Shot down!', deathEffect = 'crash') {
 }
 
 function updateDeathFall(dtSec) {
+  const previousY = myState.y;
   myState.verticalVelocity += FALL_GRAVITY * dtSec;
   // Falling is intentionally screen-vertical: do not integrate angle or
   // speed into X. Roll is visual only and has no influence on movement.
@@ -1524,7 +1690,10 @@ function updateDeathFall(dtSec) {
   myState.turnVelocity = 0;
   myState.roll += myState.fallSpinVelocity * dtSec;
   myState.y += myState.verticalVelocity * dtSec;
-  if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost', 'planeWater');
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(myState.x, previousY, myState.x, myState.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) finishCanyonDeathFall(myState, collision);
+  } else if (myState.y >= GROUND_Y - 12) finishDeath(myState.deathKiller, 'Aircraft lost', 'planeWater');
 }
 
 // A stall is recoverable. The player can still point the nose down and regain
@@ -1557,8 +1726,14 @@ function updateStalledFlight(dtSec, keys) {
   } else {
     myState.verticalVelocity *= Math.max(0, 1 - 5 * dtSec);
   }
+  const previousX = myState.x, previousY = myState.y;
   myState.x += Math.cos(myState.angle) * myState.speed * dtSec;
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
+
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(previousX, previousY, myState.x, myState.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) { crashPlaneIntoCanyon(myState, collision); return; }
+  }
 
   if (updateBoundaryState(myState, performance.now())) {
     beginDeathFall(null, 'Boundary lost — aircraft disabled');
@@ -1576,7 +1751,7 @@ function updateStalledFlight(dtSec, keys) {
     myState.roll *= .35;
     myState.verticalVelocity = 0;
   }
-  if (myState.y >= GROUND_Y - 12) crashLocal('You hit the sea.');
+  if (activeMapId !== 'canyon' && myState.y >= GROUND_Y - 12) crashLocal('You hit the sea.');
 }
 
 function checkFallingHits() {
@@ -1704,13 +1879,18 @@ function updateLocalPlane(dtSec, keys) {
   } else {
     myState.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
   }
+  const previousX = myState.x, previousY = myState.y;
   myState.x += Math.cos(myState.angle) * myState.speed * dtSec;
   myState.y += Math.sin(myState.angle) * myState.speed * dtSec + myState.verticalVelocity * dtSec;
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(previousX, previousY, myState.x, myState.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) { crashPlaneIntoCanyon(myState, collision); return; }
+  }
   if (updateBoundaryState(myState, performance.now())) {
     beginDeathFall(null, 'Boundary lost — aircraft disabled');
     return;
   }
-  if (myState.y >= GROUND_Y - 12) {
+  if (activeMapId !== 'canyon' && myState.y >= GROUND_Y - 12) {
     crashLocal('You hit the sea.');
     return;
   }
@@ -1902,11 +2082,22 @@ function updateBullets(dtSec) {
     const nextVy = b.vy + BULLET_GRAVITY * dtSec;
     const endX = startX + b.vx * dtSec;
     const endY = startY + nextVy * dtSec;
+    if (activeMapId === 'canyon') {
+      const rockHit = canyonFirstRockCollision(startX, startY, endX, endY, BULLET_RADIUS, 8);
+      if (rockHit) {
+        const hitX = rockHit.hitX, hitY = rockHit.hitY;
+        if (isHost || rememberImpact('bullet', b.id)) spawnExplosion(hitX, hitY, 'spark', b.angle);
+        if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bullet', id: b.id,
+          x: hitX, y: hitY, surface: 'rock' });
+        removeProjectileLocal('bullet', b.id);
+        continue;
+      }
+    }
     // Test the swept segment so a fast round splashes at the actual crossing
     // in this frame, rather than a frame later at an elevated fixed offset.
     const surfaceAtEnd = waterSurfaceY(endX);
-    if (startY >= waterSurfaceY(startX) ||
-        (endY >= surfaceAtEnd && endY > startY)) {
+    if (activeMapId !== 'canyon' && (startY >= waterSurfaceY(startX) ||
+        (endY >= surfaceAtEnd && endY > startY))) {
       const t = startY >= waterSurfaceY(startX) ? 0 :
         clamp((surfaceAtEnd - startY) / (endY - startY), 0, 1);
       const hitX = startX + (endX - startX) * t;
@@ -1959,7 +2150,8 @@ function detonateBomb(b, surface = null) {
   if (!waterHit) playExplosionSound('blast', b.x, burstY);
   screenShake = Math.max(screenShake, waterHit ? 3 : 9);
   spawnBombShrapnel(b.x, burstY, b.ownerId);
-  if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY, surface: waterHit ? 'water' : null });
+  if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY,
+    surface: waterHit ? 'water' : surface === 'rock' ? 'rock' : null });
   removeProjectileLocal('bomb', b.id);
 }
 
@@ -1977,7 +2169,19 @@ function updateBombs(dtSec) {
     b.vy += BOMB_GRAVITY * dtSec;
     const startX = b.x, startY = b.y;
     const endX = startX + b.vx * dtSec, endY = startY + b.vy * dtSec;
-    if (authoritative && (startY >= waterSurfaceY(startX) ||
+    if (activeMapId === 'canyon') {
+      const rockHit = canyonFirstRockCollision(startX, startY, endX, endY, 8, 8);
+      if (rockHit) {
+        if (authoritative) {
+          b.x = rockHit.hitX; b.y = rockHit.hitY;
+          detonateBomb(b, 'rock');
+        } else {
+          bombs.splice(i, 1);
+        }
+        continue;
+      }
+    }
+    if (authoritative && activeMapId !== 'canyon' && (startY >= waterSurfaceY(startX) ||
         (endY >= waterSurfaceY(endX) && endY > startY))) {
       const t = startY >= waterSurfaceY(startX) ? 0 :
         clamp((waterSurfaceY(startX) - startY) / (endY - startY), 0, 1);
@@ -2006,13 +2210,19 @@ function updateShrapnels(dtSec) {
   const now = performance.now();
   for (let i = shrapnels.length - 1; i >= 0; i--) {
     const s = shrapnels[i];
-    if (now - s.born > SHRAPNEL_LIFE || s.y >= GROUND_Y - 8) {
+    const reachedGround = activeMapId === 'canyon'
+      ? s.y >= canyonGroundContactY(s.x) : s.y >= GROUND_Y - 8;
+    if (now - s.born > SHRAPNEL_LIFE || reachedGround) {
       shrapnels.splice(i, 1);
       continue;
     }
     s.prevX = s.x; s.prevY = s.y;
     s.vy += SHRAPNEL_GRAVITY * dtSec;
     s.x += s.vx * dtSec; s.y += s.vy * dtSec;
+    if (activeMapId === 'canyon' && canyonFirstRockCollision(s.prevX, s.prevY, s.x, s.y, 1, 8)) {
+      shrapnels.splice(i, 1);
+      continue;
+    }
 
     if ((isHost || botMode) && s.ownerId !== myId && myState && myState.alive && !myState.falling &&
         performance.now() >= (myState.invulnUntil || 0) &&
@@ -2301,8 +2511,20 @@ function updateMissiles(dtSec) {
     const startX = m.x, startY = m.y;
     const endX = startX + Math.cos(m.angle) * m.speed * dtSec;
     const endY = startY + Math.sin(m.angle) * m.speed * dtSec;
+    if (activeMapId === 'canyon') {
+      const rockHit = canyonFirstRockCollision(startX, startY, endX, endY, 7, 8);
+      if (rockHit) {
+        if (authoritative) {
+          spawnExplosion(rockHit.hitX, rockHit.hitY, 'blast');
+          if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id,
+            x: rockHit.hitX, y: rockHit.hitY, surface: 'rock' });
+        }
+        removeProjectileLocal('missile', m.id);
+        continue;
+      }
+    }
     const surfaceAtStart = waterSurfaceY(startX), surfaceAtEnd = waterSurfaceY(endX);
-    if (authoritative && (startY >= surfaceAtStart ||
+    if (authoritative && activeMapId !== 'canyon' && (startY >= surfaceAtStart ||
         (endY >= surfaceAtEnd && endY > startY))) {
       const t = startY >= surfaceAtStart ? 0 :
         clamp((surfaceAtStart - startY) / (endY - startY), 0, 1);
@@ -2471,13 +2693,18 @@ function updateOneBot(bot, dtSec, now) {
     bot.sonicBoomReadyAt = now + SONIC_BOOM_COOLDOWN_MS;
   }
   bot.highSpeedActive = atHighSpeed;
+  const previousX = bot.x, previousY = bot.y;
   bot.x += Math.cos(bot.angle) * bot.speed * dtSec;
   bot.y += Math.sin(bot.angle) * bot.speed * dtSec;
   if (bot.y < 0) bot.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-bot.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
   else bot.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
   bot.y += bot.verticalVelocity * dtSec;
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(previousX, previousY, bot.x, bot.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) { crashPlaneIntoCanyon(bot, collision); return; }
+  }
   if (updateBoundaryState(bot, now)) { beginBotDeathFall(bot, null); return; }
-  if (bot.y >= GROUND_Y - 12) { beginBotDeathFall(bot, null); return; }
+  if (activeMapId !== 'canyon' && bot.y >= GROUND_Y - 12) { beginBotDeathFall(bot, null); return; }
 
   bot.fireTimer = Math.max(0, bot.fireTimer - dtSec * 1000);
   if (bot.overheated) {
@@ -2598,11 +2825,15 @@ function finishRemoteDeath(p) {
 function updateRemoteDeathFall(p, dtSec) {
   ensureNetworkPlayerState(p);
   if (!p || !p.alive || !p.falling) return;
+  const previousY = p.y;
   p.verticalVelocity += FALL_GRAVITY * dtSec;
   p.speed = 0; p.turnVelocity = 0;
   p.roll += p.fallSpinVelocity * dtSec;
   p.y += p.verticalVelocity * dtSec;
-  if (p.y >= GROUND_Y - 12) finishRemoteDeath(p);
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(p.x, previousY, p.x, p.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) finishCanyonDeathFall(p, collision);
+  } else if (p.y >= GROUND_Y - 12) finishRemoteDeath(p);
 }
 
 function findHostLockTarget(p) {
@@ -2714,10 +2945,15 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   p.highSpeedActive = atHighSpeed;
   if (p.y < 0) p.verticalVelocity += TOP_BOUNDARY_GRAVITY * clamp(-p.y / TOP_BOUNDARY_DEPTH, .2, 1) * dtSec;
   else p.verticalVelocity *= Math.max(0, 1 - 4.5 * dtSec);
+  const previousX = p.x, previousY = p.y;
   p.x += Math.cos(p.angle) * Math.max(0, p.speed) * dtSec;
   p.y += Math.sin(p.angle) * Math.max(0, p.speed) * dtSec + p.verticalVelocity * dtSec;
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(previousX, previousY, p.x, p.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) { crashPlaneIntoCanyon(p, collision); return; }
+  }
   if (updateBoundaryState(p, now)) { beginRemoteDeathFall(p, null, 'Boundary lost — aircraft disabled'); return; }
-  if (p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
+  if (activeMapId !== 'canyon' && p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
 
   if (!p.debugSimulationSeen) {
     p.debugSimulationSeen = true;
@@ -3390,7 +3626,9 @@ function handleSonicBoom(fromId, data) {
 
 function handleRemoteEffect(data) {
   if (!data || !Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
-  if (data.kind === 'spark') spawnExplosion(data.x, data.y, 'spark', Number.isFinite(data.angle) ? data.angle : -Math.PI / 2);
+  if (data.kind === 'spark' || data.kind === 'crash') {
+    spawnExplosion(data.x, data.y, data.kind, Number.isFinite(data.angle) ? data.angle : -Math.PI / 2);
+  }
 }
 
 // A bullet or missile just hit whoever it was aimed at (data.x/y is where).
@@ -4127,6 +4365,9 @@ function drawExplosion(ctx, e, now) {
 }
 
 function drawGround(ctx, startX = 0, endX = WORLD_W) {
+  // Red Canyon has a stone floor and no ocean. Its cave geometry is drawn
+  // with the map backdrop, using the same profile that movement collides with.
+  if (activeMapId === 'canyon') return;
   const grad = ctx.createLinearGradient(0, GROUND_Y, 0, WORLD_H);
   grad.addColorStop(0, '#3f8c91');
   grad.addColorStop(.35, '#246875');
@@ -4207,126 +4448,141 @@ function mapHash01(index, salt = 0) {
   return value - Math.floor(value);
 }
 
-function canyonMesaLayout(index) {
-  const cell = 720;
-  const r1 = mapHash01(index, 4), r2 = mapHash01(index, 9), r3 = mapHash01(index, 14);
-  const gap = 132 + r1 * 58;
-  const x = index * cell + gap * .5;
-  const width = cell - gap - 26;
-  const base = GROUND_Y + 230;
-  const height = 310 + r2 * 300;
-  return { x, width, base, height, top: base - height, r1, r2, r3 };
-}
-
 function drawCanyonWorldMap(ctx, start, end) {
-  // A distant, continuous canyon wall makes the open passes between nearer
-  // mesas readable. It is scenery behind the flight area, like the city
-  // skyline; the only physical lower boundary remains the flat waterline.
-  const step = 96;
-  const first = Math.floor((start - step) / step) * step;
-  const last = Math.ceil((end + step) / step) * step;
-  const farBase = GROUND_Y + 170;
-  const farTop = x => farBase - (480 + Math.sin(x * .00155) * 125 +
-    Math.sin(x * .0041 + 1.7) * 72 + Math.sin(x * .0103) * 24);
+  const step = 48;
+  const first = clamp(Math.floor(start / step) * step, 0, WORLD_W);
+  const last = clamp(Math.ceil(end / step) * step, 0, WORLD_W);
+  const xs = [];
+  for (let x = first; x < last; x += step) xs.push(x);
+  if (!xs.length || xs[xs.length - 1] !== last) xs.push(last);
 
-  ctx.beginPath();
-  ctx.moveTo(first, farBase);
-  for (let x = first; x <= last; x += step) ctx.lineTo(x, farTop(x));
-  ctx.lineTo(last, WORLD_H + 180);
-  ctx.lineTo(first, WORLD_H + 180);
-  ctx.closePath();
-  const farFill = ctx.createLinearGradient(0, GROUND_Y - 760, 0, farBase);
-  farFill.addColorStop(0, '#9a5a4d');
-  farFill.addColorStop(.42, '#75463f');
-  farFill.addColorStop(1, '#372d36');
-  ctx.fillStyle = farFill;
-  ctx.fill();
-
-  // Long broken strata follow the distant rock face instead of reading as
-  // arbitrary horizontal stripes.
-  [.24, .43, .63, .81].forEach((fraction, band) => {
+  const traceBand = (left, right, upper, lower) => {
+    const points = [];
+    for (let x = left; x < right; x += step) points.push(x);
+    points.push(right);
+    if (points.length < 2) return;
     ctx.beginPath();
-    for (let x = first; x <= last; x += step) {
-      const y = farTop(x) + (farBase - farTop(x)) * fraction +
-        Math.sin(x * (.003 + band * .0003) + band * 1.8) * 13;
-      if (x === first) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.strokeStyle = band % 2 === 0 ? 'rgba(237,166,116,.16)' : 'rgba(30,27,35,.22)';
-    ctx.lineWidth = band === 1 ? 8 : 4;
-    ctx.stroke();
+    points.forEach((x, i) => i ? ctx.lineTo(x, upper(x)) : ctx.moveTo(x, upper(x)));
+    for (let i = points.length - 1; i >= 0; i--) ctx.lineTo(points[i], lower(points[i]));
+    ctx.closePath();
+  };
+  const solidRuns = [];
+  let runStart = first;
+  CANYON_CAVE_ENTRANCES.forEach(([gapStart, gapEnd]) => {
+    if (gapEnd <= first || gapStart >= last) return;
+    if (gapStart > runStart) solidRuns.push([runStart, Math.min(gapStart, last)]);
+    runStart = Math.max(runStart, gapEnd);
   });
-  ctx.beginPath();
-  for (let x = first; x <= last; x += step) {
-    if (x === first) ctx.moveTo(x, farTop(x)); else ctx.lineTo(x, farTop(x));
-  }
-  ctx.strokeStyle = 'rgba(255,197,145,.34)'; ctx.lineWidth = 3; ctx.stroke();
+  if (runStart < last) solidRuns.push([runStart, last]);
 
-  // The nearer mesas are deliberately separated. Their wide gaps create
-  // obvious flight lanes, while the far wall visible through each gap gives
-  // the canyon depth. A little seed-based variation keeps the silhouette
-  // irregular but identical on every frame and every player's machine.
-  const cell = 720;
-  const firstCell = Math.floor(start / cell) - 1;
-  const lastCell = Math.ceil(end / cell) + 1;
-  for (let i = firstCell; i <= lastCell; i++) {
-    const { x, width, base, height, top, r1, r3 } = canyonMesaLayout(i);
-    const points = [
-      [x, base], [x, top + height * .34], [x + width * .09, top + height * .23],
-      [x + width * .18, top + height * .12], [x + width * .31, top + height * .08],
-      [x + width * .43, top + height * .13], [x + width * .54, top + height * .025],
-      [x + width * .67, top + height * .09], [x + width * .78, top + height * .06],
-      [x + width * .91, top + height * .22], [x + width, top + height * .31],
-      [x + width, base]
-    ];
-    const traceMesa = () => {
-      ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
-      for (let p = 1; p < points.length; p++) ctx.lineTo(points[p][0], points[p][1]);
-      ctx.closePath();
-    };
-    traceMesa();
-    const face = ctx.createLinearGradient(0, top, 0, base);
-    face.addColorStop(0, r3 > .5 ? '#bd7152' : '#a95c48');
-    face.addColorStop(.34, '#85483f');
-    face.addColorStop(1, '#392e38');
-    ctx.fillStyle = face; ctx.fill();
+  // The cave air is a connected lower-half flight space. A dark, warm
+  // gradient gives it depth while leaving the sky above the roof untouched.
+  traceBand(first, last, x => canyonProfileAt(x).ceilingY, x => canyonProfileAt(x).floorY);
+  const air = ctx.createLinearGradient(0, 2280, 0, WORLD_H);
+  air.addColorStop(0, '#514047');
+  air.addColorStop(.35, '#352f38');
+  air.addColorStop(1, '#1b202a');
+  ctx.fillStyle = air; ctx.fill();
 
-    // Clipped sediment shelves sit inside the mesa faces and follow the
-    // blocky erosion profile without crossing the open flight gaps.
-    ctx.save(); traceMesa(); ctx.clip();
-    for (let band = 1; band <= 4; band++) {
-      const y = top + height * (.23 + band * .145);
-      const wobble = 8 + band * 2;
+  const roof = ctx.createLinearGradient(0, 1850, 0, 2730);
+  roof.addColorStop(0, '#be7653'); roof.addColorStop(.25, '#995541');
+  roof.addColorStop(.72, '#56383b'); roof.addColorStop(1, '#302d37');
+  const floor = ctx.createLinearGradient(0, 3700, 0, WORLD_H + BORDER_FOG_DEPTH);
+  floor.addColorStop(0, '#68433c'); floor.addColorStop(.24, '#56383a');
+  floor.addColorStop(1, '#252832');
+  solidRuns.forEach(([left, right]) => {
+    traceBand(left, right, x => canyonProfileAt(x).surfaceY, x => canyonProfileAt(x).ceilingY);
+    ctx.fillStyle = roof; ctx.fill();
+  });
+  traceBand(first, last, x => canyonProfileAt(x).floorY, () => WORLD_H + BORDER_FOG_DEPTH);
+  ctx.fillStyle = floor; ctx.fill();
+
+  // Layered sandstone follows the exact cave wall silhouettes and is clipped
+  // to each solid section so the entrances stay open all the way from sky.
+  const drawStrata = (left, right, upper, lower) => {
+    ctx.save(); traceBand(left, right, upper, lower); ctx.clip();
+    for (let band = 0; band < 10; band++) {
+      const y = 1940 + band * 206;
       ctx.beginPath();
-      ctx.moveTo(x - 8, y + Math.sin(i * 1.3 + band) * wobble);
-      ctx.lineTo(x + width * .22, y - wobble * .45);
-      ctx.lineTo(x + width * .47, y + wobble * .5);
-      ctx.lineTo(x + width * .74, y - wobble * .28);
-      ctx.lineTo(x + width + 8, y + Math.cos(i + band) * wobble);
-      ctx.strokeStyle = band % 2 ? 'rgba(238,166,113,.27)' : 'rgba(36,28,35,.30)';
-      ctx.lineWidth = band === 2 ? 7 : 4; ctx.stroke();
+      for (let x = left; x <= right; x += step) {
+        const wobble = Math.sin(x * (.0018 + band * .00006) + band * 1.7) * 23;
+        if (x === left) ctx.moveTo(x, y + wobble); else ctx.lineTo(x, y + wobble);
+      }
+      ctx.strokeStyle = band % 3 === 0 ? 'rgba(255,193,145,.21)' : 'rgba(27,26,34,.22)';
+      ctx.lineWidth = band % 4 === 0 ? 11 : 4;
+      ctx.stroke();
     }
     ctx.restore();
+  };
+  solidRuns.forEach(([left, right]) => drawStrata(left, right,
+    x => canyonProfileAt(x).surfaceY, x => canyonProfileAt(x).ceilingY));
+  drawStrata(first, last, x => canyonProfileAt(x).floorY, () => WORLD_H + BORDER_FOG_DEPTH);
 
-    ctx.beginPath();
-    ctx.moveTo(points[1][0], points[1][1]);
-    for (let p = 2; p <= 10; p++) ctx.lineTo(points[p][0], points[p][1]);
-    ctx.strokeStyle = 'rgba(255,196,143,.38)'; ctx.lineWidth = 3; ctx.stroke();
-    // Narrow shaded clefts add scale to the broad, open mesas.
-    const cleftX = x + width * (.25 + r1 * .48);
-    ctx.beginPath(); ctx.moveTo(cleftX, top + height * .18);
-    ctx.lineTo(cleftX - 15, top + height * .55);
-    ctx.lineTo(cleftX + 9, base - 30);
-    ctx.strokeStyle = 'rgba(29,28,37,.27)'; ctx.lineWidth = 12; ctx.stroke();
-  }
+  // Sky openings cast broad shafts of warm light into the lower caverns.
+  CANYON_CAVE_ENTRANCES.forEach(([left, right], i) => {
+    const x = (left + right) * .5;
+    if (right < first || left > last) return;
+    const profile = canyonProfileAt(x);
+    const centerY = profile.ceilingY + 380;
+    const glow = ctx.createRadialGradient(x, centerY, 18, x, centerY, 720);
+    glow.addColorStop(0, 'rgba(255,213,166,.16)');
+    glow.addColorStop(.48, 'rgba(237,177,131,.075)');
+    glow.addColorStop(1, 'rgba(224,160,125,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, centerY, 720, 0, Math.PI * 2); ctx.fill();
+  });
 
-  // A dusty horizon glow separates the rust-colored ridges from the sky.
-  const glowX = WORLD_W * .28, glowY = GROUND_Y - 630;
-  if (glowX > start - 420 && glowX < end + 420) {
-    const glow = ctx.createRadialGradient(glowX, glowY, 12, glowX, glowY, 420);
-    glow.addColorStop(0, 'rgba(255,190,132,.20)');
-    glow.addColorStop(1, 'rgba(255,153,108,0)');
-    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(glowX, glowY, 420, 0, Math.PI * 2); ctx.fill();
+  // Silhouette rims and shadowed wall seams make the ceiling and floor read
+  // as thick rock instead of a flat colored divider.
+  for (const [left, right] of solidRuns) {
+    [
+      [x => canyonProfileAt(x).surfaceY, 'rgba(255,205,158,.55)', 4],
+      [x => canyonProfileAt(x).ceilingY, 'rgba(25,25,34,.72)', 8]
+    ].forEach(([edge, color, width]) => {
+      ctx.beginPath();
+      for (let x = left; x <= right; x += step) {
+        if (x === left) ctx.moveTo(x, edge(x)); else ctx.lineTo(x, edge(x));
+      }
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+    });
   }
+  ctx.beginPath();
+  for (let x = first; x <= last; x += step) {
+    if (x === first) ctx.moveTo(x, canyonProfileAt(x).floorY);
+    else ctx.lineTo(x, canyonProfileAt(x).floorY);
+  }
+  ctx.strokeStyle = 'rgba(236,167,122,.36)'; ctx.lineWidth = 5; ctx.stroke();
+
+  // Stalactites and stalagmites intrude into the passage as solid triangular
+  // formations. Their facets are drawn from the same vertices used by hit tests.
+  CANYON_CAVE_SPIRES.forEach(spire => {
+    const [x] = spire;
+    if (x < first - 180 || x > last + 180) return;
+    const points = canyonSpireTriangle(spire);
+    const minY = Math.min(...points.map(p => p[1])), maxY = Math.max(...points.map(p => p[1]));
+    const rock = ctx.createLinearGradient(0, minY, 0, maxY);
+    rock.addColorStop(0, '#aa664c'); rock.addColorStop(.48, '#75483f'); rock.addColorStop(1, '#39313b');
+    ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
+    ctx.lineTo(points[1][0], points[1][1]); ctx.lineTo(points[2][0], points[2][1]); ctx.closePath();
+    ctx.fillStyle = rock; ctx.fill();
+    ctx.strokeStyle = 'rgba(25,24,32,.6)'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
+    ctx.lineTo(points[2][0], points[2][1]);
+    ctx.strokeStyle = 'rgba(255,196,144,.33)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(points[1][0], points[1][1]);
+    ctx.lineTo(points[2][0], points[2][1]);
+    ctx.strokeStyle = 'rgba(23,24,32,.5)'; ctx.lineWidth = 7; ctx.stroke();
+  });
+
+  // Faint mineral seams on the cave walls add detail without filling the
+  // navigable air with particles or moving scenery.
+  CANYON_CAVE_SPIRES.forEach(([x, edge], i) => {
+    if (x < first - 240 || x > last + 240) return;
+    const profile = canyonProfileAt(x);
+    const y = edge === 'ceiling' ? profile.ceilingY - 90 : profile.floorY + 105;
+    ctx.strokeStyle = i % 2 ? 'rgba(194,157,134,.26)' : 'rgba(126,191,181,.22)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x - 70, y); ctx.lineTo(x - 12, y - 32); ctx.lineTo(x + 44, y - 19); ctx.stroke();
+  });
 }
 
 function drawStormBackdrop(ctx, now, camX, camY, viewW, viewH) {
@@ -4871,23 +5127,49 @@ function drawMinimap(now) {
   const ctx = miniCtx, W = miniCanvas.width, H = miniCanvas.height;
   const scaleX = W / WORLD_W, scaleY = H / WORLD_H;
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = 'rgba(20,30,50,0.4)';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = 'rgba(31,95,143,0.7)';
-  ctx.fillRect(0, GROUND_Y * scaleY, W, H - GROUND_Y * scaleY);
-
   if (activeMapId === 'canyon') {
-    // The minimap uses the same deterministic mesa layout as the world art,
-    // so the visible canyon passes line up with their strategic overview.
-    for (let i = 0; i <= Math.ceil(WORLD_W / 720); i++) {
-      const mesa = canyonMesaLayout(i);
-      const x = mesa.x * scaleX, width = mesa.width * scaleX;
-      const baseY = GROUND_Y * scaleY, topY = mesa.top * scaleY;
-      ctx.fillStyle = 'rgba(177,91,69,.76)';
-      ctx.fillRect(x, topY, width, baseY - topY);
-      ctx.fillStyle = 'rgba(255,194,142,.6)';
-      ctx.fillRect(x, topY, width, 1.2);
+    // Blue upper half is open sky; the lower passage and its roof/floor use
+    // the same profile and entrances as the large map view. Canyon has no sea.
+    ctx.fillStyle = 'rgba(91,132,160,.72)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(37,33,41,.92)';
+    ctx.beginPath();
+    CANYON_CAVE_PROFILE.forEach(([x, , ceiling], i) => {
+      if (i === 0) ctx.moveTo(x * scaleX, ceiling * scaleY);
+      else ctx.lineTo(x * scaleX, ceiling * scaleY);
+    });
+    for (let i = CANYON_CAVE_PROFILE.length - 1; i >= 0; i--) {
+      const [x, , , floorY] = CANYON_CAVE_PROFILE[i];
+      ctx.lineTo(x * scaleX, floorY * scaleY);
     }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(172,89,65,.9)';
+    for (let x = 0; x < WORLD_W; x += 60) {
+      const profile = canyonProfileAt(x);
+      if (!canyonIsEntrance(x)) {
+        ctx.fillRect(x * scaleX, profile.surfaceY * scaleY, Math.max(1, 60 * scaleX),
+          Math.max(1, (profile.ceilingY - profile.surfaceY) * scaleY));
+      }
+      ctx.fillRect(x * scaleX, profile.floorY * scaleY, Math.max(1, 60 * scaleX),
+        Math.max(1, (WORLD_H - profile.floorY) * scaleY));
+    }
+    ctx.strokeStyle = 'rgba(255,203,158,.7)'; ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    CANYON_CAVE_PROFILE.forEach(([x, , , floorY], i) => {
+      if (i === 0) ctx.moveTo(x * scaleX, floorY * scaleY);
+      else ctx.lineTo(x * scaleX, floorY * scaleY);
+    });
+    ctx.stroke();
+    CANYON_CAVE_SPIRES.forEach(spire => {
+      const points = canyonSpireTriangle(spire);
+      ctx.fillStyle = 'rgba(196,113,79,.95)'; ctx.beginPath();
+      ctx.moveTo(points[0][0] * scaleX, points[0][1] * scaleY);
+      points.slice(1).forEach(point => ctx.lineTo(point[0] * scaleX, point[1] * scaleY));
+      ctx.closePath(); ctx.fill();
+    });
+  } else {
+    ctx.fillStyle = 'rgba(20,30,50,0.4)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(31,95,143,0.7)';
+    ctx.fillRect(0, GROUND_Y * scaleY, W, H - GROUND_Y * scaleY);
   }
   if (activeMapId === 'canyon' || activeMapId === 'storm') {
     ctx.save();
