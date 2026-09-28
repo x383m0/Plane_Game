@@ -1,6 +1,6 @@
 // ================= Constants =================
 // v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
-// v1.52.1 added the Red Canyon cave system; v1.52.2 adds the menu dogfight.
+// v1.52.1 added the Red Canyon cave system; v1.52.3 speeds up menu dogfights.
 const WORLD_W = 7200, WORLD_H = 4416;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
@@ -4095,9 +4095,10 @@ const PLANE_SPRITE_LEN = 88;
 // simulation, so menu motion can never change player, bot, or network state.
 let menuFightCanvas = null, menuFightCtx = null, menuFightFrame = 0;
 let menuFightWidth = 0, menuFightHeight = 0, menuFightDpr = 1;
-let menuFightLast = 0, menuFightPlanes = [], menuFightShots = [], menuFightSparks = [];
+let menuFightLast = 0, menuFightPlanes = [], menuFightShots = [], menuFightMissiles = [], menuFightFlares = [], menuFightSparks = [];
 let menuFightResizeWired = false;
 let menuFightVisibilityWired = false;
+let menuFightFlareId = 0;
 const MENU_FIGHT_COLORS = ['#ff806f', '#73e0d2', '#ffd166', '#9d91ff'];
 
 function resizeMenuDogfight() {
@@ -4125,10 +4126,14 @@ function startMenuDogfight() {
   menuFightPlanes = MENU_FIGHT_COLORS.map((color, i) => {
     const nx = [.12, .82, .24, .88][i], ny = [.26, .34, .78, .72][i];
     return { id: i, color, nx, ny, x: nx * menuFightWidth, y: ny * menuFightHeight,
-      angle: [0, Math.PI, -.35, Math.PI + .35][i], speed: 105 + i * 8,
-      hp: 3, fireAt: performance.now() + 450 + i * 270, respawnAt: 0,
+      angle: [0, Math.PI, -.35, Math.PI + .35][i], speed: 185 + i * 12,
+      hp: 3, fireAt: performance.now() + 300 + i * 180,
+      missileAt: performance.now() + 1800 + i * 1250,
+      flareDemoAt: performance.now() + 4400 + i * 1900, flarePopAt: 0,
+      flareBurstPops: 0, flareCooldownUntil: 0, respawnAt: 0,
       flashUntil: 0, rollPhase: i * 1.7 };
   });
+  menuFightShots = []; menuFightMissiles = []; menuFightFlares = []; menuFightSparks = [];
   menuFightLast = performance.now();
   menuFightFrame = requestAnimationFrame(drawMenuDogfight);
   if (!menuFightResizeWired) {
@@ -4150,6 +4155,8 @@ function drawMenuDogfight(ts) {
   menuFightLast = ts;
   ctx.setTransform(menuFightDpr, 0, 0, menuFightDpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
+  // Show more of the engagement at once with a gentle camera pullback.
+  ctx.save(); ctx.translate(W * .5, H * .5); ctx.scale(.78, .78); ctx.translate(-W * .5, -H * .5);
 
   // Atmospheric horizon and distant cloud bands keep the action readable
   // while leaving the existing game menu and typography in the foreground.
@@ -4181,27 +4188,100 @@ function drawMenuDogfight(ts) {
     if (!target || target.respawnAt) continue;
     const dx = target.x - p.x, dy = target.y - p.y;
     const desired = Math.atan2(dy, dx);
-    const turn = clamp(angleDiff(p.angle, desired), -1.02 * dt, 1.02 * dt);
+    const turn = clamp(angleDiff(p.angle, desired), -1.75 * dt, 1.75 * dt);
     p.angle += turn;
     // A soft center bias prevents fighters disappearing behind the menu edges.
     const cx = W * (.5 + Math.sin(ts / 5400 + p.id * 2.1) * .15);
     const cy = H * (.5 + Math.cos(ts / 4700 + p.id * 1.6) * .2);
     const homeAngle = Math.atan2(cy - p.y, cx - p.x);
     if (p.x < 38 || p.x > W - 38 || p.y < 38 || p.y > H - 38) {
-      p.angle += clamp(angleDiff(p.angle, homeAngle), -1.45 * dt, 1.45 * dt);
+      p.angle += clamp(angleDiff(p.angle, homeAngle), -2.0 * dt, 2.0 * dt);
     }
     const velocity = p.speed * (Math.abs(turn) > .01 ? .84 : 1);
     p.x += Math.cos(p.angle) * velocity * dt;
     p.y += Math.sin(p.angle) * velocity * dt;
     p.nx = p.x / W; p.ny = p.y / H;
     p.rollPhase += dt * (turn === 0 ? .15 : Math.sign(turn) * 1.7);
-    if (ts >= p.fireAt && dist(p.x, p.y, target.x, target.y) < Math.min(W, H) * .72 && Math.abs(angleDiff(p.angle, desired)) < .27) {
+    const targetDistance = dist(p.x, p.y, target.x, target.y);
+    const targetError = Math.abs(angleDiff(p.angle, desired));
+    if (ts >= p.fireAt && targetDistance < Math.min(W, H) * .82 && targetError < .34) {
       const muzzleX = p.x + Math.cos(p.angle) * 26, muzzleY = p.y + Math.sin(p.angle) * 26;
-      menuFightShots.push({ x: muzzleX, y: muzzleY, vx: Math.cos(p.angle) * 470, vy: Math.sin(p.angle) * 470,
-        owner: p.id, target: target.id, born: ts, life: .72 });
-      p.fireAt = ts + 500 + Math.random() * 340;
+      menuFightShots.push({ x: muzzleX, y: muzzleY, vx: Math.cos(p.angle) * 610, vy: Math.sin(p.angle) * 610,
+        owner: p.id, target: target.id, born: ts, life: .86 });
+      p.fireAt = ts + 340 + Math.random() * 240;
     } else if (ts >= p.fireAt) p.fireAt = ts + 120;
+
+    if (ts >= p.missileAt && targetDistance < Math.min(W, H) * .92 && targetError < .48) {
+      const mx = p.x + Math.cos(p.angle) * 34, my = p.y + Math.sin(p.angle) * 34;
+      menuFightMissiles.push({ id: ++menuFightFlareId, x: mx, y: my, angle: p.angle,
+        speed: 205, owner: p.id, target: target.id, born: ts, life: 3.8, flareTargetId: null });
+      p.missileAt = ts + 4300 + Math.random() * 2000;
+    }
+
+    const incoming = menuFightMissiles.some(m => m.target === p.id && dist(m.x, m.y, p.x, p.y) < 245);
+    if (!p.flareBurstPops && ts >= p.flareCooldownUntil && (incoming || ts >= p.flareDemoAt)) {
+      p.flareBurstPops = 3; p.flarePopAt = ts; p.flareCooldownUntil = ts + 11500;
+      p.flareDemoAt = ts + 14500 + Math.random() * 5000;
+    }
+    while (p.flareBurstPops > 0 && ts >= p.flarePopAt) {
+      // Each pair is emitted from the current wing positions, then the three
+      // paired pops roll out at short intervals like a countermeasure burst.
+      for (const side of [-1, 1]) {
+        const lx = -5, ly = side * 12;
+        const fx = p.x + Math.cos(p.angle) * lx - Math.sin(p.angle) * ly;
+        const fy = p.y + Math.sin(p.angle) * lx + Math.cos(p.angle) * ly;
+        menuFightFlares.push({ id: ++menuFightFlareId, x: fx, y: fy,
+          vx: -Math.cos(p.angle) * 78 - Math.sin(p.angle) * side * 82,
+          vy: -Math.sin(p.angle) * 78 + Math.cos(p.angle) * side * 82,
+          born: ts, owner: p.id, life: 1.35 });
+      }
+      p.flareBurstPops--; p.flarePopAt += 85;
+    }
   }
+
+  menuFightFlares = menuFightFlares.filter(f => {
+    const age = (ts - f.born) / 1000;
+    if (age > f.life) return false;
+    f.x += f.vx * dt; f.y += f.vy * dt;
+    f.vy += 16 * dt;
+    return true;
+  });
+  menuFightMissiles = menuFightMissiles.filter(m => {
+    const target = menuFightPlanes[m.target];
+    if (!target || target.respawnAt || (ts - m.born) / 1000 > m.life) return false;
+    let decoy = m.flareTargetId == null ? null : menuFightFlares.find(f => f.id === m.flareTargetId);
+    if (!decoy) {
+      m.flareTargetId = null;
+      let nearest = 190;
+      for (const flare of menuFightFlares) {
+        if (flare.owner === m.target) continue;
+        const d = dist(m.x, m.y, flare.x, flare.y);
+        if (d < nearest) { nearest = d; decoy = flare; }
+      }
+      if (decoy) m.flareTargetId = decoy.id;
+    }
+    const aimX = decoy ? decoy.x : target.x, aimY = decoy ? decoy.y : target.y;
+    const wanted = Math.atan2(aimY - m.y, aimX - m.x);
+    m.angle += clamp(angleDiff(m.angle, wanted), -2.8 * dt, 2.8 * dt);
+    m.speed = Math.min(380, m.speed + 150 * dt);
+    const oldX = m.x, oldY = m.y;
+    m.x += Math.cos(m.angle) * m.speed * dt;
+    m.y += Math.sin(m.angle) * m.speed * dt;
+    if (decoy && pointSegmentDistance(decoy.x, decoy.y, oldX, oldY, m.x, m.y) < 11) {
+      menuFightSparks.push({ x: decoy.x, y: decoy.y, born: ts, color: '#ffe6a1' });
+      return false;
+    }
+    if (!decoy && pointSegmentDistance(target.x, target.y, oldX, oldY, m.x, m.y) < 18) {
+      target.hp--; target.flashUntil = ts + 160;
+      menuFightSparks.push({ x: target.x, y: target.y, born: ts, color: '#ffbd69' });
+      if (target.hp <= 0) {
+        for (let n = 0; n < 12; n++) menuFightSparks.push({ x: target.x, y: target.y, born: ts, color: n % 2 ? '#ffbd69' : '#d9f4ff', vx: rand(-150, 150), vy: rand(-150, 150) });
+        target.respawnAt = ts + 1400;
+      }
+      return false;
+    }
+    return true;
+  });
 
   menuFightShots = menuFightShots.filter(s => {
     const age = (ts - s.born) / 1000;
@@ -4229,6 +4309,24 @@ function drawMenuDogfight(ts) {
     ctx.beginPath(); ctx.moveTo(shot.x, shot.y); ctx.lineTo(shot.x - shot.vx * .035, shot.y - shot.vy * .035); ctx.stroke();
   }
   ctx.restore();
+  for (const m of menuFightMissiles) {
+    ctx.save(); ctx.translate(m.x, m.y); ctx.rotate(m.angle);
+    const trail = ctx.createLinearGradient(-6, 0, -30, 0);
+    trail.addColorStop(0, 'rgba(255,244,190,.92)'); trail.addColorStop(.35, 'rgba(255,139,67,.75)'); trail.addColorStop(1, 'rgba(255,70,35,0)');
+    ctx.fillStyle = trail; ctx.beginPath(); ctx.moveTo(-4, -2.4); ctx.lineTo(-30, 0); ctx.lineTo(-4, 2.4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#f1f6ed'; ctx.strokeStyle = '#f5c47f'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(1, -2); ctx.lineTo(-7, -1.3); ctx.lineTo(-9, 0); ctx.lineTo(-7, 1.3); ctx.lineTo(1, 2); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+  for (const f of menuFightFlares) {
+    const age = (ts - f.born) / 1000;
+    const radius = 8 + Math.sin(ts / 45 + f.id) * 1.8;
+    const glow = ctx.createRadialGradient(f.x, f.y, 1, f.x, f.y, 24);
+    glow.addColorStop(0, 'rgba(255,255,220,.98)'); glow.addColorStop(.22, 'rgba(255,192,84,.9)'); glow.addColorStop(1, 'rgba(255,91,31,0)');
+    ctx.globalAlpha = clamp(1 - age / f.life, 0, 1); ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(f.x, f.y, radius * 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff3bf'; ctx.beginPath(); ctx.arc(f.x, f.y, 2.6, 0, Math.PI * 2); ctx.fill();
+  }
   menuFightSparks = menuFightSparks.filter(s => ts - s.born < 480);
   for (const s of menuFightSparks) {
     const age = (ts - s.born) / 1000;
@@ -4243,6 +4341,7 @@ function drawMenuDogfight(ts) {
     const flicker = ts < p.flashUntil;
     ctx.globalAlpha = flicker ? .42 : .88;
     ctx.shadowColor = p.color; ctx.shadowBlur = 15;
+    ctx.scale(.82, .82);
     drawPlaneSprite(ctx, p.color, true, true, Math.sin(p.rollPhase) * .28, false, false);
     ctx.shadowBlur = 0;
     ctx.fillStyle = '#ffbd69'; ctx.globalAlpha = .76;
@@ -4250,6 +4349,7 @@ function drawMenuDogfight(ts) {
     ctx.restore();
   }
   ctx.globalAlpha = 1;
+  ctx.restore();
   menuFightFrame = requestAnimationFrame(drawMenuDogfight);
 }
 

@@ -1,6 +1,6 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.52.2 (animated menu dogfight)
+Current build: v1.52.3 (faster menu dogfight, missiles and flares)
 
 ### v1.52.2 Animated menu dogfight
 - Added a full-screen animated background behind the main menu, using the
@@ -8,6 +8,12 @@ Current build: v1.52.2 (animated menu dogfight)
 - Four autonomous aircraft turn, pursue, exchange gunfire, show hit flashes,
   and respawn. The decorative scene is isolated from match, bot, and network
   state, and stops rendering once a sortie begins.
+
+### v1.52.3 Menu dogfight action pass
+- Increased menu fighter speed, turning rate, and gunfire cadence.
+- Added visible homing missiles and paired flare bursts that can decoy them.
+- Pulled the menu-scene camera back so the dogfight occupies a smaller,
+  easier-to-follow area of the screen.
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and
