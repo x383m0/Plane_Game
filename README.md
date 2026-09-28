@@ -1,6 +1,13 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.52.1 (Red Canyon cave system and terrain collision)
+Current build: v1.52.2 (animated menu dogfight)
+
+### v1.52.2 Animated menu dogfight
+- Added a full-screen animated background behind the main menu, using the
+  same detailed vector aircraft used in live matches.
+- Four autonomous aircraft turn, pursue, exchange gunfire, show hit flashes,
+  and respawn. The decorative scene is isolated from match, bot, and network
+  state, and stops rendering once a sortie begins.
 
 A free-for-all dogfight in the browser. One person hosts, up to seven friends
 join with a code. Fly around an open arena, shoot down opponents, respawn, and

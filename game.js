@@ -1,6 +1,6 @@
 // ================= Constants =================
 // v1.27 world scale: 20% larger than the previous 6000 x 3680 arena.
-// v1.52.1 turns Red Canyon into a lower-half cave system with solid rock.
+// v1.52.1 added the Red Canyon cave system; v1.52.2 adds the menu dogfight.
 const WORLD_W = 7200, WORLD_H = 4416;
 // The previous camera already showed 15% more world. Apply the requested
 // additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
@@ -3778,6 +3778,7 @@ function returnToMenuAfterNetworkLoss(message) {
   resetForNewSession();
   if (gameArea) gameArea.style.display = 'none';
   if (menu) menu.style.display = 'block';
+  if (!menuFightFrame) startMenuDogfight();
   if (chooseRole) chooseRole.style.display = 'flex';
   if (lobby) lobby.style.display = 'none';
   if (startBtn) startBtn.style.display = 'none';
@@ -4090,6 +4091,168 @@ function resizeCanvas() {
 // This compact silhouette is drawn at runtime, so it stays sharp, readable,
 // and easy to tint for every pilot without needing an external image asset.
 const PLANE_SPRITE_LEN = 88;
+// Decorative menu dogfight: deliberately independent of the live match
+// simulation, so menu motion can never change player, bot, or network state.
+let menuFightCanvas = null, menuFightCtx = null, menuFightFrame = 0;
+let menuFightWidth = 0, menuFightHeight = 0, menuFightDpr = 1;
+let menuFightLast = 0, menuFightPlanes = [], menuFightShots = [], menuFightSparks = [];
+let menuFightResizeWired = false;
+let menuFightVisibilityWired = false;
+const MENU_FIGHT_COLORS = ['#ff806f', '#73e0d2', '#ffd166', '#9d91ff'];
+
+function resizeMenuDogfight() {
+  if (!menuFightCanvas || !menuFightCtx) return;
+  menuFightDpr = Math.min(window.devicePixelRatio || 1, 1.35);
+  menuFightWidth = Math.max(1, window.innerWidth);
+  menuFightHeight = Math.max(1, window.innerHeight);
+  menuFightCanvas.width = Math.round(menuFightWidth * menuFightDpr);
+  menuFightCanvas.height = Math.round(menuFightHeight * menuFightDpr);
+  menuFightCtx.setTransform(menuFightDpr, 0, 0, menuFightDpr, 0, 0);
+  if (menuFightPlanes.length) {
+    menuFightPlanes.forEach((p, i) => {
+      p.x = clamp(p.nx * menuFightWidth, 45, menuFightWidth - 45);
+      p.y = clamp(p.ny * menuFightHeight, 45, menuFightHeight - 45);
+    });
+  }
+}
+
+function startMenuDogfight() {
+  menuFightCanvas = document.getElementById('menuDogfight');
+  if (!menuFightCanvas) return;
+  menuFightCanvas.style.display = 'block';
+  menuFightCtx = menuFightCanvas.getContext('2d', { alpha: true });
+  resizeMenuDogfight();
+  menuFightPlanes = MENU_FIGHT_COLORS.map((color, i) => {
+    const nx = [.12, .82, .24, .88][i], ny = [.26, .34, .78, .72][i];
+    return { id: i, color, nx, ny, x: nx * menuFightWidth, y: ny * menuFightHeight,
+      angle: [0, Math.PI, -.35, Math.PI + .35][i], speed: 105 + i * 8,
+      hp: 3, fireAt: performance.now() + 450 + i * 270, respawnAt: 0,
+      flashUntil: 0, rollPhase: i * 1.7 };
+  });
+  menuFightLast = performance.now();
+  menuFightFrame = requestAnimationFrame(drawMenuDogfight);
+  if (!menuFightResizeWired) {
+    menuFightResizeWired = true;
+    window.addEventListener('resize', resizeMenuDogfight);
+  }
+  if (!menuFightVisibilityWired) {
+    menuFightVisibilityWired = true;
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && menu && menu.style.display !== 'none' && !menuFightFrame) startMenuDogfight();
+    });
+  }
+}
+
+function drawMenuDogfight(ts) {
+  if (!menuFightCanvas || document.hidden || !menu || menu.style.display === 'none') { menuFightFrame = 0; return; }
+  const ctx = menuFightCtx, W = menuFightWidth, H = menuFightHeight;
+  const dt = clamp((ts - (menuFightLast || ts)) / 1000, 0, .045);
+  menuFightLast = ts;
+  ctx.setTransform(menuFightDpr, 0, 0, menuFightDpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Atmospheric horizon and distant cloud bands keep the action readable
+  // while leaving the existing game menu and typography in the foreground.
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, 'rgba(20,65,89,.10)');
+  sky.addColorStop(.62, 'rgba(94,161,170,.13)');
+  sky.addColorStop(1, 'rgba(230,174,111,.2)');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.globalAlpha = .18;
+  for (let i = 0; i < 5; i++) {
+    const y = H * (.18 + i * .16) + Math.sin(ts / 2600 + i) * 9;
+    const x = ((ts * (.009 + i * .002) + i * W * .29) % (W + 320)) - 160;
+    const g = ctx.createLinearGradient(x, y, x + 260, y);
+    g.addColorStop(0, 'rgba(215,240,239,0)'); g.addColorStop(.5, 'rgba(215,240,239,.65)'); g.addColorStop(1, 'rgba(215,240,239,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(x + 130, y, 150, 11 + i % 3 * 4, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+
+  for (const p of menuFightPlanes) {
+    if (p.respawnAt) {
+      if (ts >= p.respawnAt) {
+        p.nx = Math.random() < .5 ? .08 : .92; p.ny = .16 + Math.random() * .68;
+        p.x = p.nx * W; p.y = p.ny * H; p.angle = p.nx < .5 ? 0 : Math.PI;
+        p.hp = 3; p.respawnAt = 0; p.fireAt = ts + 700;
+      }
+      continue;
+    }
+    const target = menuFightPlanes[(p.id + 1) % menuFightPlanes.length];
+    if (!target || target.respawnAt) continue;
+    const dx = target.x - p.x, dy = target.y - p.y;
+    const desired = Math.atan2(dy, dx);
+    const turn = clamp(angleDiff(p.angle, desired), -1.02 * dt, 1.02 * dt);
+    p.angle += turn;
+    // A soft center bias prevents fighters disappearing behind the menu edges.
+    const cx = W * (.5 + Math.sin(ts / 5400 + p.id * 2.1) * .15);
+    const cy = H * (.5 + Math.cos(ts / 4700 + p.id * 1.6) * .2);
+    const homeAngle = Math.atan2(cy - p.y, cx - p.x);
+    if (p.x < 38 || p.x > W - 38 || p.y < 38 || p.y > H - 38) {
+      p.angle += clamp(angleDiff(p.angle, homeAngle), -1.45 * dt, 1.45 * dt);
+    }
+    const velocity = p.speed * (Math.abs(turn) > .01 ? .84 : 1);
+    p.x += Math.cos(p.angle) * velocity * dt;
+    p.y += Math.sin(p.angle) * velocity * dt;
+    p.nx = p.x / W; p.ny = p.y / H;
+    p.rollPhase += dt * (turn === 0 ? .15 : Math.sign(turn) * 1.7);
+    if (ts >= p.fireAt && dist(p.x, p.y, target.x, target.y) < Math.min(W, H) * .72 && Math.abs(angleDiff(p.angle, desired)) < .27) {
+      const muzzleX = p.x + Math.cos(p.angle) * 26, muzzleY = p.y + Math.sin(p.angle) * 26;
+      menuFightShots.push({ x: muzzleX, y: muzzleY, vx: Math.cos(p.angle) * 470, vy: Math.sin(p.angle) * 470,
+        owner: p.id, target: target.id, born: ts, life: .72 });
+      p.fireAt = ts + 500 + Math.random() * 340;
+    } else if (ts >= p.fireAt) p.fireAt = ts + 120;
+  }
+
+  menuFightShots = menuFightShots.filter(s => {
+    const age = (ts - s.born) / 1000;
+    if (age > s.life) return false;
+    const oldX = s.x, oldY = s.y;
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    const target = menuFightPlanes[s.target];
+    if (target && !target.respawnAt && pointSegmentDistance(target.x, target.y, oldX, oldY, s.x, s.y) < 15) {
+      target.hp--; target.flashUntil = ts + 110;
+      menuFightSparks.push({ x: target.x, y: target.y, born: ts, color: target.color });
+      if (target.hp <= 0) {
+        for (let n = 0; n < 9; n++) menuFightSparks.push({ x: target.x, y: target.y, born: ts, color: n % 2 ? '#ffbd69' : '#d9f4ff', vx: rand(-110, 110), vy: rand(-110, 110) });
+        target.respawnAt = ts + 1400;
+      }
+      return false;
+    }
+    return s.x > -20 && s.x < W + 20 && s.y > -20 && s.y < H + 20;
+  });
+
+  ctx.save(); ctx.lineCap = 'round';
+  for (const shot of menuFightShots) {
+    const age = (ts - shot.born) / 1000;
+    ctx.strokeStyle = 'rgba(255,222,150,' + clamp(1 - age / shot.life, 0, .9) + ')';
+    ctx.lineWidth = 2; ctx.shadowColor = '#ffc76f'; ctx.shadowBlur = 9;
+    ctx.beginPath(); ctx.moveTo(shot.x, shot.y); ctx.lineTo(shot.x - shot.vx * .035, shot.y - shot.vy * .035); ctx.stroke();
+  }
+  ctx.restore();
+  menuFightSparks = menuFightSparks.filter(s => ts - s.born < 480);
+  for (const s of menuFightSparks) {
+    const age = (ts - s.born) / 1000;
+    const x = s.x + (s.vx || 0) * age, y = s.y + (s.vy || 0) * age;
+    ctx.globalAlpha = 1 - age / .48; ctx.fillStyle = s.color;
+    ctx.beginPath(); ctx.arc(x, y, s.vx == null ? 3 + age * 8 : 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (const p of menuFightPlanes) {
+    if (p.respawnAt) continue;
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.angle);
+    const flicker = ts < p.flashUntil;
+    ctx.globalAlpha = flicker ? .42 : .88;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 15;
+    drawPlaneSprite(ctx, p.color, true, true, Math.sin(p.rollPhase) * .28, false, false);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ffbd69'; ctx.globalAlpha = .76;
+    ctx.beginPath(); ctx.arc(35, 0, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+  menuFightFrame = requestAnimationFrame(drawMenuDogfight);
+}
+
 function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = false, onFire = false) {
   const main = alive ? color : '#566875';
   const dark = alive ? '#082238' : '#273844';
@@ -5210,6 +5373,9 @@ function beginLocalGame() {
   // A duplicated start packet must not create duplicate keyboard listeners
   // or a second animation loop, both of which can make the game appear frozen.
   if (myState) return;
+  if (menuFightFrame) cancelAnimationFrame(menuFightFrame);
+  menuFightFrame = 0;
+  if (menuFightCanvas) menuFightCanvas.style.display = 'none';
   resetAllInput();
   menu.style.display = 'none'; gameArea.style.display = 'block';
   myState = createLocalState();
@@ -5332,6 +5498,7 @@ function loopFrame(ts) {
 
 // ================= Boot =================
 window.addEventListener('DOMContentLoaded', () => {
+  startMenuDogfight();
   chooseRole = document.getElementById('chooseRole');
   lobby = document.getElementById('lobby');
   menu = document.getElementById('menu');
