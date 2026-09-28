@@ -54,19 +54,19 @@ const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 const HEAT_MAX = 300, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
-// Homing missiles: a short unpowered separation drop gives the target a dodge
-// window before the motor lights and the seeker begins guiding.
+// Homing missiles: the separation phase and slower seeker give aircraft room
+// to turn away; the missile remains faster in a sustained straight chase.
 const MISSILE_INITIAL_SPEED = 760;
-const MISSILE_MAX_SPEED = 1120;
-const MISSILE_ACCELERATION = 145;
-const MISSILE_LAUNCH_COAST_MS = 420;
+const MISSILE_MAX_SPEED = 1000;
+const MISSILE_ACCELERATION = 125;
+const MISSILE_LAUNCH_COAST_MS = 550;
 const MISSILE_COAST_MIN_SPEED = 180, MISSILE_COAST_MAX_SPEED = 520;
-const MISSILE_COAST_GRAVITY = 240, MISSILE_BOOST_START_SPEED = 620;
-const MISSILE_SEEKER_RANGE = 3200, MISSILE_SEEKER_CONE = 1.18;
-const MISSILE_TARGET_MEMORY_MS = 550;
-const MISSILE_TURN_RATE = 5.4, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
+const MISSILE_COAST_GRAVITY = 240, MISSILE_BOOST_START_SPEED = 560;
+const MISSILE_SEEKER_RANGE = 2800, MISSILE_SEEKER_CONE = 1.05;
+const MISSILE_TARGET_MEMORY_MS = 240;
+const MISSILE_TURN_RATE = 1.1, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
 const MISSILE_LOCK_DELAY = 1000;  // continuous facing time required for a lock
-const MISSILE_LOCK_HOLD_MS = 2000; // completed lock remains usable this long
+const MISSILE_LOCK_SYNC_GRACE_MS = 150; // brief packet grace; aim still has to remain on target
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = Infinity, MISSILE_LOCK_CONE = Math.PI / 3;
 const MISSILE_MAX = 4, MISSILE_REGEN_MS = 5000, MISSILE_COOLDOWN = 900;
 const BOMB_SPEED = 240, BOMB_GRAVITY = 420, BOMB_LIFE = 2200, BOMB_DAMAGE = 82;
@@ -105,6 +105,7 @@ const NETWORK_BULLETS_PER_SNAPSHOT = 48; // nearby bullet corrections; spawns/im
 const SOUND_MAX_DISTANCE = 1400 * WORLD_SCALE;  // world units; sounds beyond this are silent
 const CLOUD_COUNT = 45;
 const CLOUD_MIN_RADIUS = 22, CLOUD_MAX_RADIUS = 148;
+const CLOUD_FORM_COUNT = 4;
 const CLOUD_BANK_COUNT = 4;
 const MAP_THEMES = {
   city: { label: 'NEON CITY', cloudBanks: 4 },
@@ -503,6 +504,11 @@ function proximityVolume(x, y, baseVolume) {
   const near = 1 - distance / SOUND_MAX_DISTANCE;
   return baseVolume * near * near;
 }
+function addVisibleScreenShake(x, y, amount) {
+  if (!myState || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(amount) || amount <= 0) return;
+  if (!isInPlayerVision({ x, y })) return;
+  screenShake = Math.max(screenShake, amount);
+}
 function tone(freq, duration, volume, type = 'sine', slide = 0) {
   if (!audioCtx || !masterGain) return;
   const t = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
@@ -577,9 +583,9 @@ function playMissileLaunchSound(x = null, y = null) {
 }
 function playExplosionSound(kind, x, y) {
   if (kind === 'blast' || kind === 'crash' || kind === 'shock') {
-    const volume = proximityVolume(x, y, kind === 'crash' ? .42 : .3);
+    const volume = proximityVolume(x, y, kind === 'crash' ? .22 : .3);
     if (volume <= .005) return;
-    if (!playAsset('explosion', volume, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, volume * .34, 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, volume * .29, 'sine', -34); }
+    if (!playAsset('explosion', volume, kind === 'crash' ? .88 : 1)) { noiseBurst(kind === 'crash' ? .5 : .32, volume * (kind === 'crash' ? .18 : .34), 'lowpass', 240); tone(kind === 'crash' ? 42 : 58, .52, volume * (kind === 'crash' ? .16 : .29), 'sine', -34); }
   } else if (kind === 'spark') {
     const volume = proximityVolume(x, y, .2);
     if (volume > .005) playAsset('impact', volume, 1.08);
@@ -994,7 +1000,7 @@ function triggerSonicBoom(x, y, angle, speed = HIGH_SPEED_THRESHOLD) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   specialEffects.push(new SonicBoomEffect(x, y, angle));
   spawnSonicWaterWave(x, y, Number.isFinite(angle) ? angle : 0, Number.isFinite(speed) ? speed : HIGH_SPEED_THRESHOLD);
-  screenShake = Math.max(screenShake, 12);
+  addVisibleScreenShake(x, y, 12);
   playSonicBoomSound(x, y);
 }
 
@@ -1014,7 +1020,8 @@ function spawnExplosion(x, y, kind, angle = -Math.PI / 2) {
   if (kind === 'blast' || kind === 'crash' || kind === 'planeWater') playExplosionSound(kind === 'planeWater' ? 'crash' : kind, x, y);
   else if (kind === 'spark' || kind === 'water') playExplosionSound('spark', x, y);
   else if (kind !== 'water') playExplosionSound(kind, x, y);
-  if (kind === 'blast' || kind === 'crash' || kind === 'planeWater' || kind === 'shock') screenShake = Math.max(screenShake, kind === 'crash' || kind === 'planeWater' ? 22 : 11);
+  if (kind === 'blast' || kind === 'crash' || kind === 'planeWater' || kind === 'shock')
+    addVisibleScreenShake(x, y, kind === 'crash' || kind === 'planeWater' ? 22 : 11);
 }
 function pruneExplosions(now) {
   for (let i = explosions.length - 1; i >= 0; i--) {
@@ -1300,7 +1307,7 @@ class WaterWeaponImpactEffect {
   beginBlast() {
     this.phase = 'blast'; this.blastAge = 0;
     playExplosionSound('blast', this.x, this.y);
-    screenShake = Math.max(screenShake, 5);
+    addVisibleScreenShake(this.x, this.y, 5);
     this.rings = [0, .07, .18].map((delay, i) => ({ delay, life: 0, maxLife: .95, maxR: 42 + i * 8 + Math.random() * 8 }));
     for (let i = 0; i < 42; i++) {
       const a = -Math.PI / 2 + (Math.random() - .5) * 2.5;
@@ -1414,10 +1421,17 @@ function buildClouds() {
   const cloudTop = mapId === 'canyon' ? 1800 * WORLD_SCALE : GROUND_Y - 40 * WORLD_SCALE;
   for (let i = 0; i < CLOUD_COUNT; i++) {
     const rx = rand(CLOUD_MIN_RADIUS, CLOUD_MAX_RADIUS) * WORLD_SCALE;
+    const form = Math.floor(rand(0, CLOUD_FORM_COUNT));
+    const aspect = form === 0 ? rand(.12, .23) : form === 1 ? rand(.48, .78) :
+      form === 2 ? rand(.22, .38) : rand(.28, .58);
+    const alpha = form === 0 ? rand(.035, .085) : form === 1 ? rand(.07, .16) :
+      form === 2 ? rand(.05, .13) : rand(.03, .095);
     clouds.push({
       x: rand(0, WORLD_W), y: rand(0, cloudTop),
-      rx, ry: rx * rand(.28, .58), a: rand(.045, .16),
-      lobe: rand(.28, .52), tilt: rand(-.12, .12)
+      rx, ry: rx * aspect, a: alpha,
+      lobe: rand(.28, .52), tilt: rand(-.12, .12), form,
+      puffCount: Math.floor(rand(3, 7)), seed: rand(0, Math.PI * 2),
+      tint: Math.floor(rand(0, 3))
     });
   }
   // Each arena gets a deliberate route through its concealment zones. The
@@ -2211,7 +2225,7 @@ function detonateBomb(b, surface = null) {
   if (waterHit) spawnWaterWeaponImpact(b.x, burstY, 'bomb');
   else spawnExplosion(b.x, burstY, 'bomb');
   if (!waterHit) playExplosionSound('blast', b.x, burstY);
-  screenShake = Math.max(screenShake, waterHit ? 3 : 9);
+  addVisibleScreenShake(b.x, burstY, waterHit ? 3 : 9);
   spawnBombShrapnel(b.x, burstY, b.ownerId);
   if (isHost) broadcast({ type: 'impact', from: b.ownerId, kind: 'bomb', id: b.id, x: b.x, y: burstY,
     surface: waterHit ? 'water' : surface === 'rock' ? 'rock' : null });
@@ -2360,21 +2374,19 @@ function updateMissileLock(dtSec) {
     return;
   }
 
-  // A completed lock remains valid for a short launch window, even if the
-  // player stops looking directly at the target.
-  if (missileLockTargetId != null && now < missileLockExpiresAt) {
+  // Keep a completed lock only while the pilot continues facing that exact
+  // aircraft. The short expiry is only a network snapshot grace period.
+  if (missileLockTargetId != null) {
     const locked = players[missileLockTargetId];
-    if (!locked || locked.alive === false || locked.connected === false) {
+    if (!locked || locked.alive === false || locked.connected === false ||
+        findMissileLockTarget(true) !== missileLockTargetId) {
       missileLockTargetId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
     } else {
       missileLockProgress = 1;
+      missileLockExpiresAt = now + MISSILE_LOCK_SYNC_GRACE_MS;
       return;
     }
   }
-  if (missileLockTargetId != null && now >= missileLockExpiresAt) {
-    missileLockTargetId = null; missileLockProgress = 0; missileLockExpiresAt = 0;
-  }
-
   const hintId = findMissileLockTarget(false);
   const targetId = findMissileLockTarget(true);
   missileLockCandidateId = hintId;
@@ -2392,7 +2404,7 @@ function updateMissileLock(dtSec) {
   if (missileLockProgress >= 1) {
     missileLockTargetId = targetId;
     missileLockAcquireId = null;
-    missileLockExpiresAt = now + MISSILE_LOCK_HOLD_MS;
+    missileLockExpiresAt = now + MISSILE_LOCK_SYNC_GRACE_MS;
   }
 }
 
@@ -2418,7 +2430,7 @@ function fireMissileFor(state, ownerId, targetId = null, replicate = false) {
   };
   missiles.push(m);
   spawnExplosion(m.x, m.y, 'launch');
-  playMissileLaunchSound(m.x, m.y); screenShake = Math.max(screenShake, ownerId === myId ? 7 : 3);
+  playMissileLaunchSound(m.x, m.y); addVisibleScreenShake(m.x, m.y, ownerId === myId ? 7 : 3);
   if (replicate) {
     const packet = { type: 'missile', id: m.id, targetId, x: m.x, y: m.y, angle: m.angle,
       speed: m.speed, coastSpeed: m.coastSpeed, coastRemaining: MISSILE_LAUNCH_COAST_MS,
@@ -2437,7 +2449,8 @@ function tryFireMissile() {
   // Releasing before the lock completes still fires, but the missile is
   // dumb/unguided. A completed facing lock is the only thing that grants a
   // target and homing behavior.
-  const targetId = missileLockTargetId != null && missileLockExpiresAt > performance.now() ? missileLockTargetId : null;
+  const targetId = missileLockTargetId != null && missileLockExpiresAt > performance.now() &&
+    findMissileLockTarget(true) === missileLockTargetId ? missileLockTargetId : null;
   fireMissileFor(myState, myId, targetId, true);
 }
 
@@ -2646,7 +2659,7 @@ function updateMissiles(dtSec) {
       const hitX = startX + (endX - startX) * t;
       const hitY = waterSurfaceY(hitX);
       spawnWaterWeaponImpact(hitX, hitY, 'missile', m.angle);
-      screenShake = Math.max(screenShake, 3);
+      addVisibleScreenShake(hitX, hitY, 3);
       if (isHost) broadcast({ type: 'impact', from: m.ownerId, kind: 'missile', id: m.id,
         x: hitX, y: hitY, surface: 'water' });
       removeProjectileLocal('missile', m.id);
@@ -2989,12 +3002,14 @@ function findHostLockTarget(p) {
 
 function updateHostLock(p, dtSec) {
   const now = performance.now();
-  if (p.hostLockTargetId != null && p.hostLockExpiresAt > now) {
+  if (p.hostLockTargetId != null) {
     const heldTarget = players[p.hostLockTargetId];
-    if (heldTarget && heldTarget.alive !== false && heldTarget.connected !== false) {
-      // A completed lock is held even after the pilot looks away. Do not
-      // refresh the timer every frame; it must genuinely expire.
+    if (heldTarget && heldTarget.alive !== false && heldTarget.connected !== false &&
+        findHostLockTarget(p) === p.hostLockTargetId) {
+      // Keep a completed lock only while the authoritative aircraft angle
+      // still points at the same target. Refresh this short network grace.
       p.hostLockProgress = MISSILE_LOCK_DELAY;
+      p.hostLockExpiresAt = now + MISSILE_LOCK_SYNC_GRACE_MS;
       return;
     }
     p.hostLockTargetId = null; p.hostLockProgress = 0; p.hostLockExpiresAt = 0;
@@ -3012,7 +3027,7 @@ function updateHostLock(p, dtSec) {
   }
   p.hostLockProgress = clamp(p.hostLockProgress + dtSec * 1000, 0, MISSILE_LOCK_DELAY);
   if (p.hostLockProgress >= MISSILE_LOCK_DELAY && p.hostLockExpiresAt <= now) {
-    p.hostLockExpiresAt = now + MISSILE_LOCK_HOLD_MS;
+    p.hostLockExpiresAt = now + MISSILE_LOCK_SYNC_GRACE_MS;
   }
 }
 
@@ -3482,7 +3497,8 @@ function handleClientAction(fromId, data) {
       if (p.heat >= HEAT_MAX) p.overheated = true;
     }
   } else if (action.type === 'missile') {
-    const lockedTarget = p.hostLockExpiresAt > performance.now() ? p.hostLockTargetId : null;
+    const lockedTarget = p.hostLockExpiresAt > performance.now() &&
+      findHostLockTarget(p) === p.hostLockTargetId ? p.hostLockTargetId : null;
     fireMissileFor(p, p.id, lockedTarget, true);
   } else if (action.type === 'bomb') {
     dropBombFor(p, p.id, true);
@@ -5386,7 +5402,7 @@ function drawCrosshair(ctx, now, camX, camY, viewScale) {
     const progress = hasLock ? 1 : clamp(missileLockProgress, 0, 1);
     const hint = !hasLock && missileLockAcquireId == null && !missileLockCandidateAligned;
     const label = hasLock
-      ? 'LOCKED ' + Math.max(0, (missileLockExpiresAt - now) / 1000).toFixed(1) + 's'
+      ? 'LOCKED'
       : hint ? 'ALIGN TO LOCK' : 'LOCKING ' + Math.round(progress * 100) + '%';
     drawLockReticle(ctx, x, y, progress, hasLock, now, label, hint);
   }
@@ -5541,17 +5557,63 @@ function render(now) {
     if (c.x < camX - c.rx * 1.5 || c.x > camX + viewW + c.rx * 1.5 ||
         c.y < camY - c.ry * 2 || c.y > camY + viewH + c.ry * 2) return;
     ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.tilt);
+    const form = Number.isFinite(c.form) ? c.form : 1;
+    const palettes = [
+      ['245,252,255', '208,229,239', '180,211,228'],
+      ['255,253,248', '216,232,240', '179,211,229'],
+      ['224,243,248', '191,219,232', '165,199,216']
+    ];
+    const tint = Number.isFinite(c.tint) ? Math.floor(c.tint) % palettes.length : 0;
+    const palette = palettes[tint];
     const cloud = ctx.createRadialGradient(-c.rx * .12, -c.ry * .2, c.ry * .08, 0, 0, c.rx);
-    cloud.addColorStop(0, `rgba(245,252,255,${c.a})`);
-    cloud.addColorStop(.58, `rgba(208,229,239,${c.a * .66})`);
-    cloud.addColorStop(1, 'rgba(180,211,228,0)');
+    cloud.addColorStop(0, `rgba(${palette[0]},${c.a})`);
+    cloud.addColorStop(.58, `rgba(${palette[1]},${c.a * .66})`);
+    cloud.addColorStop(1, `rgba(${palette[2]},0)`);
     ctx.fillStyle = cloud;
     ctx.beginPath(); ctx.ellipse(0, 0, c.rx, c.ry, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = `rgba(247,252,255,${c.a * .34})`;
-    ctx.beginPath();
-    ctx.ellipse(-c.rx * .2, -c.ry * .08, c.rx * c.lobe, c.ry * .72, 0, 0, Math.PI * 2);
-    ctx.ellipse(c.rx * .28, c.ry * .04, c.rx * c.lobe * .78, c.ry * .62, 0, 0, Math.PI * 2);
-    ctx.fill(); ctx.restore();
+    ctx.fillStyle = `rgba(250,253,255,${c.a * (form === 1 ? .46 : .3)})`;
+    if (form === 0) {
+      // Thin, wind-stretched cirrus streaks.
+      for (let i = 0; i < 3; i++) {
+        const offset = i - 1;
+        const wave = Math.sin((c.seed || 0) + i * 1.9);
+        ctx.beginPath();
+        ctx.ellipse(offset * c.rx * .16, wave * c.ry * .18,
+          c.rx * (.42 - i * .035), Math.max(1, c.ry * (.12 + i * .018)), wave * .05, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (form === 1) {
+      // Tall cumulus crowns with individually varied lobes.
+      const count = Math.max(3, c.puffCount || 4);
+      for (let i = 0; i < count; i++) {
+        const t = count === 1 ? 0 : i / (count - 1) - .5;
+        const wave = Math.sin((c.seed || 0) + i * 1.7);
+        const puffRx = c.rx * (.16 + .055 * (1 + wave));
+        const puffRy = c.ry * (.37 + .09 * Math.cos((c.seed || 0) + i * 2.1));
+        ctx.beginPath();
+        ctx.ellipse(t * c.rx * .92, -c.ry * (.07 + .08 * Math.cos((c.seed || 0) + i)), puffRx, puffRy, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (form === 2) {
+      // Broad, stacked stratocumulus layers.
+      ctx.beginPath();
+      ctx.ellipse(-c.rx * .1, -c.ry * .2, c.rx * .73, c.ry * .28, -.04, 0, Math.PI * 2);
+      ctx.ellipse(c.rx * .12, c.ry * .13, c.rx * .86, c.ry * .3, .025, 0, Math.PI * 2);
+      ctx.ellipse(c.rx * .34, -c.ry * .02, c.rx * .36, c.ry * .22, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Broken, separated puffs leave more sky visible through the cloud.
+      const count = Math.max(3, c.puffCount || 4);
+      for (let i = 0; i < count; i++) {
+        const t = count === 1 ? 0 : i / (count - 1) - .5;
+        const wave = Math.sin((c.seed || 0) + i * 2.4);
+        ctx.beginPath();
+        ctx.ellipse(t * c.rx * 1.05, wave * c.ry * .23,
+          c.rx * (.13 + .045 * Math.cos((c.seed || 0) + i)), c.ry * (.25 + .08 * wave), 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
   });
 
   drawSkyBackdrop(ctx, camX, camY, viewW, viewH);

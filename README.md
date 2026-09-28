@@ -1,6 +1,23 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.53.2 (staged missiles and smarter flare counterplay)
+Current build: v1.53.4 (clouds, camera shake, and facing lock)
+
+### v1.53.4 Cloud and combat feedback pass
+- Added four cloud silhouettes with varied height, shape, puff spacing, and
+  subtle color tones without increasing the existing cloud count.
+- Explosion, sonic-boom, bomb, and missile-launch shake now affects the camera
+  only when that effect is within the player's view.
+- A missile lock stays active only while the pilot keeps facing the same
+  aircraft. The short network grace is 0.15 seconds to cover snapshot delay.
+- Lowered the water-crash and aircraft-crash sound level by about half.
+
+### v1.53.3 Missile dodgeability pass
+- Reduced missile turning from 5.4 to 1.1 rad/s, below the plane's normal
+  turn limit, so a sharp maneuver can make the seeker lose its target.
+- Extended the unpowered launch and drop phase to 0.55 seconds, lowered the
+  boost speed and top speed, and shortened seeker range and target memory.
+- Kept the one-second lock, two-second lock hold, aircraft-priority targeting,
+  and flare diversion rules unchanged.
 
 ### v1.53.2 Missile launch and seeker pass
 - Reworked the missile as a slender guided rocket with a forward seeker nose,
