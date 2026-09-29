@@ -1,6 +1,31 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.53.4 (clouds, camera shake, and facing lock)
+Current build: v1.53.7 (storm visibility and expanded canyon)
+
+### v1.53.7 Storm visibility and canyon routes
+- Storm weather now reduces practical sight range: distant aircraft fade into
+  blue-gray haze and cannot be acquired by missile lock beyond the same range.
+  Radar remains available for navigation.
+- Red Canyon now has a taller, wider-feeling lower cavern with staggered rock
+  bulkheads, tight upper and lower lanes, connecting chambers, and solid rock
+  walls at the cave map edges. Cave wall rendering and collisions share the
+  same openings; there is no water or boundary fog inside the cavern.
+
+### v1.53.6 Evasive flare guidance
+- A visible flare diverts a missile only after its target holds a sharp turn
+  (1.05 rad/s or faster) for 180 ms. If the plane is flying steadily, the
+  seeker ignores the flare and continues tracking the aircraft.
+- Host snapshots now include turn rate so the seeker evaluates the same
+  maneuver state in multiplayer.
+
+### v1.53.5 Weapon and controls patch
+- Rebuilt the A-10 firing clip as a long seamless loop so sustained cannon fire
+  does not audibly restart after each short recording.
+- Missiles now recognize a visible flare even while they can still see the
+  aircraft. Flares stay active longer and can divert seekers across a wider
+  radius; missiles turn and accelerate more strongly, so evasive turns matter.
+- Removed the in-game log panel, log capture/export controls, and the R-key
+  test death/reset binding.
 
 ### v1.53.4 Cloud and combat feedback pass
 - Added four cloud silhouettes with varied height, shape, puff spacing, and
@@ -272,9 +297,8 @@ damage once and clients only render the replicated impact.
 - The joiner respawn display uses the host's remaining countdown, translated
   to the local clock. An absolute host `performance.now()` value is never
   treated as the joiner's timestamp.
-- F2 diagnostics now show input and action acknowledgements from the host.
-  If TX advances but an ACK does not, the channel is delayed or blocked. If
-  both advance but movement/weapon effects do not, inspect host simulation.
+- Earlier builds showed input and action acknowledgements in the diagnostics
+  panel; that panel was removed in v1.53.5.
 
 ### v1.48.8 smooth multiplayer flight
 
@@ -286,10 +310,10 @@ damage once and clients only render the replicated impact.
   Newer host state smooths out any difference while the host remains in charge
   of movement, collisions, and weapons. Out-of-order position packets cannot
   rewind the plane.
-- F2 diagnostics identify whether the fast link is connected and how long it
-  has been since a fast state packet arrived. A silent fast link falls back to
-  reliable input after three seconds and reconnects. Both host and joiner need
-  this version for the new link to open.
+- Earlier builds exposed fast-link state in the diagnostics panel, removed in
+  v1.53.5. A silent fast link still falls back to reliable input after three
+  seconds and reconnects. Both host and joiner need this version for the new
+  link to open.
 
 ### v1.48.9 multiplayer gun muzzle alignment
 
@@ -378,12 +402,7 @@ damage once and clients only render the replicated impact.
 - Both maps use fixed world-space scenery and concealment layouts on every
   client. Storm remains over the shared flat-water arena.
 
-## Diagnostics and known limitations
-- Click **LOGS** at any time, or press **F2**, to open the local diagnostics
-  console. It shows
-  the PeerJS connection, last network activity, input sequence/age, player
-  coordinates, and runtime errors. **Copy Log** or **Download** can be used to
-  send the report for troubleshooting; logs stay on the current device.
+## Known limitations
 - The host now repairs incomplete remote player state, advances joiners through
   normal flight and gravity, and keeps the falling/crashing state authoritative.
   Remote crashes can also be finished by a confirmed bullet hit instead of

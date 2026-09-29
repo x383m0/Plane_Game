@@ -4,9 +4,10 @@ The current audio pass is intentionally modular so individual sounds can be
 replaced later without changing game logic.
 
 Gun sound:
-- a10-gun-burst.ogg -> a 0.98-second excerpt (source time 0.43–1.41 s) from
-  the user-supplied BRRRRRRT.wav, covering the initial A-10 cannon firing
-  burst. It loops only while gunfire is active.
+- a10-gun-burst.ogg -> an approximately 0.98-second excerpt (source time
+  0.43–1.41 s) from the user-supplied BRRRRRRT.wav, crossfaded into an
+  approximately 7.18-second seamless loop for sustained cannon fire. Playback
+  stops shortly after gunfire ends.
 
 Flight audio remains disabled: no engine, boost, or flyby sound is loaded.
 

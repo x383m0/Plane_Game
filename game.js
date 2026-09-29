@@ -54,17 +54,19 @@ const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
 const HEAT_MAX = 300, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
 const OVERHEAT_RESET_FRAC = 0.1;  // must cool back down to 10% heat before firing again
 
-// Homing missiles: the separation phase and slower seeker give aircraft room
-// to turn away; the missile remains faster in a sustained straight chase.
+// Homing missiles should demand a countermeasure or a committed evasive turn,
+// while still leaving room for a sharp maneuver to break seeker tracking.
 const MISSILE_INITIAL_SPEED = 760;
-const MISSILE_MAX_SPEED = 1000;
+const MISSILE_MAX_SPEED = 1080;
 const MISSILE_ACCELERATION = 125;
 const MISSILE_LAUNCH_COAST_MS = 550;
 const MISSILE_COAST_MIN_SPEED = 180, MISSILE_COAST_MAX_SPEED = 520;
 const MISSILE_COAST_GRAVITY = 240, MISSILE_BOOST_START_SPEED = 560;
-const MISSILE_SEEKER_RANGE = 2800, MISSILE_SEEKER_CONE = 1.05;
-const MISSILE_TARGET_MEMORY_MS = 240;
-const MISSILE_TURN_RATE = 1.1, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
+const MISSILE_SEEKER_RANGE = 3200, MISSILE_SEEKER_CONE = 1.15;
+const MISSILE_TARGET_MEMORY_MS = 360;
+const MISSILE_TURN_RATE = 1.5, MISSILE_LIFE = 4200, MISSILE_DAMAGE = 55;
+const MISSILE_DODGE_TURN_THRESHOLD = 1.05;
+const MISSILE_DODGE_HOLD_MS = 180;
 const MISSILE_LOCK_DELAY = 1000;  // continuous facing time required for a lock
 const MISSILE_LOCK_SYNC_GRACE_MS = 150; // brief packet grace; aim still has to remain on target
 const MISSILE_HIT_RADIUS = 36, MISSILE_LOCK_RANGE = Infinity, MISSILE_LOCK_CONE = Math.PI / 3;
@@ -77,10 +79,10 @@ const SHRAPNEL_GRAVITY = 120, SHRAPNEL_LIFE = 800, SHRAPNEL_DAMAGE = 18, SHRAPNE
 const WATER_WEAPON_DETONATION_DELAY = 1.1;
 const MAX_ACTIVE_WATER_WEAPON_EFFECTS = 24;
 
-// Flares can divert a missile when the seeker sees the flare but loses sight
-// of the aircraft. If both are visible, the seeker prefers the aircraft.
+// A seeker only accepts flares after its target commits to a sharp evasive
+// turn. Steady flight keeps the missile focused on the aircraft.
 const FLARE_MAX = 3, FLARE_REGEN_MS = 7000, FLARE_MIN_INTERVAL = 400;
-const FLARE_BREAK_RADIUS = 320, FLARE_ACTIVE_MS = 1400, FLARE_SALVO_COUNT = 6;
+const FLARE_BREAK_RADIUS = 560, FLARE_ACTIVE_MS = 1900, FLARE_SALVO_COUNT = 6;
 const FLARE_SPAWN_INTERVAL_MS = 200; // delay between each two-sided flare wave
 const CRITICAL_HEALTH_FRACTION = 0.30; // start the attached fire trail below 30% HP
 // Near-water wake tuning. The wake is visual/audio only; it never changes
@@ -137,6 +139,9 @@ const MAP_PALETTES = {
   storm: ['#050b18', '#152a43', '#466f86'],
   islands: ['#082031', '#1b6173', '#80c4bd']
 };
+// Squall haze limits practical target visibility and seeker acquisition while
+// leaving the storm radar useful for navigation.
+const STORM_VISIBILITY_RANGE = 760 * WORLD_SCALE;
 
 // Red Canyon is split into open sky above and a connected cave network below.
 // Each profile node stores the roof's outside edge, its cave-side ceiling,
@@ -150,7 +155,10 @@ const CANYON_CAVE_PROFILE = [
   [4800, 2080, 2480, 3980], [5400, 1940, 2360, 4080],
   [6000, 2100, 2510, 4140], [6600, 2190, 2580, 4050],
   [7200, 1990, 2390, 4010]
-].map(([x, surface, ceiling, floor]) => [x * WORLD_SCALE, surface * WORLD_SCALE, ceiling * WORLD_SCALE, floor * WORLD_SCALE]);
+].map(([x, surface, ceiling, floor]) => [
+  x * WORLD_SCALE, (surface - 100) * WORLD_SCALE,
+  (ceiling - 220) * WORLD_SCALE, (floor + 100) * WORLD_SCALE
+]);
 const CANYON_CAVE_ENTRANCES = [[520, 1040], [2920, 3480], [5500, 6100]]
   .map(([left, right]) => [left * WORLD_SCALE, right * WORLD_SCALE]);
 // x, attachment edge, half-width, intrusion length, tip offset. These are
@@ -163,6 +171,22 @@ const CANYON_CAVE_SPIRES = [
   [5050, 'ceiling', 100, 415, 25], [5630, 'floor', 72, 330, -20],
   [6260, 'ceiling', 90, 380, 10], [6860, 'floor', 92, 410, -22]
 ].map(([x, edge, width, length, offset]) => [x * WORLD_SCALE, edge, width * WORLD_SCALE, length * WORLD_SCALE, offset * WORLD_SCALE]);
+// Rock cross-walls divide the lower cavern into a larger, tighter route
+// network. Each wall leaves two staggered openings; the changing openings
+// create upper and lower branches that reconnect in the chambers between.
+// Opening heights are fractions of the local ceiling-to-floor distance.
+const CANYON_CAVE_BULKHEADS = [
+  [760, 50, [[.08, .31], [.67, .92]]],
+  [1510, 58, [[.34, .61], [.76, .96]]],
+  [2290, 52, [[.05, .28], [.57, .83]]],
+  [3090, 62, [[.27, .54], [.72, .96]]],
+  [3910, 54, [[.06, .32], [.63, .88]]],
+  [4740, 64, [[.36, .63], [.78, .97]]],
+  [5550, 52, [[.04, .29], [.58, .84]]],
+  [6370, 62, [[.28, .55], [.73, .96]]],
+  [7040, 48, [[.07, .33], [.65, .91]]]
+].map(([x, halfWidth, openings]) => [x * WORLD_SCALE, halfWidth * WORLD_SCALE, openings]);
+const CANYON_END_WALL_THICKNESS = 90 * WORLD_SCALE;
 const CANYON_PLANE_COLLISION_RADIUS = 36;
 
 // Visual-only effects: short-lived radial bursts drawn at an (x,y) for a
@@ -236,12 +260,6 @@ let activeMapId = 'city';
 let localFlareScheduleGeneration = 0;
 const seenImpactKeys = new Set();
 let lastNetworkActivityAt = 0;
-const DEBUG_LOG_LIMIT = 300;
-let debugLogs = [];
-let debugPanelEl, debugSummaryEl, debugLogEl, debugActionStatusEl, debugToggleEl;
-let debugPanelOpen = false;
-let lastDebugRenderAt = 0;
-let lastDebugNoConnectionLogAt = 0;
 
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
@@ -345,7 +363,17 @@ function canyonCircleHitsTriangle(x, y, radius, triangle) {
 function canyonPointHitsWall(x, y) {
   const profile = canyonProfileAt(x);
   if (y >= profile.floorY) return true;
-  return !canyonIsEntrance(x) && y >= profile.surfaceY && y <= profile.ceilingY;
+  if (!canyonIsEntrance(x) && y >= profile.surfaceY && y <= profile.ceilingY) return true;
+  if (y >= profile.ceilingY &&
+      (x <= CANYON_END_WALL_THICKNESS || x >= WORLD_W - CANYON_END_WALL_THICKNESS)) return true;
+  for (const [wallX, halfWidth, openings] of CANYON_CAVE_BULKHEADS) {
+    if (Math.abs(wallX - x) > halfWidth) continue;
+    const height = profile.floorY - profile.ceilingY;
+    const open = openings.some(([top, bottom]) =>
+      y >= profile.ceilingY + height * top && y <= profile.ceilingY + height * bottom);
+    if (!open && y >= profile.ceilingY && y <= profile.floorY) return true;
+  }
+  return false;
 }
 
 function canyonPositionCollides(x, y, radius = CANYON_PLANE_COLLISION_RADIUS) {
@@ -1077,122 +1105,6 @@ function setNetworkStatus(text, tone = 'ok') {
   networkStatusEl.dataset.tone = tone;
 }
 
-// ================= In-game diagnostics =================
-// The diagnostics console is intentionally local-only. It never sends log
-// contents over PeerJS; it records enough connection/input state to explain
-// issues such as a joiner not sending input or the host rejecting snapshots.
-function debugDetails(details) {
-  if (details == null) return '';
-  if (typeof details === 'string') return ' // ' + details;
-  try { return ' // ' + JSON.stringify(details); } catch (_) { return ' // [details unavailable]'; }
-}
-
-function debugLog(category, message, details = null) {
-  const stamp = new Date().toISOString().slice(11, 23);
-  const line = `[${stamp}] ${String(category).toUpperCase()} ${message}${debugDetails(details)}`;
-  debugLogs.push(line);
-  if (debugLogs.length > DEBUG_LOG_LIMIT) debugLogs.splice(0, debugLogs.length - DEBUG_LOG_LIMIT);
-  console.info('[Wings Arena]', line);
-  if (debugPanelOpen) renderDebugPanel();
-}
-
-function debugConnectionState() {
-  if (isHost) {
-    const open = Object.values(connections).filter(c => c && c.open).length;
-    return `HOST // ${open} client connection(s)`;
-  }
-  const conn = connections.host;
-  return `CLIENT // ${conn && conn.open ? 'host connected' : 'host disconnected'}`;
-}
-
-function debugSummaryText() {
-  const now = performance.now();
-  const local = myState && Number.isFinite(myState.x) && Number.isFinite(myState.y)
-    ? `x=${Math.round(myState.x)} y=${Math.round(myState.y)} speed=${Math.round(myState.speed || 0)} hp=${Math.round(myState.health || 0)}`
-    : 'not spawned';
-  const lines = [
-    `ROLE: ${botMode ? 'SKIRMISH' : isHost ? 'HOST' : 'JOINER'}   ROOM: ${peer?.id || 'none'}`,
-    `LINK: ${debugConnectionState()}   LAST RX: ${lastNetworkActivityAt ? Math.round(now - lastNetworkActivityAt) + 'ms ago' : 'none'}`,
-    `LOCAL: ${local}`,
-    `INPUT TX: seq=${clientInputSeq} last=${lastClientInputSend ? Math.round(now - lastClientInputSend) + 'ms ago' : 'never'}`,
-    `OBJECTS: players=${Object.keys(players).length} bullets=${bullets.length} missiles=${missiles.length} bombs=${bombs.length}`
-  ];
-  if (isHost) {
-    const remoteInputs = Object.values(players)
-      .filter(p => !samePlayerId(p.id, myId) && p.connected !== false)
-      .map(p => {
-        const age = p.networkInputAt ? Math.round(now - p.networkInputAt) + 'ms' : 'never';
-        const state = Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.speed)
-          ? `x=${Math.round(p.x)} y=${Math.round(p.y)} v=${Math.round(p.speed)}` : 'INVALID STATE';
-        return `${p.name || 'Player ' + (p.id + 1)}#${p.id}: input=${p.networkInputSeq || 0} age=${age} ${state}`;
-      });
-    lines.push('REMOTE INPUTS: ' + (remoteInputs.length ? remoteInputs.join(' | ') : 'none'));
-  } else {
-    const backlog = Number(connections.host?.dataChannel?.bufferedAmount);
-    lines.push(`HOST SNAPSHOT: ${myState ? 'received' : 'waiting'}   input ack=${lastHostInputAck}/${clientInputSeq}   action ack=${lastHostActionAck}/${clientActionSeq}`);
-    lines.push(`FLIGHT LINK: ${connections.realtime?.open ? 'fast connected' : 'reliable fallback'}   last fast RX=${lastRealtimeRxAt ? Math.round(now - lastRealtimeRxAt) + 'ms ago' : 'never'}`);
-    if (Number.isFinite(backlog)) lines.push(`OUTBOUND QUEUE: ${Math.round(backlog / 1024)} KiB`);
-  }
-  return lines.join('\n');
-}
-
-function renderDebugPanel() {
-  if (!debugPanelEl || !debugSummaryEl || !debugLogEl) return;
-  debugSummaryEl.textContent = debugSummaryText();
-  debugLogEl.textContent = debugLogs.length ? debugLogs.join('\n') : 'No diagnostic events yet.';
-  debugLogEl.scrollTop = debugLogEl.scrollHeight;
-}
-
-function toggleDebugPanel(force) {
-  debugPanelOpen = force == null ? !debugPanelOpen : !!force;
-  if (debugPanelEl) {
-    debugPanelEl.classList.toggle('open', debugPanelOpen);
-    debugPanelEl.setAttribute('aria-hidden', String(!debugPanelOpen));
-  }
-  if (debugPanelOpen) renderDebugPanel();
-}
-
-async function copyDebugLogs() {
-  const text = debugSummaryText() + '\n\n' + (debugLogs.join('\n') || 'No diagnostic events yet.');
-  try {
-    await navigator.clipboard.writeText(text);
-    if (debugActionStatusEl) debugActionStatusEl.textContent = 'Copied';
-  } catch (_) {
-    if (debugActionStatusEl) debugActionStatusEl.textContent = 'Copy blocked — use Download';
-  }
-}
-
-function downloadDebugLogs() {
-  const text = debugSummaryText() + '\n\n' + (debugLogs.join('\n') || 'No diagnostic events yet.');
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url; link.download = 'wings-arena-log-' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
-  document.body.appendChild(link); link.click(); link.remove();
-  URL.revokeObjectURL(url);
-  if (debugActionStatusEl) debugActionStatusEl.textContent = 'Downloaded';
-}
-
-function clearDebugLogs() {
-  debugLogs = [];
-  if (debugActionStatusEl) debugActionStatusEl.textContent = 'Cleared';
-  renderDebugPanel();
-}
-
-function updateDebugPanel(ts) {
-  if (!debugPanelOpen || ts - lastDebugRenderAt < 250) return;
-  lastDebugRenderAt = ts;
-  renderDebugPanel();
-}
-
-window.addEventListener('error', event => {
-  debugLog('RUNTIME', 'Unhandled window error', { message: event.message, file: event.filename, line: event.lineno });
-});
-window.addEventListener('unhandledrejection', event => {
-  const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
-  debugLog('RUNTIME', 'Unhandled promise rejection', { reason });
-});
-
 // ================= Imported impact effects =================
 // These effects are world-space versions of the five effects supplied in
 // explosion-effect.html. They intentionally own their particles and lifetime
@@ -1471,7 +1383,6 @@ function updateBoundaryState(p, now) {
     return false;
   }
   if (!isOutsideArena(p)) {
-    if (p.borderEnteredAt) debugLog('BOUNDARY', 'Player returned to the arena', { id: p.id });
     p.borderEnteredAt = 0;
     p.borderRemaining = 0;
     p.borderWarningSeen = false;
@@ -1480,7 +1391,6 @@ function updateBoundaryState(p, now) {
   if (!p.borderEnteredAt) {
     p.borderEnteredAt = now;
     p.borderWarningSeen = false;
-    debugLog('BOUNDARY', 'Player entered border fog', { id: p.id, x: Math.round(p.x), y: Math.round(p.y) });
   }
   p.borderRemaining = clamp(BORDER_WARNING_MS - (now - p.borderEnteredAt), 0, BORDER_WARNING_MS);
   if (!p.borderWarningSeen) p.borderWarningSeen = true;
@@ -2101,17 +2011,6 @@ function tryBarrelRoll(direction = 1) {
   myState.barrelRollDirection = direction < 0 ? -1 : 1;
 }
 
-function testDeathOrReset() {
-  if (!myState) return;
-  if (isNetworkClient()) { sendClientAction({ type: 'testReset' }); return; }
-  if (myState.alive) {
-    beginDeathFall(null, 'TEST — uncontrolled fall');
-  } else if (myState.respawnAt) {
-    myState.respawnAt = 0;
-    respawnLocal();
-  }
-}
-
 function dropBombFor(state, ownerId, replicate = false) {
   if (!state || !state.alive || state.bombCooldown > 0 || state.bombs <= 0) return null;
   state.bombCooldown = BOMB_COOLDOWN;
@@ -2328,6 +2227,7 @@ function updateShrapnels(dtSec) {
 function isInPlayerVision(p) {
   const halfW = window.innerWidth * currentCameraFovMult * .5;
   const halfH = window.innerHeight * currentCameraFovMult * .5;
+  if (activeMapId === 'storm' && Math.hypot(p.x - myState.x, p.y - myState.y) > STORM_VISIBILITY_RANGE) return false;
   return Math.abs(p.x - myState.x) <= halfW && Math.abs(p.y - myState.y) <= halfH;
 }
 
@@ -2543,6 +2443,17 @@ function findMissileVisibleFlare(m, ownerId, now) {
   return best;
 }
 
+function missileTargetIsDodging(m, target, now) {
+  const turningHard = Number.isFinite(target?.turnVelocity) &&
+    Math.abs(target.turnVelocity) >= MISSILE_DODGE_TURN_THRESHOLD;
+  if (!turningHard) {
+    m.targetDodgeStartedAt = null;
+    return false;
+  }
+  if (!Number.isFinite(m.targetDodgeStartedAt)) m.targetDodgeStartedAt = now;
+  return now - m.targetDodgeStartedAt >= MISSILE_DODGE_HOLD_MS;
+}
+
 function updateMissileGuidance(m, now) {
   if (m.decoyTarget) return { x: m.decoyTarget.x, y: m.decoyTarget.y };
   if (m.targetId == null) return null;
@@ -2555,11 +2466,11 @@ function updateMissileGuidance(m, now) {
 
   const planeVisible = Number.isFinite(target.x) && Number.isFinite(target.y) &&
     missileCanSeePoint(m, target.x, target.y);
-  // Aircraft take priority if both signatures are in the seeker's view. A
-  // flare only wins when it is visible and the aircraft is currently hidden
-  // by distance, cloud, cave rock, or the seeker's forward field of view.
+  // Flares are a countermeasure for a committed jink. If the target is flying
+  // steadily, the seeker ignores the flare and keeps tracking the aircraft.
+  const targetDodging = missileTargetIsDodging(m, target, now);
   const flare = findMissileVisibleFlare(m, target.id, now);
-  if (!planeVisible && flare) {
+  if (flare && targetDodging) {
     m.decoyTarget = flare;
     m.decoyed = true;
     m.targetId = null;
@@ -2882,7 +2793,6 @@ function updateBots(dtSec, now) {
     try {
       updateOneBot(p, dtSec, now);
     } catch (error) {
-      console.error('Bot update recovered:', error);
       respawnBot(p);
     }
   });
@@ -3057,11 +2967,7 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   }
   if (p.falling) { updateRemoteDeathFall(p, dtSec); return; }
   const inputFresh = now - (p.networkInputAt || 0) < NETWORK_INPUT_TIMEOUT_MS;
-  if (p.debugInputFresh !== inputFresh) {
-    p.debugInputFresh = inputFresh;
-    debugLog('INPUT', inputFresh ? 'Client input resumed' : 'Client input became stale', { id: p.id, seq: p.networkInputSeq || 0 });
-  }
-  const input = inputFresh
+    const input = inputFresh
     ? (p.networkInput || { aimX: 1, aimY: 0, boost: false, airbrake: false, shoot: false })
     : { aimX: Math.cos(p.angle), aimY: Math.sin(p.angle), boost: false, airbrake: false, shoot: false };
   const targetAngle = Math.atan2(input.aimY || 0, input.aimX || 1);
@@ -3107,11 +3013,7 @@ function updateOneNetworkPlayer(p, dtSec, now) {
   if (updateBoundaryState(p, now)) { beginRemoteDeathFall(p, null, 'Boundary lost — aircraft disabled'); return; }
   if (activeMapId !== 'canyon' && p.y >= GROUND_Y - 12) { beginRemoteDeathFall(p, null, 'You hit the sea.'); return; }
 
-  if (!p.debugSimulationSeen) {
-    p.debugSimulationSeen = true;
-    debugLog('SIM', 'Host advanced remote player', { id: p.id, x: Math.round(p.x), y: Math.round(p.y), speed: Math.round(p.speed) });
-  }
-
+  
   if (p.overheated) {
     p.heat = Math.max(0, p.heat - HEAT_DECAY_OVERHEAT * dtSec);
     if (p.heat <= HEAT_MAX * OVERHEAT_RESET_FRAC) p.overheated = false;
@@ -3219,7 +3121,6 @@ function acceptRealtimeConnection(c) {
     const old = realtimeConnections[ownerId];
     realtimeConnections[ownerId] = c;
     if (old?.open && old !== c) old.close();
-    debugLog('PEER', 'Fast flight channel opened', { id: ownerId });
   });
   c.on('data', data => {
     if (ownerId == null || realtimeConnections[ownerId] !== c || !connections[ownerId]?.open) return;
@@ -3228,7 +3129,6 @@ function acceptRealtimeConnection(c) {
   const close = () => {
     if (ownerId != null && realtimeConnections[ownerId] === c) {
       delete realtimeConnections[ownerId];
-      debugLog('PEER', 'Fast flight channel closed; reliable fallback', { id: ownerId });
     }
   };
   c.on('close', close);
@@ -3259,7 +3159,7 @@ function resetForNewSession() {
   currentCameraFovMult = CAMERA_FOV_MULT;
   lastClientInputSend = 0; clientInputSeq = 0; clientActionSeq = 0; lastInputSendErrorAt = 0;
   lastHostInputAck = 0; lastHostActionAck = 0;
-  lastTime = 0; lastBroadcast = 0; lastProjectileBroadcast = 0; lastRuntimeErrorAt = 0;
+  lastTime = 0; lastBroadcast = 0; lastProjectileBroadcast = 0;
   lastIncomingLock = false;
   if (engineCruiseAudio) { engineCruiseAudio.pause(); engineCruiseAudio.currentTime = 0; }
   if (engineBoostAudio) { engineBoostAudio.pause(); engineBoostAudio.currentTime = 0; }
@@ -3273,13 +3173,11 @@ function startHost() {
   resetForNewSession();
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
-  debugLog('SESSION', 'Starting host', { name: myName, map: validMapId(mapSelectEl?.value || selectedMapId) });
   setNetworkStatus('P2P // HOSTING', 'ok');
   isHost = true; botMode = false; myId = 0;
   players[0] = freshPlayerState(0, myName);
   peer = new Peer();
   peer.on('error', err => {
-    debugLog('PEER', 'Host peer error', { type: err?.type, message: err?.message });
     const message = err && err.type === 'unavailable-id'
       ? 'That room code is unavailable. Try hosting again.'
       : 'Network error — check the connection and try again.';
@@ -3288,13 +3186,11 @@ function startHost() {
     startBtn.style.display = 'none'; waitHint.style.display = 'block';
   });
   peer.on('disconnected', () => {
-    debugLog('PEER', 'Host signaling disconnected');
     statusEl.textContent = 'Disconnected from the signaling server.';
     setNetworkStatus('P2P // SIGNAL LOST', 'bad');
     startBtn.style.display = 'none'; waitHint.style.display = 'block';
   });
   peer.on('open', id => {
-    debugLog('PEER', 'Host room opened', { id });
     statusEl.textContent = 'Share this code: ' + id;
     setNetworkStatus('HOST // ' + id.slice(0, 8), 'ok');
     chooseRole.style.display = 'none'; lobby.style.display = 'flex';
@@ -3304,27 +3200,23 @@ function startHost() {
   peer.on('connection', c => {
     if (c.label === 'flight-state') { acceptRealtimeConnection(c); return; }
     const id = nextFreeId();
-    debugLog('PEER', 'Incoming connection reserved', { id: id ?? 'full' });
     if (id === null) { c.on('open', () => c.send({ type: 'full' })); return; }
     connections[id] = c;
     players[id] = freshPlayerState(id, 'Player ' + (id + 1));
     players[id].connected = true;
     c.on('open', () => {
-      debugLog('PEER', 'Client connection opened', { id });
       c.send({ type: 'welcome', id });
       if (started) c.send({ type: 'start', mapId: activeMapId });
       broadcastRoster();
     });
     c.on('data', data => handleHostReceive(id, data));
     c.on('close', () => {
-      debugLog('PEER', 'Client connection closed', { id });
       if (realtimeConnections[id]) realtimeConnections[id].close();
       if (players[id]) players[id].connected = false;
       removePlayerArtifacts(id);
       broadcastRoster();
     });
     c.on('error', () => {
-      debugLog('PEER', 'Client connection error', { id });
       if (realtimeConnections[id]) realtimeConnections[id].close();
       if (players[id]) players[id].connected = false;
       removePlayerArtifacts(id);
@@ -3334,7 +3226,6 @@ function startHost() {
   startBtn.onclick = () => {
     if (started) return;
     activeMapId = validMapId(mapSelectEl?.value || selectedMapId);
-    debugLog('SESSION', 'Host launched match', { map: activeMapId, players: Object.keys(players).length });
     started = true; buildClouds();
     broadcast({ type: 'start', mapId: activeMapId });
     beginLocalGame();
@@ -3344,7 +3235,6 @@ function startHost() {
 function startBotMode() {
   resetForNewSession();
   unlockAudio();
-  debugLog('SESSION', 'Starting skirmish', { bots: botCountInputEl?.value, map: validMapId(mapSelectEl?.value || selectedMapId) });
   setNetworkStatus('SKIRMISH // LOCAL', 'ok');
   // Bots run locally as a private host-like sortie. No PeerJS connection is
   // created, so starting this mode never interferes with room multiplayer.
@@ -3375,7 +3265,6 @@ function broadcast(msg) {
       // drop this frame and let the next snapshot supersede it.
       if ((fast.dataChannel?.bufferedAmount || 0) < 8192) {
         try { fast.send(msg); } catch (error) {
-          debugLog('PEER', 'Fast state send failed', { id, message: error?.message || String(error) });
         }
       }
       return;
@@ -3395,7 +3284,6 @@ function broadcast(msg) {
     const buffered = Number(c?.dataChannel?.bufferedAmount);
     if (isSnapshot && Number.isFinite(buffered) && buffered > NETWORK_SNAPSHOT_BUFFER_LIMIT) return;
     try { c.send(msg); } catch (error) {
-      debugLog('PEER', 'Broadcast send failed', { type: msg?.type, message: error?.message || String(error) });
     }
   });
 }
@@ -3465,11 +3353,7 @@ function handleClientInput(fromId, data) {
   ensureNetworkPlayerState(p);
   p.networkInputSeq = seq;
   p.networkInputAt = performance.now();
-  if (!p.debugInputSeen) {
-    p.debugInputSeen = true;
-    debugLog('INPUT', 'First input received from client', { id: fromId, seq, aimX: Math.round(data.aimX), aimY: Math.round(data.aimY) });
-  }
-  p.networkInput = {
+    p.networkInput = {
     aimX: clamp(data.aimX, -window.innerWidth * 2, window.innerWidth * 2),
     aimY: clamp(data.aimY, -window.innerHeight * 2, window.innerHeight * 2),
     boost: !!data.boost, airbrake: !!data.airbrake, shoot: !!data.shoot
@@ -3482,7 +3366,7 @@ function handleClientAction(fromId, data) {
   ensureNetworkPlayerState(p);
   p.networkActionSeq = data.seq;
   const action = data.action || {};
-  if (!p.alive && action.type !== 'testReset') return;
+  if (!p.alive) return;
   if (action.type === 'roll') {
     if (!p.falling && !p.stalled && p.barrelRollCooldown <= 0) {
       p.barrelRollCooldown = BARREL_ROLL_COOLDOWN;
@@ -3504,9 +3388,6 @@ function handleClientAction(fromId, data) {
     dropBombFor(p, p.id, true);
   } else if (action.type === 'flare') {
     deployFlareFor(p, p.id, true);
-  } else if (action.type === 'testReset') {
-    if (p.alive) beginRemoteDeathFall(p, null, 'TEST — uncontrolled fall');
-    else if (p.respawnAt) respawnNetworkPlayer(p);
   }
 }
 
@@ -3516,11 +3397,6 @@ function handleClientAction(fromId, data) {
 // glide the rendered plane toward it every frame in interpolateRemotePlayers().
 function applyRemoteState(p, data) {
   if (!p || ![data.x, data.y, data.angle, data.health].every(Number.isFinite)) {
-    const now = performance.now();
-    if (!p || !p.debugInvalidStateAt || now - p.debugInvalidStateAt > 2000) {
-      if (p) p.debugInvalidStateAt = now;
-      debugLog('STATE', 'Rejected invalid authoritative snapshot', { id: data?.from, x: data?.x, y: data?.y, angle: data?.angle, health: data?.health });
-    }
     return;
   }
   ensureNetworkPlayerState(p);
@@ -3535,6 +3411,7 @@ function applyRemoteState(p, data) {
   // The joiner's local plane predicts its visible movement between host
   // snapshots. The host position is stored as a correction target below.
   p.tx = data.x; p.ty = data.y; p.tangle = data.angle;
+  if (Number.isFinite(data.turnVelocity)) p.turnVelocity = data.turnVelocity;
   p.lastStateAt = performance.now();
   p.health = data.health; p.alive = data.alive;
   p.falling = !!data.falling;
@@ -3620,7 +3497,7 @@ function handleState(fromId, data) {
   const p = players[fromId];
   if (p) applyRemoteState(p, data);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, health: data.health, alive: data.alive, falling: data.falling, stalled: data.stalled, boosting: data.boosting, roll: data.roll });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, turnVelocity: data.turnVelocity, health: data.health, alive: data.alive, falling: data.falling, stalled: data.stalled, boosting: data.boosting, roll: data.roll });
   });
 }
 
@@ -3632,7 +3509,7 @@ function broadcastAuthoritativeSnapshot() {
   broadcast({ type: 'states', stateSeq, states: Object.values(players)
     .filter(p => p.connected !== false)
     .map(p => ({
-      from: p.id, x: p.x, y: p.y, angle: p.angle,
+      from: p.id, x: p.x, y: p.y, angle: p.angle, turnVelocity: p.turnVelocity,
       health: p.health, alive: p.alive, falling: p.falling, stalled: p.stalled,
       boosting: p.boosting, roll: p.roll, speed: p.speed, heat: p.heat,
       overheated: p.overheated, boost: p.boost, missiles: p.missiles,
@@ -3684,7 +3561,6 @@ function broadcastAuthoritativeProjectiles() {
     // hit events. Bullet creation/removal travels independently and reliably.
     if ((c.dataChannel?.bufferedAmount || 0) > 12000) return;
     try { c.send(packet); } catch (error) {
-      debugLog('PEER', 'Projectile snapshot send failed', { id, message: error?.message || String(error) });
     }
   });
 }
@@ -3864,7 +3740,6 @@ function openRealtimeLink(hostId) {
   let c;
   try { c = peer.connect(hostId, { label: 'flight-state', serialization: 'json', reliable: false }); }
   catch (error) {
-    debugLog('PEER', 'Fast flight channel unavailable', { message: error?.message || String(error) });
     scheduleRealtimeRetry(hostId);
     return;
   }
@@ -3873,7 +3748,6 @@ function openRealtimeLink(hostId) {
     if (peer !== sessionPeer || connections.realtime !== c) { c.close(); return; }
     lastRealtimeOpenAt = performance.now();
     lastRealtimeRxAt = 0;
-    debugLog('PEER', 'Fast flight channel connected');
     lastClientInputSend = 0;
     sendClientInput(performance.now());
   });
@@ -3885,7 +3759,6 @@ function openRealtimeLink(hostId) {
   const fallback = () => {
     if (connections.realtime !== c) return;
     connections.realtime = null;
-    debugLog('PEER', 'Fast flight channel lost; using reliable fallback');
     scheduleRealtimeRetry(hostId);
   };
   c.on('close', fallback);
@@ -3902,7 +3775,6 @@ function startJoin() {
   resetForNewSession();
   unlockAudio();
   seenImpactKeys.clear(); lastNetworkActivityAt = performance.now();
-  debugLog('SESSION', 'Starting join', { host: document.getElementById('hostIdInput').value.trim(), name: myName });
   setNetworkStatus('P2P // CONNECTING', 'warn');
   isHost = false;
   botMode = false;
@@ -3910,7 +3782,6 @@ function startJoin() {
   if (!hostId) return;
   peer = new Peer();
   peer.on('error', err => {
-    debugLog('PEER', 'Join peer error', { type: err?.type, message: err?.message });
     const message = err && err.type === 'peer-unavailable'
       ? 'Room not found. Check the room code.'
       : 'Unable to connect to the network.';
@@ -3918,16 +3789,13 @@ function startJoin() {
     chooseRole.style.display = 'flex'; lobby.style.display = 'none';
   });
   peer.on('disconnected', () => {
-    debugLog('PEER', 'Join signaling disconnected');
     statusEl.textContent = 'Disconnected from the signaling server.';
     setNetworkStatus('P2P // SIGNAL LOST', 'bad');
   });
   peer.on('open', () => {
-    debugLog('PEER', 'Join peer opened; connecting to host', { host: hostId });
     const conn = peer.connect(hostId, { reliable: true });
     connections.host = conn;
     conn.on('open', () => {
-      debugLog('PEER', 'Host connection opened');
       chooseRole.style.display = 'none'; lobby.style.display = 'flex';
       statusEl.textContent = 'Connected — waiting for host...';
       setNetworkStatus('P2P // CONNECTED', 'ok');
@@ -3935,13 +3803,11 @@ function startJoin() {
     });
     conn.on('data', handleClientReceive);
     conn.on('error', () => {
-      debugLog('PEER', 'Host connection error');
       statusEl.textContent = 'Connection failed. Check the room code and try again.';
       setNetworkStatus('P2P // ERROR', 'bad');
       chooseRole.style.display = 'flex'; lobby.style.display = 'none';
     });
     conn.on('close', () => {
-      debugLog('PEER', 'Host connection closed');
       if (started) returnToMenuAfterNetworkLoss('Host connection closed. Start or join another room.');
       else {
         statusEl.textContent = 'Host connection closed.';
@@ -3972,7 +3838,6 @@ function handleClientReceive(data) {
   else if (data.type === 'welcome') {
     if (!Number.isInteger(data.id) || data.id < 1 || data.id >= MAX_PLAYERS || !connections.host) return;
     myId = data.id;
-    debugLog('SESSION', 'Received player assignment', { id: myId });
     players[myId] = freshPlayerState(myId, myName);
     connections.host.send({ type: 'name', name: myName });
     openRealtimeLink(connections.host.peer);
@@ -3991,7 +3856,6 @@ function handleClientReceive(data) {
   }
   else if (data.type === 'start') {
     activeMapId = validMapId(data.mapId);
-    debugLog('SESSION', 'Received match start', { map: activeMapId });
     started = true; buildClouds(); beginLocalGame();
   }
   else if (data.type === 'projectiles') {
@@ -4168,7 +4032,6 @@ function sendClientAction(action) {
     connections.host.send(packet);
     clientActionSeq = packet.seq;
   } catch (error) {
-    debugLog('PEER', 'Action send failed', { action: action?.type, message: error?.message || String(error) });
   }
 }
 
@@ -4189,7 +4052,6 @@ function sendClientInput(ts) {
     // RTCDataChannel.open can remain true after incoming packets stop. Avoid
     // feeding input into a silent link indefinitely; the reliable connection
     // still carries the game while we establish another fast channel.
-    debugLog('PEER', 'Fast flight channel stopped receiving states; reconnecting');
     connections.realtime = null;
     try { fast.close(); } catch (_) { /* the connection may already be gone */ }
     scheduleRealtimeRetry(connections.host.peer);
@@ -4210,7 +4072,6 @@ function sendClientInput(ts) {
     // sequence and falsely reporting that input was transmitted.
     if (ts - lastInputSendErrorAt > 2000) {
       lastInputSendErrorAt = ts;
-      debugLog('PEER', 'Input send failed; retrying', { channel: fast?.open ? 'fast' : 'reliable', message: error?.message || String(error) });
     }
   }
 }
@@ -4229,7 +4090,6 @@ function wireKeyboard() {
       case 'q': case 'Q': tryBarrelRoll(-1); break;
       case 'f': case 'F': tryDeployFlare(); break;
       case 'e': case 'E': tryBarrelRoll(1); break;
-      case 'r': case 'R': testDeathOrReset(); break;
       case 'b': case 'B': tryDropBomb(); break;
     }
   });
@@ -4636,6 +4496,7 @@ function drawPlaneSprite(ctx, color, alive, boosting, visualRoll = 0, falling = 
 function drawPlane(ctx, p, isMe, now) {
   if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.angle)) return;
   if (isInCloudBank(p.x, p.y)) return;
+  if (!isMe && activeMapId === 'storm' && Math.hypot(p.x - myState.x, p.y - myState.y) > STORM_VISIBILITY_RANGE) return;
   const flicker = now < p.invulnUntil && Math.floor(now / 100) % 2 === 0;
   ctx.save();
   const kick = isMe ? recoilKick : 0;
@@ -4979,6 +4840,49 @@ function drawCanyonWorldMap(ctx, start, end) {
     x => canyonProfileAt(x).surfaceY, x => canyonProfileAt(x).ceilingY));
   drawStrata(first, last, x => canyonProfileAt(x).floorY, () => WORLD_H + BORDER_FOG_DEPTH);
 
+  // The cavern cross-walls use the same opening data as collision. Offset
+  // apertures form two narrow lanes through each wall, opening into broad
+  // chambers before the next split.
+  CANYON_CAVE_BULKHEADS.forEach(([x, halfWidth, openings], index) => {
+    if (x + halfWidth < first || x - halfWidth > last) return;
+    const profile = canyonProfileAt(x), height = profile.floorY - profile.ceilingY;
+    const spans = [];
+    let cursor = 0;
+    openings.slice().sort((a, b) => a[0] - b[0]).forEach(([top, bottom]) => {
+      if (top > cursor) spans.push([cursor, top]);
+      cursor = Math.max(cursor, bottom);
+    });
+    if (cursor < 1) spans.push([cursor, 1]);
+    spans.forEach(([top, bottom], spanIndex) => {
+      const y = profile.ceilingY + height * top;
+      const h = height * (bottom - top);
+      const rock = ctx.createLinearGradient(x - halfWidth, y, x + halfWidth, y + h);
+      rock.addColorStop(0, '#a3624b'); rock.addColorStop(.42, '#694440'); rock.addColorStop(1, '#332f38');
+      ctx.fillStyle = rock;
+      ctx.fillRect(x - halfWidth, y, halfWidth * 2, h);
+      ctx.strokeStyle = 'rgba(31,26,32,.72)'; ctx.lineWidth = 5;
+      ctx.strokeRect(x - halfWidth, y, halfWidth * 2, h);
+      ctx.strokeStyle = 'rgba(255,193,145,.3)'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x - halfWidth + 8, y + h * (.22 + ((index + spanIndex) % 3) * .13));
+      ctx.lineTo(x - 5, y + h * .44);
+      ctx.lineTo(x + halfWidth - 7, y + h * (.36 + ((index + spanIndex + 1) % 3) * .12));
+      ctx.stroke();
+    });
+  });
+
+  // In the cave half, the map ends are solid sandstone walls and the floor
+  // closes the bottom. Keep the sky above the cavern open to the normal arena.
+  [0, WORLD_W - CANYON_END_WALL_THICKNESS].forEach(x => {
+    const profile = canyonProfileAt(x === 0 ? 0 : WORLD_W);
+    const rock = ctx.createLinearGradient(x, profile.ceilingY, x + CANYON_END_WALL_THICKNESS, WORLD_H);
+    rock.addColorStop(0, '#8d5846'); rock.addColorStop(.48, '#573c3c'); rock.addColorStop(1, '#282b34');
+    ctx.fillStyle = rock;
+    ctx.fillRect(x, profile.ceilingY, CANYON_END_WALL_THICKNESS, WORLD_H - profile.ceilingY + BORDER_FOG_DEPTH);
+    ctx.strokeStyle = 'rgba(255,193,145,.32)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(x + 4, profile.ceilingY); ctx.lineTo(x + 4, WORLD_H); ctx.stroke();
+  });
+
   // Sky openings cast broad shafts of warm light into the lower caverns.
   CANYON_CAVE_ENTRANCES.forEach(([left, right], i) => {
     const x = (left + right) * .5;
@@ -5219,6 +5123,9 @@ function drawFogPuff(ctx, x, y, rx, ry, phase) {
 }
 
 function drawBoundaryFog(ctx, now, camX, camY, viewW, viewH) {
+  // Rock forms the lower half's boundary in the canyon; overlay fog there
+  // would hide the actual wall edge and make the cave look like a cutout.
+  if (activeMapId === 'canyon') return;
   const edge = BORDER_FOG_DEPTH;
   const pulse = .9 + Math.sin(now / 880) * .04;
   const solid = `rgba(202,222,229,${.78 * pulse})`;
@@ -5473,6 +5380,7 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
   Object.values(players).forEach(p => {
     if (p.id === myId || p.connected === false || p.alive === false) return;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+    if (activeMapId === 'storm' && Math.hypot(p.x - myState.x, p.y - myState.y) > STORM_VISIBILITY_RANGE) return;
     const sx = (p.x - camX) * viewScale, sy = (p.y - camY) * viewScale;
     const hidden = isInCloudBank(p.x, p.y);
     const onScreen = sx > 28 && sy > 28 && sx < W - 28 && sy < H - 28;
@@ -5491,6 +5399,19 @@ function drawEnemyDirectionArrows(ctx, now, camX, camY, viewScale) {
     ctx.fillText(Math.round(dist(myState.x, myState.y, p.x, p.y)), 0, 19);
     ctx.restore();
   });
+}
+
+function drawStormVisibility(ctx, camX, camY, viewW, viewH) {
+  if (activeMapId !== 'storm' || !myState) return;
+  const radius = STORM_VISIBILITY_RANGE;
+  const haze = ctx.createRadialGradient(myState.x, myState.y, radius * .28,
+    myState.x, myState.y, radius * 1.18);
+  haze.addColorStop(0, 'rgba(17,30,45,0)');
+  haze.addColorStop(.42, 'rgba(17,30,45,.08)');
+  haze.addColorStop(.76, 'rgba(17,30,45,.31)');
+  haze.addColorStop(1, 'rgba(17,30,45,.64)');
+  ctx.fillStyle = haze;
+  ctx.fillRect(camX, camY, viewW, viewH);
 }
 
 function drawAmbientBirds(ctx, now, camX, camY, viewW, viewH) {
@@ -5638,6 +5559,7 @@ function render(now) {
 
   explosions.forEach(e => drawExplosion(ctx, e, now));
   specialEffects.forEach(e => { if (e && typeof e.draw === 'function') e.draw(ctx); });
+  drawStormVisibility(ctx, camX, camY, viewW, viewH);
   // Cloud banks remain the only foreground concealment layer.
   drawCloudBanks(ctx, now, camX, camY, viewW, viewH);
   drawBoundaryFog(ctx, now, camX, camY, viewW, viewH);
@@ -5815,19 +5737,13 @@ function beginLocalGame() {
   requestAnimationFrame(loop);
 }
 
-let lastTime = 0, lastBroadcast = 0, lastRuntimeErrorAt = 0;
+let lastTime = 0, lastBroadcast = 0;
 
 // Keep one bad bot/effect frame from permanently stopping requestAnimationFrame.
-// The original error is still logged for diagnosis, but the sortie continues.
 function loop(ts) {
   try {
     loopFrame(ts);
   } catch (error) {
-    if (ts - lastRuntimeErrorAt > 1000) {
-      lastRuntimeErrorAt = ts;
-      console.error('Wings Arena frame recovered:', error);
-      debugLog('RUNTIME', 'Frame recovered after error', { message: error?.message || String(error) });
-    }
     requestAnimationFrame(loop);
   }
 }
@@ -5837,7 +5753,6 @@ function loopFrame(ts) {
   // Exit before HUD/physics code touches the cleared state; a new match will
   // create a fresh animation loop through beginLocalGame().
   if (!started || !myState) return;
-  updateDebugPanel(ts);
   const dt = Math.min(lastTime ? ts - lastTime : 16, 60);
   lastTime = ts;
   const dtSec = dt / 1000;
@@ -5951,24 +5866,6 @@ window.addEventListener('DOMContentLoaded', () => {
   respawnTimerEl = document.getElementById('respawnTimer');
   boundaryWarningEl = document.getElementById('boundaryWarning');
   boundaryTimerEl = document.getElementById('boundaryTimer');
-  debugPanelEl = document.getElementById('debugPanel');
-  debugSummaryEl = document.getElementById('debugSummary');
-  debugLogEl = document.getElementById('debugLog');
-  debugActionStatusEl = document.getElementById('debugActionStatus');
-  debugToggleEl = document.getElementById('debugToggle');
-  document.getElementById('debugClose').onclick = () => toggleDebugPanel(false);
-  document.getElementById('debugCopy').onclick = copyDebugLogs;
-  document.getElementById('debugDownload').onclick = downloadDebugLogs;
-  document.getElementById('debugClear').onclick = clearDebugLogs;
-  debugToggleEl.onclick = () => toggleDebugPanel();
-  document.addEventListener('keydown', e => {
-    if (e.key === 'F2') {
-      e.preventDefault();
-      toggleDebugPanel();
-    }
-  });
-  debugLog('BOOT', 'Diagnostics ready — press F2 during a match');
-
   document.getElementById('hostBtn').onclick = () => { captureName(); startHost(); };
   document.getElementById('joinBtn').onclick = () => { captureName(); startJoin(); };
   botsBtn.onclick = () => { captureName(); startBotMode(); };
