@@ -1,6 +1,15 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.53.7 (storm visibility and expanded canyon)
+Current build: v1.53.8 (adaptive graphics quality)
+
+### v1.53.8 Performance pass
+- Added Auto, Low, and High graphics settings. Auto reduces decorative detail
+  after sustained slow frames and restores it after the system has headroom.
+- Reduced repeated cloud, skyline, cave-strata, ambient-bird, and water-wake
+  drawing in Low mode. Weapon, damage, movement, and network simulation remain
+  active at full gameplay detail.
+- Capped world rendering at 60 FPS and the decorative menu dogfight at 30 FPS;
+  HUD text and bars update at 12.5 Hz to avoid unnecessary UI work.
 
 ### v1.53.7 Storm visibility and canyon routes
 - Storm weather now reduces practical sight range: distant aircraft fade into

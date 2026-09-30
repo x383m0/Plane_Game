@@ -12,6 +12,8 @@ input{border-radius:6px;background:#07131b;border-color:rgba(165,220,214,.25)}in
 #scorePanel,#weaponPanel,#leaderboard,#speedometer,#bars{background:rgba(7,20,29,.84);border-color:rgba(165,220,214,.22);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.22)}.panel-kicker{color:#79aaa9}.bar-track{background:#061017;border-radius:2px}.bar-fill{border-radius:1px}.bar-fill.hp{background:#e7796b}.bar-fill.boost{background:var(--cyan)}.bar-fill.heat{background:var(--orange)}#leaderboard h4{color:var(--cyan)}#minimap{background:rgba(5,16,23,.78);border-color:rgba(165,220,214,.22);border-radius:8px}.controls{color:rgba(221,243,240,.62)}.controls b{color:#b7e8df}#gameVersion{color:rgba(190,231,225,.42)}
 #gameArea{cursor:none}
 #gameVersion{position:absolute;right:12px;bottom:9px;z-index:3;color:rgba(220,244,250,.42);font:9px 'Space Mono',monospace;letter-spacing:1px;pointer-events:none;user-select:none}
+.graphics-quality-note{margin:-5px 0 0;color:#6f8da1;font:9px 'Space Mono',monospace;letter-spacing:.15px}
+@media(max-height:840px){#menu{max-height:calc(100vh - 24px);overflow-y:auto;overscroll-behavior:contain}}
 .bar-label{width:60px}.bar-label small{display:block;margin-top:2px;color:#6f9caf;font:8px 'Space Mono',monospace;letter-spacing:.3px}
 .bomb-icon{width:9px;height:9px;display:inline-block;background:#273a46;border:1px solid #c9e7ef;border-radius:50%;box-shadow:0 0 7px #ff9d5c}
 .controls{max-width:calc(100vw - 24px);overflow:hidden}

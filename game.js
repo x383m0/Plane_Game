@@ -245,7 +245,7 @@ let myState = null;               // local authoritative plane state
 let killFeedEl, lbListEl, scoreValEl, killsValEl, hpFillEl, boostFillEl, heatFillEl, heatValueEl;
 let missileCountEl, bombCountEl, flareCountEl, lockWarningEl, boundaryWarningEl, boundaryTimerEl, speedValueEl, speedNeedleEl, speedFillEl;
 let respawnOverlay, respawnMsgEl, respawnTimerEl;
-let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, mapSelectEl, networkStatusEl, chooseRole, lobby, menu, gameArea, waitHint;
+let statusEl, lobbyList, startBtn, botsBtn, botCountInputEl, botCountValueEl, mapSelectEl, graphicsQualitySelectEl, networkStatusEl, chooseRole, lobby, menu, gameArea, waitHint;
 let skyCanvas, skyCtx, miniCanvas, miniCtx;
 let audioCtx = null, masterGain = null;
 let audioBank = {}, audioAssetsStarted = false;
@@ -257,9 +257,54 @@ let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 let currentCameraFovMult = CAMERA_FOV_MULT;
 let selectedMapId = 'city';
 let activeMapId = 'city';
+let graphicsQualityMode = 'auto';
+let autoReducedGraphics = false;
+let graphicsProbeMs = 0, graphicsProbeFrames = 0, graphicsRecoveryMs = 0;
+let lastRenderAt = 0, lastHudUpdateAt = 0;
+const GRAPHICS_QUALITY_STORAGE_KEY = 'wingsArenaGraphicsQuality';
+const MAX_GAME_RENDER_FPS = 60;
+const HUD_UPDATE_INTERVAL_MS = 80;
 let localFlareScheduleGeneration = 0;
 const seenImpactKeys = new Set();
 let lastNetworkActivityAt = 0;
+
+function isReducedGraphics() {
+  return graphicsQualityMode === 'low' || (graphicsQualityMode === 'auto' && autoReducedGraphics);
+}
+
+function setGraphicsQuality(mode, persist = true) {
+  graphicsQualityMode = ['auto', 'low', 'high'].includes(mode) ? mode : 'auto';
+  if (graphicsQualityMode !== 'auto') autoReducedGraphics = graphicsQualityMode === 'low';
+  else autoReducedGraphics = false;
+  graphicsProbeMs = 0; graphicsProbeFrames = 0; graphicsRecoveryMs = 0;
+  if (persist) {
+    try { window.localStorage?.setItem(GRAPHICS_QUALITY_STORAGE_KEY, graphicsQualityMode); } catch (_) {}
+  }
+}
+
+// Auto mode reacts to sustained slow frames rather than one-off explosions or
+// tab wakeups, and only restores full detail after the machine has headroom.
+function sampleGraphicsPerformance(frameMs) {
+  if (graphicsQualityMode !== 'auto' || !Number.isFinite(frameMs) || frameMs > 200) return;
+  graphicsProbeMs += Math.max(0, frameMs);
+  graphicsProbeFrames++;
+  if (graphicsProbeMs < 1800 || !graphicsProbeFrames) return;
+  const averageFrameMs = graphicsProbeMs / graphicsProbeFrames;
+  if (averageFrameMs >= 25) {
+    autoReducedGraphics = true;
+    graphicsRecoveryMs = 0;
+  } else if (autoReducedGraphics && averageFrameMs <= 18.5) {
+    graphicsRecoveryMs += graphicsProbeMs;
+    if (graphicsRecoveryMs >= 6000) {
+      autoReducedGraphics = false;
+      graphicsRecoveryMs = 0;
+    }
+  } else if (averageFrameMs > 18.5) {
+    graphicsRecoveryMs = 0;
+  }
+  graphicsProbeMs = 0;
+  graphicsProbeFrames = 0;
+}
 
 const AUDIO_ASSETS = {
   // GitHub Pages currently serves the uploaded audio files from the repo root.
@@ -900,6 +945,7 @@ class HighSpeedWakeEffect {
   }
   draw(ctx) {
     ctx.save();
+    const particleStride = isReducedGraphics() ? 3 : 1;
     const visible = this.trail.filter(p => p.age >= p.delay);
     if (visible.length >= 2) {
       ctx.beginPath();
@@ -935,13 +981,15 @@ class HighSpeedWakeEffect {
       });
     }
 
-    this.bubbles.forEach(p => {
+    this.bubbles.forEach((p, i) => {
+      if (i % particleStride) return;
       const t = p.age / p.maxAge;
       ctx.globalAlpha = (1 - t) * (.22 + p.intensity * .4);
       ctx.fillStyle = '#eefbff';
       ctx.beginPath(); ctx.arc(p.x, p.y, p.radius * (1 - t * .32), 0, Math.PI * 2); ctx.fill();
     });
-    this.foam.forEach(p => {
+    this.foam.forEach((p, i) => {
+      if (i % particleStride) return;
       const t = p.age / p.maxAge;
       ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.heading);
       ctx.globalAlpha = (1 - t) * (.3 + p.intensity * .4);
@@ -949,7 +997,8 @@ class HighSpeedWakeEffect {
       ctx.beginPath(); ctx.arc(0, 0, 7 + p.speed * 12 + t * 14, .15 * Math.PI, .85 * Math.PI); ctx.stroke();
       ctx.restore();
     });
-    this.spray.forEach(p => {
+    this.spray.forEach((p, i) => {
+      if (i % particleStride) return;
       const t = p.age / p.maxAge;
       ctx.globalAlpha = (1 - t) * (.35 + p.intensity * .65);
       ctx.fillStyle = '#bfeaff';
@@ -4141,7 +4190,9 @@ const MENU_FIGHT_COLORS = ['#ff806f', '#73e0d2', '#ffd166', '#9d91ff'];
 
 function resizeMenuDogfight() {
   if (!menuFightCanvas || !menuFightCtx) return;
-  menuFightDpr = Math.min(window.devicePixelRatio || 1, 1.35);
+  // The animated menu is decorative; rendering above CSS resolution costs
+  // fill-rate on integrated GPUs without making the planes meaningfully clearer.
+  menuFightDpr = Math.min(window.devicePixelRatio || 1, 1);
   menuFightWidth = Math.max(1, window.innerWidth);
   menuFightHeight = Math.max(1, window.innerHeight);
   menuFightCanvas.width = Math.round(menuFightWidth * menuFightDpr);
@@ -4189,7 +4240,12 @@ function startMenuDogfight() {
 function drawMenuDogfight(ts) {
   if (!menuFightCanvas || document.hidden || !menu || menu.style.display === 'none') { menuFightFrame = 0; return; }
   const ctx = menuFightCtx, W = menuFightWidth, H = menuFightHeight;
-  const dt = clamp((ts - (menuFightLast || ts)) / 1000, 0, .045);
+  const elapsed = menuFightLast ? ts - menuFightLast : 1000 / 30;
+  if (elapsed < 1000 / 30) {
+    menuFightFrame = requestAnimationFrame(drawMenuDogfight);
+    return;
+  }
+  const dt = clamp(elapsed / 1000, 0, .06);
   menuFightLast = ts;
   ctx.setTransform(menuFightDpr, 0, 0, menuFightDpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -4735,7 +4791,8 @@ function drawGround(ctx, startX = 0, endX = WORLD_W) {
 function drawCityWorldMap(ctx, start, end) {
   // Keep the city anchored in world space so it follows the camera naturally
   // instead of behaving like a fixed overlay or a border strip.
-  const cityStep = 132 * WORLD_SCALE;
+  const reduced = isReducedGraphics();
+  const cityStep = (reduced ? 188 : 132) * WORLD_SCALE;
   const first = Math.floor((start - 260 * WORLD_SCALE) / cityStep) * cityStep;
   const backBase = GROUND_Y - 220 * WORLD_SCALE;
   const frontBase = GROUND_Y - 70 * WORLD_SCALE;
@@ -4747,14 +4804,16 @@ function drawCityWorldMap(ctx, start, end) {
       const y = base - height;
       ctx.fillStyle = color;
       ctx.fillRect(x, y, width, height + 90 * WORLD_SCALE);
-      ctx.fillStyle = 'rgba(104,224,221,.16)';
-      ctx.fillRect(x + 9 * WORLD_SCALE, y + 13 * WORLD_SCALE, 3 * WORLD_SCALE, Math.max(12, height - 20 * WORLD_SCALE));
-      ctx.fillRect(x + width - 12 * WORLD_SCALE, y + 13 * WORLD_SCALE, 3 * WORLD_SCALE, Math.max(12, height - 20 * WORLD_SCALE));
+      if (!reduced) {
+        ctx.fillStyle = 'rgba(104,224,221,.16)';
+        ctx.fillRect(x + 9 * WORLD_SCALE, y + 13 * WORLD_SCALE, 3 * WORLD_SCALE, Math.max(12, height - 20 * WORLD_SCALE));
+        ctx.fillRect(x + width - 12 * WORLD_SCALE, y + 13 * WORLD_SCALE, 3 * WORLD_SCALE, Math.max(12, height - 20 * WORLD_SCALE));
+      }
       ctx.fillStyle = windowColor;
-      const rows = Math.floor(height / (30 * WORLD_SCALE));
+      const rows = Math.floor(height / (reduced ? 46 : 30) / WORLD_SCALE);
       for (let row = 0; row < rows; row++) {
         if ((Math.floor(x / cityStep) + row * 3) % 4 < 2) {
-          ctx.fillRect(x + 18 * WORLD_SCALE, y + 18 * WORLD_SCALE + row * 30 * WORLD_SCALE, Math.max(7, width - 34 * WORLD_SCALE), 4 * WORLD_SCALE);
+          ctx.fillRect(x + 18 * WORLD_SCALE, y + 18 * WORLD_SCALE + row * (reduced ? 46 : 30) * WORLD_SCALE, Math.max(7, width - 34 * WORLD_SCALE), 4 * WORLD_SCALE);
         }
       }
     }
@@ -4771,7 +4830,8 @@ function mapHash01(index, salt = 0) {
 }
 
 function drawCanyonWorldMap(ctx, start, end) {
-  const step = 48;
+  const reduced = isReducedGraphics();
+  const step = reduced ? 96 : 48;
   const first = clamp(Math.floor(start / step) * step, 0, WORLD_W);
   const last = clamp(Math.ceil(end / step) * step, 0, WORLD_W);
   const xs = [];
@@ -4823,8 +4883,9 @@ function drawCanyonWorldMap(ctx, start, end) {
   // to each solid section so the entrances stay open all the way from sky.
   const drawStrata = (left, right, upper, lower) => {
     ctx.save(); traceBand(left, right, upper, lower); ctx.clip();
-    for (let band = 0; band < 10; band++) {
-      const y = (1940 + band * 206) * WORLD_SCALE;
+    const bandCount = reduced ? 6 : 10;
+    for (let band = 0; band < bandCount; band++) {
+      const y = (1940 + band * (reduced ? 330 : 206)) * WORLD_SCALE;
       ctx.beginPath();
       for (let x = left; x <= right; x += step) {
         const wobble = Math.sin(x * (.0018 + band * .00006) / WORLD_SCALE + band * 1.7) * 23 * WORLD_SCALE;
@@ -5415,8 +5476,10 @@ function drawStormVisibility(ctx, camX, camY, viewW, viewH) {
 }
 
 function drawAmbientBirds(ctx, now, camX, camY, viewW, viewH) {
+  const reduced = isReducedGraphics();
   const speedClock = now / 1000;
   for (let flock = 0; flock < 30; flock++) {
+    if (reduced && flock % 3 !== 0) continue;
     const drift = 22 + (flock % 5) * 6;
     const x = ((flock * WORLD_W / 30 + speedClock * drift) % WORLD_W + WORLD_W) % WORLD_W;
     const y = (0.12 + mapHash01(flock, 91) * .48) * GROUND_Y;
@@ -5474,10 +5537,19 @@ function render(now) {
   ctx.scale(viewScale, viewScale);
   ctx.translate(-myState.x, -myState.y);
 
-  clouds.forEach(c => {
+  const reducedQuality = isReducedGraphics();
+  clouds.forEach((c, cloudIndex) => {
+    if (reducedQuality && cloudIndex % 2 !== 0) return;
     if (c.x < camX - c.rx * 1.5 || c.x > camX + viewW + c.rx * 1.5 ||
         c.y < camY - c.ry * 2 || c.y > camY + viewH + c.ry * 2) return;
     ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.tilt);
+    if (reducedQuality) {
+      ctx.globalAlpha = .72;
+      ctx.fillStyle = `rgba(211,231,238,${Math.min(.3, c.a * 2.2)})`;
+      ctx.beginPath(); ctx.ellipse(0, 0, c.rx, c.ry, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      return;
+    }
     const form = Number.isFinite(c.form) ? c.form : 1;
     const palettes = [
       ['245,252,255', '208,229,239', '180,211,228'],
@@ -5709,6 +5781,8 @@ function beginLocalGame() {
   if (menuFightFrame) cancelAnimationFrame(menuFightFrame);
   menuFightFrame = 0;
   if (menuFightCanvas) menuFightCanvas.style.display = 'none';
+  lastTime = 0; lastRenderAt = 0; lastHudUpdateAt = 0;
+  graphicsProbeMs = 0; graphicsProbeFrames = 0; graphicsRecoveryMs = 0;
   resetAllInput();
   menu.style.display = 'none'; gameArea.style.display = 'block';
   myState = createLocalState();
@@ -5753,7 +5827,9 @@ function loopFrame(ts) {
   // Exit before HUD/physics code touches the cleared state; a new match will
   // create a fresh animation loop through beginLocalGame().
   if (!started || !myState) return;
-  const dt = Math.min(lastTime ? ts - lastTime : 16, 60);
+  const frameMs = lastTime ? ts - lastTime : 16;
+  sampleGraphicsPerformance(frameMs);
+  const dt = Math.min(frameMs, 60);
   lastTime = ts;
   const dtSec = dt / 1000;
   screenShake = Math.max(0, screenShake - dtSec * 34);
@@ -5791,6 +5867,8 @@ function loopFrame(ts) {
     broadcastAuthoritativeProjectiles();
   }
 
+  if (ts - lastHudUpdateAt >= HUD_UPDATE_INTERVAL_MS) {
+  lastHudUpdateAt = ts;
   hpFillEl.style.width = clamp((myState.health / MAX_HEALTH) * 100, 0, 100) + '%';
   boostFillEl.style.width = clamp((myState.boost / BOOST_MAX) * 100, 0, 100) + '%';
   heatFillEl.style.width = clamp((myState.heat / HEAT_MAX) * 100, 0, 100) + '%';
@@ -5818,8 +5896,13 @@ function loopFrame(ts) {
   }
 
   updateBoundaryWarningUI();
+  }
 
-  render(ts);
+  if (ts - lastRenderAt >= 1000 / MAX_GAME_RENDER_FPS) {
+    const renderInterval = 1000 / MAX_GAME_RENDER_FPS;
+    lastRenderAt += Math.max(1, Math.floor((ts - lastRenderAt) / renderInterval)) * renderInterval;
+    render(ts);
+  }
   requestAnimationFrame(loop);
 }
 
@@ -5838,6 +5921,12 @@ window.addEventListener('DOMContentLoaded', () => {
   botCountValueEl = document.getElementById('botCountValue');
   mapSelectEl = document.getElementById('mapSelect');
   mapSelectEl.addEventListener('change', () => { selectedMapId = validMapId(mapSelectEl.value); });
+  graphicsQualitySelectEl = document.getElementById('graphicsQualitySelect');
+  let savedGraphicsQuality = 'auto';
+  try { savedGraphicsQuality = window.localStorage?.getItem(GRAPHICS_QUALITY_STORAGE_KEY) || 'auto'; } catch (_) {}
+  setGraphicsQuality(savedGraphicsQuality, false);
+  graphicsQualitySelectEl.value = graphicsQualityMode;
+  graphicsQualitySelectEl.addEventListener('change', () => setGraphicsQuality(graphicsQualitySelectEl.value));
   waitHint = document.getElementById('waitHint');
 
   skyCanvas = document.getElementById('sky');
