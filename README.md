@@ -1,6 +1,23 @@
 # Wings Arena — multiplayer sky battle (up to 8 players)
 
-Current build: v1.53.8 (adaptive graphics quality)
+Current build: v1.53.10 (rendering optimization and safety polish)
+
+### v1.53.10 Rendering and safety polish
+- Skip drawing projectiles and simple impact effects outside the camera while
+  keeping their movement, collision, and cleanup active. Missile trails remain
+  visible when they cross into the camera view.
+- Combined bullet tracer and glow drawing into one canvas pass. Reduced and
+  Auto graphics avoid the per-bullet glow while High quality keeps it.
+- Ignore malformed projectile draw data safely so a bad visual snapshot cannot
+  interrupt the rest of a frame.
+
+### v1.53.9 Flight feedback and collision pass
+- Added a live FPS counter based on rendered game frames.
+- Widened the existing normal and supersonic camera views by a further 30%.
+- Added host-authoritative aircraft collisions with swept checks for fast
+  crossings, separation, impact deflection, and cooldown-limited collision
+  damage. Skirmish uses the same collision rules; joiners receive collision
+  health, velocity, and effect updates from the host.
 
 ### v1.53.8 Performance pass
 - Added Auto, Low, and High graphics settings. Auto reduces decorative detail

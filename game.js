@@ -3,9 +3,9 @@
 // while keeping map proportions, terrain, and shared multiplayer coordinates aligned.
 const WORLD_SCALE = 1.2;
 const WORLD_W = 7200 * WORLD_SCALE, WORLD_H = 4416 * WORLD_SCALE;
-// The previous camera already showed 15% more world. Apply the requested
-// additional 15% multiplicatively: 1.15 * 1.15 = 1.3225.
-const CAMERA_FOV_MULT = 1.3225;
+// The camera had already been widened twice by 15%. Widen the current view
+// another 30% multiplicatively so the requested change preserves that baseline.
+const CAMERA_FOV_MULT = 1.3225 * 1.3;
 const GROUND_Y = WORLD_H - 150 * WORLD_SCALE;   // sea surface / crash boundary
 // The visible world continues beyond the playable rectangle so the city and
 // ocean never terminate on a hard vertical seam. Aircraft may enter this fog
@@ -35,7 +35,7 @@ const HIGH_SPEED_MAX_SPEED = 900;
 // speed for agility, while a straight run can naturally reach sonic speed.
 const STRAIGHT_FLIGHT_TURN_LIMIT = 0.55;
 const STRAIGHT_FLIGHT_PROPULSION = 285;
-const HIGH_SPEED_FOV_MULT = 1.518;
+const HIGH_SPEED_FOV_MULT = 1.518 * 1.3;
 const HIGH_SPEED_FOV_SMOOTHING = 5.5;
 const SONIC_BOOM_COOLDOWN_MS = 1800;
 const TURN_ACCEL = 9.5, TURN_DAMPING = 3.8;
@@ -49,6 +49,9 @@ const BULLET_FALLOFF_DISTANCE = 3000;
 const BULLET_MIN_DAMAGE_MULT = 0.24;
 const BULLET_SIGHT_TIME = .42;
 const HIT_RADIUS = 30, BULLET_RADIUS = 1.65;
+const PLANE_COLLISION_RADIUS = 34;
+const PLANE_COLLISION_RESTITUTION = 0.28;
+const PLANE_COLLISION_DAMAGE_COOLDOWN_MS = 700;
 
 // Gun heat: ultra-fast RPM, but holding fire builds heat until it locks out.
 const HEAT_MAX = 300, HEAT_PER_SHOT = 5, HEAT_DECAY = 26, HEAT_DECAY_OVERHEAT = 44;
@@ -255,6 +258,8 @@ const gunfireAudioByPlayer = new Map();
 const GUN_AUDIO_RELEASE_MS = 150;
 let screenShake = 0, recoilKick = 0, lastIncomingLock = false;
 let currentCameraFovMult = CAMERA_FOV_MULT;
+let fpsCounterEl = null, fpsWindowStart = null, fpsWindowFrames = 0;
+const planeCollisionDamageAt = new Map();
 let selectedMapId = 'city';
 let activeMapId = 'city';
 let graphicsQualityMode = 'auto';
@@ -1461,7 +1466,7 @@ function freshPlayerState(id, name) {
   const angle = rand(0, Math.PI * 2);
   return {
     id, name, connected: true, alive: true,
-    x: p.x, y: p.y, angle,
+    x: p.x, y: p.y, angle, collisionPrevX: p.x, collisionPrevY: p.y,
     tx: p.x, ty: p.y, tangle: angle, synced: false, // network target for smoothing remote planes
     health: MAX_HEALTH, score: 0, kills: 0, deaths: 0,
     boost: BOOST_MAX, heat: 0, overheated: false, fireTimer: 0,
@@ -1578,6 +1583,7 @@ function spawnBotSquadron(count = botCount) {
 function respawnLocal() {
   const p = randomSpawnPoint();
   myState.x = p.x; myState.y = p.y;
+  myState.collisionPrevX = p.x; myState.collisionPrevY = p.y;
   myState.angle = rand(0, Math.PI * 2);
   myState.health = MAX_HEALTH;
   myState.heat = 0;
@@ -1605,6 +1611,7 @@ function respawnLocal() {
 function respawnBot(bot) {
   const p = randomSpawnPoint();
   bot.x = p.x; bot.y = p.y; bot.angle = rand(0, Math.PI * 2);
+  bot.collisionPrevX = p.x; bot.collisionPrevY = p.y;
   bot.health = MAX_HEALTH; bot.alive = true; bot.connected = true;
   bot.falling = false; bot.stalled = false; bot.deathKiller = null;
   bot.speed = PLANE_SPEED; bot.verticalVelocity = 0; bot.turnVelocity = 0;
@@ -2896,6 +2903,7 @@ function respawnNetworkPlayer(p) {
   ensureNetworkPlayerState(p);
   const point = randomSpawnPoint();
   p.x = point.x; p.y = point.y; p.angle = rand(0, Math.PI * 2);
+  p.collisionPrevX = point.x; p.collisionPrevY = point.y;
   p.health = MAX_HEALTH; p.alive = true; p.connected = true;
   p.falling = false; p.stalled = false; p.deathKiller = null;
   p.speed = PLANE_SPEED; p.verticalVelocity = 0; p.turnVelocity = 0;
@@ -3109,6 +3117,166 @@ function applyHostDamage(target, amount, killerId) {
   }
 }
 
+function planeCanCollide(p) {
+  return !!p && p.connected !== false && p.alive !== false && !p.falling &&
+    Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.angle) &&
+    Number.isFinite(p.speed);
+}
+
+function capturePlaneCollisionOrigins() {
+  if (!isHost && !botMode) return;
+  Object.values(players).forEach(p => {
+    if (!planeCanCollide(p)) return;
+    p.collisionPrevX = p.x;
+    p.collisionPrevY = p.y;
+  });
+}
+
+function planeCollisionSweep(a, b) {
+  const diameter = PLANE_COLLISION_RADIUS * 2;
+  let ax = a.x, ay = a.y, bx = b.x, by = b.y, t = 1;
+  let dx = bx - ax, dy = by - ay;
+  let distance = Math.hypot(dx, dy);
+  let swept = false;
+
+  if (distance > diameter) {
+    const a0x = Number.isFinite(a.collisionPrevX) ? a.collisionPrevX : a.x;
+    const a0y = Number.isFinite(a.collisionPrevY) ? a.collisionPrevY : a.y;
+    const b0x = Number.isFinite(b.collisionPrevX) ? b.collisionPrevX : b.x;
+    const b0y = Number.isFinite(b.collisionPrevY) ? b.collisionPrevY : b.y;
+    const rx = b0x - a0x, ry = b0y - a0y;
+    const vx = (b.x - b0x) - (a.x - a0x), vy = (b.y - b0y) - (a.y - a0y);
+    const qa = vx * vx + vy * vy;
+    const qb = 2 * (rx * vx + ry * vy);
+    const qc = rx * rx + ry * ry - diameter * diameter;
+    const discriminant = qb * qb - 4 * qa * qc;
+    if (qa < 1e-6 || discriminant < 0) return null;
+    const firstContact = (-qb - Math.sqrt(discriminant)) / (2 * qa);
+    if (firstContact < 0 || firstContact > 1) return null;
+    t = firstContact;
+    ax = a0x + (a.x - a0x) * t;
+    ay = a0y + (a.y - a0y) * t;
+    bx = b0x + (b.x - b0x) * t;
+    by = b0y + (b.y - b0y) * t;
+    dx = bx - ax; dy = by - ay;
+    distance = Math.hypot(dx, dy);
+    swept = true;
+  }
+
+  if (distance < 1e-4) {
+    const direction = String(a.id) < String(b.id) ? 1 : -1;
+    dx = direction; dy = 0; distance = 1;
+  }
+  return { ax, ay, bx, by, nx: dx / distance, ny: dy / distance,
+    distance, diameter, t, swept };
+}
+
+function planeWorldVelocity(p) {
+  const speed = Number.isFinite(p.speed) ? p.speed : 0;
+  return {
+    x: Math.cos(p.angle) * speed,
+    y: Math.sin(p.angle) * speed + (Number.isFinite(p.verticalVelocity) ? p.verticalVelocity : 0)
+  };
+}
+
+function storePlaneWorldVelocity(p, velocity) {
+  const speed = Math.hypot(velocity.x, velocity.y);
+  const limitedSpeed = Math.min(HIGH_SPEED_MAX_SPEED, speed);
+  const scale = speed > 0 ? limitedSpeed / speed : 0;
+  const vx = velocity.x * scale, vy = velocity.y * scale;
+  p.speed = limitedSpeed;
+  if (limitedSpeed > 0.01) p.angle = Math.atan2(vy, vx);
+  p.verticalVelocity = 0;
+  p.highSpeedActive = limitedSpeed >= HIGH_SPEED_THRESHOLD;
+  return { x: vx, y: vy };
+}
+
+function enforcePlaneCollisionWorld(p, fromX, fromY, now) {
+  if (!planeCanCollide(p)) return;
+  if (activeMapId === 'canyon') {
+    const collision = canyonFirstRockCollision(fromX, fromY, p.x, p.y, CANYON_PLANE_COLLISION_RADIUS);
+    if (collision) { crashPlaneIntoCanyon(p, collision); return; }
+  }
+  if (updateBoundaryState(p, now)) {
+    if (samePlayerId(p.id, myId)) beginDeathFall(null, 'Boundary lost — aircraft disabled');
+    else if (p.isBot) beginBotDeathFall(p, null);
+    else beginRemoteDeathFall(p, null, 'Boundary lost — aircraft disabled');
+    return;
+  }
+  if (activeMapId !== 'canyon' && p.y >= GROUND_Y - 12) {
+    if (samePlayerId(p.id, myId)) crashLocal('You hit the sea.');
+    else if (p.isBot) beginBotDeathFall(p, null);
+    else beginRemoteDeathFall(p, null, 'You hit the sea.');
+  }
+}
+
+function resolvePlaneCollisions(now = performance.now(), dtSec = 0) {
+  if (!isHost && !botMode) return;
+  const active = Object.values(players).filter(planeCanCollide);
+  for (let i = 0; i < active.length; i++) {
+    const a = active[i];
+    for (let j = i + 1; j < active.length; j++) {
+      if (!planeCanCollide(a)) break;
+      const b = active[j];
+      if (!planeCanCollide(b)) continue;
+      const contact = planeCollisionSweep(a, b);
+      if (!contact) continue;
+
+      const oldAX = a.x, oldAY = a.y, oldBX = b.x, oldBY = b.y;
+      const { nx, ny, distance, diameter, swept, t } = contact;
+      if (swept) {
+        // Put fast crossing aircraft at first contact, then spend the unused
+        // frame time moving them apart using the post-impact velocity.
+        a.x = contact.ax - nx * .25; a.y = contact.ay - ny * .25;
+        b.x = contact.bx + nx * .25; b.y = contact.by + ny * .25;
+      } else if (distance < diameter) {
+        const correction = (diameter - distance + .5) * .5;
+        a.x -= nx * correction; a.y -= ny * correction;
+        b.x += nx * correction; b.y += ny * correction;
+      }
+
+      const velocityA = planeWorldVelocity(a), velocityB = planeWorldVelocity(b);
+      const relativeNormal = (velocityB.x - velocityA.x) * nx + (velocityB.y - velocityA.y) * ny;
+      const closingSpeed = Math.max(0, -relativeNormal);
+      const impactX = (contact.ax + contact.bx) * .5;
+      const impactY = (contact.ay + contact.by) * .5;
+      if (closingSpeed > 0) {
+        const impulse = -(1 + PLANE_COLLISION_RESTITUTION) * relativeNormal * .5;
+        velocityA.x -= impulse * nx; velocityA.y -= impulse * ny;
+        velocityB.x += impulse * nx; velocityB.y += impulse * ny;
+        const resolvedA = storePlaneWorldVelocity(a, velocityA);
+        const resolvedB = storePlaneWorldVelocity(b, velocityB);
+        const remaining = swept ? Math.max(0, dtSec * (1 - t)) : 0;
+        if (remaining) {
+          a.x += resolvedA.x * remaining; a.y += resolvedA.y * remaining;
+          b.x += resolvedB.x * remaining; b.y += resolvedB.y * remaining;
+        }
+      }
+
+      if (closingSpeed >= 250) {
+        const key = [String(a.id), String(b.id)].sort().join(':');
+        const lastHit = planeCollisionDamageAt.get(key) || 0;
+        if (!planeCollisionDamageAt.has(key) || now - lastHit >= PLANE_COLLISION_DAMAGE_COOLDOWN_MS) {
+          planeCollisionDamageAt.set(key, now);
+          const damage = Math.round(clamp((closingSpeed - 200) * .04, 1, 40));
+          applyHostDamage(a, damage, b.id);
+          applyHostDamage(b, damage, a.id);
+          spawnExplosion(impactX, impactY, 'spark');
+          if (!botMode) broadcast({ type: 'effect', kind: 'spark', x: impactX, y: impactY });
+        }
+      }
+
+      enforcePlaneCollisionWorld(a, oldAX, oldAY, now);
+      enforcePlaneCollisionWorld(b, oldBX, oldBY, now);
+    }
+  }
+  // The map is small (at most 28 pairs); pruning also prevents stale keys
+  // after pilots disconnect and later reuse their slot.
+  for (const [key, hitAt] of planeCollisionDamageAt) {
+    if (now - hitAt > PLANE_COLLISION_DAMAGE_COOLDOWN_MS * 8) planeCollisionDamageAt.delete(key);
+  }
+}
+
 function updateHostCombat() {
   if (!isHost || botMode || !started) return;
   const now = performance.now();
@@ -3199,6 +3367,7 @@ function resetForNewSession() {
   lastProjectileSnapshotAt = 0;
   bullets = []; missiles = []; bombs = []; shrapnels = []; flares = [];
   explosions = []; specialEffects = []; seenImpactKeys.clear();
+  planeCollisionDamageAt.clear();
   highSpeedWake.reset();
   stopWaterWakeAudio();
   stopGunfireAudio();
@@ -3467,7 +3636,7 @@ function applyRemoteState(p, data) {
   p.stalled = !!data.stalled;
   p.boosting = !!data.boosting;
   if (data.roll != null) p.roll = data.roll;
-  ['speed', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'borderEnteredAt', 'borderRemaining'].forEach(key => {
+  ['speed', 'verticalVelocity', 'heat', 'overheated', 'boost', 'missiles', 'bombs', 'flares', 'score', 'kills', 'deaths', 'borderEnteredAt', 'borderRemaining'].forEach(key => {
     if (data[key] !== undefined) p[key] = data[key];
   });
   // performance.now() has a different origin in each browser. Never compare
@@ -3546,7 +3715,7 @@ function handleState(fromId, data) {
   const p = players[fromId];
   if (p) applyRemoteState(p, data);
   Object.entries(connections).forEach(([id, c]) => {
-    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, turnVelocity: data.turnVelocity, health: data.health, alive: data.alive, falling: data.falling, stalled: data.stalled, boosting: data.boosting, roll: data.roll });
+    if (Number(id) !== fromId && c.open) c.send({ type: 'state', from: fromId, x: data.x, y: data.y, angle: data.angle, turnVelocity: data.turnVelocity, verticalVelocity: data.verticalVelocity, health: data.health, alive: data.alive, falling: data.falling, stalled: data.stalled, boosting: data.boosting, roll: data.roll });
   });
 }
 
@@ -3559,6 +3728,7 @@ function broadcastAuthoritativeSnapshot() {
     .filter(p => p.connected !== false)
     .map(p => ({
       from: p.id, x: p.x, y: p.y, angle: p.angle, turnVelocity: p.turnVelocity,
+      verticalVelocity: p.verticalVelocity,
       health: p.health, alive: p.alive, falling: p.falling, stalled: p.stalled,
       boosting: p.boosting, roll: p.roll, speed: p.speed, heat: p.heat,
       overheated: p.overheated, boost: p.boost, missiles: p.missiles,
@@ -4578,8 +4748,23 @@ function drawPlane(ctx, p, isMe, now) {
   ctx.fillRect(p.x - w / 2, p.y - 28, w * frac, h);
 }
 
-function drawBullet(ctx, b) {
-  const visible = clamp(1 - (performance.now() - (b.visualBorn || 0)) / 300, 0, 1);
+function isWorldPointVisible(x, y, camX, camY, viewW, viewH, padding = 0) {
+  return Number.isFinite(x) && Number.isFinite(y) &&
+    x >= camX - padding && x <= camX + viewW + padding &&
+    y >= camY - padding && y <= camY + viewH + padding;
+}
+
+function drawVisibleWorldItems(items, ctx, now, camX, camY, viewW, viewH, padding, drawItem) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item || !isWorldPointVisible(item.x, item.y, camX, camY, viewW, viewH, padding)) continue;
+    drawItem(ctx, item, now);
+  }
+}
+
+function drawBullet(ctx, b, now = performance.now()) {
+  if (!b || !Number.isFinite(b.x) || !Number.isFinite(b.y) || !Number.isFinite(b.angle)) return;
+  const visible = clamp(1 - (now - (b.visualBorn || 0)) / 300, 0, 1);
   const bx = b.x + (b.renderDx || 0) * visible;
   const by = b.y + (b.renderDy || 0) * visible;
   const angle = b.angle + (b.renderAngle || 0) * visible;
@@ -4588,29 +4773,29 @@ function drawBullet(ctx, b) {
   ctx.lineWidth = 1; ctx.lineCap = 'round';
   const tail = 9;
   ctx.beginPath(); ctx.moveTo(bx - Math.cos(angle) * tail, by - Math.sin(angle) * tail); ctx.lineTo(bx, by); ctx.stroke();
-  ctx.restore();
-  ctx.save();
-  ctx.translate(bx, by);
-  ctx.rotate(angle);
-  ctx.shadowColor = b.ownerId === myId ? '#fff59d' : '#ff6548'; ctx.shadowBlur = 5;
+  ctx.shadowColor = b.ownerId === myId ? '#fff59d' : '#ff6548';
+  ctx.shadowBlur = isReducedGraphics() ? 0 : 5;
   ctx.fillStyle = b.ownerId === myId ? '#fffbd0' : '#ff987d';
   ctx.beginPath();
-  ctx.ellipse(0, 0, BULLET_RADIUS * 2.2, BULLET_RADIUS, 0, 0, Math.PI * 2);
+  ctx.ellipse(bx, by, BULLET_RADIUS * 2.2, BULLET_RADIUS, angle, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
-function drawMissile(ctx, m) {
+function drawMissile(ctx, m, now = performance.now()) {
+  if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y) || !Number.isFinite(m.angle)) return;
   const incoming = m.targetId === myId && m.ownerId !== myId && m.ignited;
   if (incoming) {
-    const pulse = 22 + Math.sin(performance.now() / 90) * 5;
+    const pulse = 22 + Math.sin(now / 90) * 5;
     ctx.save(); ctx.globalAlpha = .28; ctx.strokeStyle = '#ff4558'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(m.x, m.y, pulse, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
   }
-  for (let i = 0; i < m.trail.length; i++) {
-    const t = m.trail[i];
-    const frac = (i + 1) / (m.trail.length + 1);
+  const trail = Array.isArray(m.trail) ? m.trail : [];
+  for (let i = 0; i < trail.length; i++) {
+    const t = trail[i];
+    if (!t || !Number.isFinite(t.x) || !Number.isFinite(t.y)) continue;
+    const frac = (i + 1) / (trail.length + 1);
     ctx.fillStyle = m.ignited
       ? `rgba(255,${Math.round(115 + frac * 105)},${Math.round(48 + frac * 90)},${frac * .52})`
       : `rgba(184,203,211,${frac * .2})`;
@@ -4623,7 +4808,7 @@ function drawMissile(ctx, m) {
   ctx.translate(m.x, m.y);
   ctx.rotate(m.angle);
   if (m.ignited) {
-    const flicker = .82 + Math.sin(performance.now() * .055 + (Number(m.ownerId) || 0)) * .12;
+    const flicker = .82 + Math.sin(now * .055 + (Number(m.ownerId) || 0)) * .12;
     ctx.globalAlpha = flicker;
     ctx.shadowColor = m.decoyed ? '#c2d1d6' : '#ff8a3d'; ctx.shadowBlur = m.decoyed ? 7 : 16;
     ctx.fillStyle = m.decoyed ? '#d5e0e4' : '#ffd073';
@@ -5615,11 +5800,19 @@ function render(now) {
   drawGround(ctx, camX - BORDER_FOG_DEPTH - 180, camX + viewW + BORDER_FOG_DEPTH + 180);
   highSpeedWake.draw(ctx);
 
-  flares.forEach(f => drawFlare(ctx, f, now));
-  bullets.forEach(b => drawBullet(ctx, b));
-  missiles.forEach(m => drawMissile(ctx, m));
-  bombs.forEach(b => drawBomb(ctx, b));
-  shrapnels.forEach(s => drawShrapnel(ctx, s));
+  // Projectiles remain in the simulation until their real hit/cleanup rules
+  // fire, but drawing far outside the camera only burns canvas work. Keep a
+  // small margin for each shape so effects at the screen edge stay complete.
+  drawVisibleWorldItems(flares, ctx, now, camX, camY, viewW, viewH, 32, drawFlare);
+  drawVisibleWorldItems(bullets, ctx, now, camX, camY, viewW, viewH, 20, drawBullet);
+  missiles.forEach(m => {
+    const bodyVisible = isWorldPointVisible(m?.x, m?.y, camX, camY, viewW, viewH, 32);
+    const trailVisible = !bodyVisible && Array.isArray(m?.trail) && m.trail.some(point =>
+      isWorldPointVisible(point?.x, point?.y, camX, camY, viewW, viewH, 6));
+    if (bodyVisible || trailVisible) drawMissile(ctx, m, now);
+  });
+  drawVisibleWorldItems(bombs, ctx, now, camX, camY, viewW, viewH, 32, drawBomb);
+  drawVisibleWorldItems(shrapnels, ctx, now, camX, camY, viewW, viewH, 12, drawShrapnel);
 
   Object.values(players).forEach(p => {
     if (p.id === myId) return;
@@ -5629,7 +5822,10 @@ function render(now) {
   });
   drawPlane(ctx, myState, true, now);
 
-  explosions.forEach(e => drawExplosion(ctx, e, now));
+  explosions.forEach(e => {
+    const padding = FX[e?.kind]?.r || 0;
+    if (isWorldPointVisible(e?.x, e?.y, camX, camY, viewW, viewH, padding)) drawExplosion(ctx, e, now);
+  });
   specialEffects.forEach(e => { if (e && typeof e.draw === 'function') e.draw(ctx); });
   drawStormVisibility(ctx, camX, camY, viewW, viewH);
   // Cloud banks remain the only foreground concealment layer.
@@ -5782,6 +5978,8 @@ function beginLocalGame() {
   menuFightFrame = 0;
   if (menuFightCanvas) menuFightCanvas.style.display = 'none';
   lastTime = 0; lastRenderAt = 0; lastHudUpdateAt = 0;
+  fpsWindowStart = null; fpsWindowFrames = 0;
+  if (fpsCounterEl) fpsCounterEl.textContent = 'FPS --';
   graphicsProbeMs = 0; graphicsProbeFrames = 0; graphicsRecoveryMs = 0;
   resetAllInput();
   menu.style.display = 'none'; gameArea.style.display = 'block';
@@ -5822,6 +6020,22 @@ function loop(ts) {
   }
 }
 
+function updateFpsCounter(ts) {
+  if (!fpsCounterEl || !Number.isFinite(ts)) return;
+  if (fpsWindowStart === null) {
+    fpsWindowStart = ts;
+    fpsWindowFrames = 0;
+    return;
+  }
+  fpsWindowFrames++;
+  const elapsed = ts - fpsWindowStart;
+  if (elapsed >= 500) {
+    fpsCounterEl.textContent = 'FPS ' + Math.round(fpsWindowFrames * 1000 / elapsed);
+    fpsWindowStart = ts;
+    fpsWindowFrames = 0;
+  }
+}
+
 function loopFrame(ts) {
   // A host-loss reset intentionally clears myState and stops the old sortie.
   // Exit before HUD/physics code touches the cleared state; a new match will
@@ -5834,11 +6048,13 @@ function loopFrame(ts) {
   const dtSec = dt / 1000;
   screenShake = Math.max(0, screenShake - dtSec * 34);
   recoilKick = Math.max(0, recoilKick - dtSec * 28);
+  if (isHost || botMode) capturePlaneCollisionOrigins();
   if (isHost || botMode) updateLocalPlane(dtSec, keysHeld);
   // Joiner input is sent by its own timer, independent of rendering.
   if (isNetworkClient()) updateClientVisualPlane(dtSec);
   updateNetworkPlayers(dtSec, ts);
   updateBots(dtSec, ts);
+  if (isHost || botMode) resolvePlaneCollisions(ts, dtSec);
   const fovTarget = myState && myState.speed >= HIGH_SPEED_THRESHOLD ? HIGH_SPEED_FOV_MULT : CAMERA_FOV_MULT;
   currentCameraFovMult += (fovTarget - currentCameraFovMult) * clamp(dtSec * HIGH_SPEED_FOV_SMOOTHING, 0, 1);
   updateEngineAudio();
@@ -5902,6 +6118,7 @@ function loopFrame(ts) {
     const renderInterval = 1000 / MAX_GAME_RENDER_FPS;
     lastRenderAt += Math.max(1, Math.floor((ts - lastRenderAt) / renderInterval)) * renderInterval;
     render(ts);
+    updateFpsCounter(ts);
   }
   requestAnimationFrame(loop);
 }
@@ -5948,6 +6165,7 @@ window.addEventListener('DOMContentLoaded', () => {
   flareCountEl = document.getElementById('flareCount');
   lockWarningEl = document.getElementById('lockWarning');
   networkStatusEl = document.getElementById('networkStatus');
+  fpsCounterEl = document.getElementById('fpsCounter');
   lbListEl = document.getElementById('lbList');
   killFeedEl = document.getElementById('killFeed');
   respawnOverlay = document.getElementById('respawnOverlay');

@@ -39,3 +39,5 @@ body:before,body:after{content:"";position:fixed;pointer-events:none;z-index:0}b
 #speedometer{bottom:198px}
 #networkStatus{bottom:178px}
 @media(max-width:700px){#minimap{right:12px;bottom:14px;width:min(250px,calc(100vw - 24px))}#speedometer{right:12px;bottom:188px}#networkStatus{right:12px;bottom:168px}}
+#fpsCounter{position:absolute;top:137px;right:24px;z-index:3;padding:5px 8px;border:1px solid rgba(165,220,214,.18);border-radius:5px;background:rgba(7,20,29,.64);color:rgba(210,240,236,.76);font:10px 'Space Mono',monospace;letter-spacing:.7px;pointer-events:none;user-select:none}
+@media(max-width:700px){#fpsCounter{top:124px;right:12px;font-size:9px}}
