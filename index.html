@@ -1,128 +1,18 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Wings Arena — multiplayer and bot sky battle</title>
-<link rel="stylesheet" href="style.css" />
-</head>
-<body>
-
-  <canvas id="menuDogfight" aria-hidden="true"></canvas>
-
-  <div id="menu">
-    <div class="brand-mark"><span></span><span></span><span></span></div>
-    <div class="eyebrow">SKYLINE NETWORK // ONLINE</div>
-    <h1>WINGS<span>ARENA</span></h1>
-    <p class="tagline">Rise above the clouds. Outfly the lobby.</p>
-    <div class="feature-row"><span>✦ 8 pilots</span><span>✦ LIVE DOGFIGHTS</span><span>✦ ZERO INSTALL</span></div>
-
-    <div id="chooseRole">
-      <label class="field-label" for="nameInput">CALLSIGN</label>
-      <input id="nameInput" maxlength="14" placeholder="ENTER YOUR CALLSIGN" autocomplete="off" />
-      <button id="hostBtn"><span>HOST A FLIGHT</span><b>→</b></button>
-      <button id="botsBtn"><span>SKIRMISH VS BOTS</span><b>→</b></button>
-      <label class="field-label" for="mapSelect">ARENA MAP</label>
-      <select id="mapSelect" aria-label="Arena map">
-        <option value="city">NEON CITY // DEFAULT</option>
-        <option value="canyon">RED CANYON // CAVE NETWORK</option>
-        <option value="storm">STORM FRONT // SQUALL</option>
-        <option value="islands">ISLAND CHAIN</option>
-      </select>
-      <label class="field-label" for="graphicsQualitySelect">GRAPHICS QUALITY</label>
-      <select id="graphicsQualitySelect" aria-label="Graphics quality">
-        <option value="auto" selected>AUTO // ADAPT IF FPS DROPS</option>
-        <option value="low">LOW // SCHOOL COMPUTER</option>
-        <option value="high">HIGH // FULL DETAIL</option>
-      </select>
-      <p class="graphics-quality-note">Auto lowers visual detail only if frame rate stays low.</p>
-      <label class="bot-count-setting" for="botCountInput"><span>SKIRMISH BOTS</span><output id="botCountValue">5</output></label>
-      <input id="botCountInput" class="bot-count-slider" type="range" min="1" max="7" value="5" step="1" aria-label="Number of skirmish bots" />
-      <div id="joinBox">
-        <input id="hostIdInput" placeholder="ROOM CODE" autocomplete="off" />
-        <button id="joinBtn"><span>JOIN</span><b>→</b></button>
-      </div>
-      <p class="microcopy">Share your room code with your squadron.</p>
-    </div>
-
-    <div id="lobby" style="display:none;">
-      <div class="lobby-head"><span class="status-dot"></span><p id="status"></p></div>
-      <ul id="lobbyList"></ul>
-      <button id="startBtn" style="display:none;"><span>LAUNCH SORTIE</span><b>→</b></button>
-      <p class="hint" id="waitHint">Waiting for the flight leader…</p>
-    </div>
-    <div class="menu-footer"><span>WINGS ARENA v1.53.10</span><span>VECTOR COCKPIT // BEST WITH MOUSE + KEYBOARD</span></div>
-  </div>
-
-  <div id="gameArea" style="display:none;">
-    <canvas id="sky"></canvas>
-
-    <div id="hud">
-      <div id="bars">
-        <div class="bar-row">
-          <span class="bar-label">HP</span>
-          <div class="bar-track"><div id="hpFill" class="bar-fill hp"></div></div>
-        </div>
-        <div class="bar-row">
-          <span class="bar-label">BOOST ∞</span>
-          <div class="bar-track"><div id="boostFill" class="bar-fill boost"></div></div>
-        </div>
-        <div class="bar-row">
-          <span class="bar-label">HEAT <small id="heatValue">0/300</small></span>
-          <div class="bar-track"><div id="heatFill" class="bar-fill heat"></div></div>
-        </div>
-      </div>
-
-      <div id="scorePanel">
-        <div class="panel-kicker">FLIGHT STATUS</div>
-        <div class="score-line"><span>SCORE</span><strong id="scoreVal">0</strong></div>
-        <div class="score-line"><span>KILLS</span><strong id="killsVal">0</strong></div>
-      </div>
-
-      <div id="weaponPanel">
-        <div class="panel-kicker">LOADOUT</div>
-        <div id="missileCount"><i class="weapon-icon missile-icon"></i> MISSILES <b>4/4</b></div>
-        <div id="bombCount"><i class="weapon-icon bomb-icon"></i> BOMBS <b>2/2</b></div>
-        <div id="flareCount"><i class="weapon-icon flare-icon"></i> FLARES <b>3/3</b></div>
-      </div>
-
-      <div id="lockWarning" style="display:none;">⚠ MISSILE LOCK — PRESS F TO FLARE!</div>
-      <div id="boundaryWarning" style="display:none;" role="status" aria-live="assertive">
-        <span class="boundary-kicker">⚠ OUTSIDE ARENA</span>
-        <strong>RETURN TO THE BATTLE AREA</strong>
-        <small>BOUNDARY FAILURE IN <b id="boundaryTimer">5.0</b>s</small>
-      </div>
-      <div id="networkStatus">P2P // OFFLINE</div>
-      <div id="fpsCounter" aria-label="Rendered frames per second">FPS --</div>
-
-      <div id="leaderboard">
-        <h4><span>LIVE RANKING</span><em>PTS</em></h4>
-        <ol id="lbList"></ol>
-      </div>
-
-      <div id="speedometer">
-        <div class="panel-kicker">AIRSPEED</div>
-        <div class="speed-readout"><strong id="speedValue">285</strong><span>U/S</span></div>
-        <div class="speed-track"><div id="speedFill"></div></div>
-        <div class="speed-dial"><i id="speedNeedle"></i><b></b></div>
-        <div class="speed-scale"><span>MIN</span><span>MAX</span></div>
-      </div>
-
-      <div id="killFeed"></div>
-
-      <canvas id="minimap" width="600" height="320" role="img" aria-label="Tactical radar showing arena and pilot positions"></canvas>
-
-      <div id="respawnOverlay" style="display:none;">
-        <div class="respawn-kicker">SIGNAL LOST</div>
-        <div id="respawnMsg">Shot down!</div>
-        <div id="respawnTimer"></div>
-      </div>
-    </div>
-  <div id="gameVersion">WINGS ARENA // v1.53.10</div>
-  </div>
-  <div class="controls"><span><b>MOUSE</b> steer / aim</span><span><b>W / ↑</b> boost</span><span><b>S / SHIFT</b> air-brake</span><span><b>Q / E</b> barrel roll</span><span><b>CLICK / SPACE</b> cannon</span><span><b>RIGHT CLICK</b> fire missile</span><span><b>B</b> bomb</span><span><b>F</b> flare</span></div>
-
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <script src="game.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#141d28" />
+    <meta
+      name="description"
+      content="Build an illustrated elemental chess army. Play private PeerJS matches with friends or challenge the bot."
+    />
+    <title>Chess Evolved</title>
+    <script type="module" crossorigin src="./game.js?v=8.0.0"></script>
+    <link rel="stylesheet" crossorigin href="./game.css?v=8.0.0">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
 </html>
